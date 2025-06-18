@@ -1,0 +1,47 @@
+host := "192.168.188.2"
+version := "$(curl --silent https://api.github.com/repos/openwrt/openwrt/releases/latest | jq -r '.. .name? // empty | gsub(\"^v\"; \"\")')"
+sysupgrade_url := "https://downloads.openwrt.org/releases/" + version + "/targets/mediatek/mt7622/openwrt-" + version + "-mediatek-mt7622-linksys_e8450-ubi-squashfs-sysupgrade.itb"
+
+ssh +command:
+  ssh "root@{{host}}" "{{command}}"
+
+eval-config:
+  nix run --builders '' "./#example"
+
+# apply configuration to router
+apply:
+  #!/usr/bin/env bash
+  set -eux -o pipefail
+  # Set unix root password
+  password=$(sops -d --extract '["root_password"]' secrets.yml)
+  echo -e "$password\n$password" | just ssh "passwd root"
+
+  # Set root ssh keys
+  just ssh "mkdir -p /etc/dropbear/ && umask 177 && cat > /etc/dropbear/authorized_keys" <<EOF
+  ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKbBp2dH2X3dcU1zh+xW3ZsdYROKpJd3n13ssOP092qE joerg@turingmachine
+  EOF
+
+  # Apply uci configuration
+  just eval-config | just ssh 'uci batch; uci commit'
+
+  # Set up internet after a firmware reset
+  if ! just ssh "ip link | grep -q pppoe-wan"; then
+      just ssh "/etc/init.d/network restart"
+      # wait for pppoe to recover
+      while ! ping -c1 -W 1 8.8.8.8; do :; done
+  fi
+
+  # Install web interface and other packages
+  just ssh "opkg update && opkg install luci tcpdump tinc rsync ddns-scripts-nsupdate iperf3 luci-mod-rpc prometheus-node-exporter-lua prometheus-node-exporter-lua-openwrt"
+
+  just ssh "if [ ! -f /etc/tinc/retiolum/rsa_key.priv ]; then mkdir -p /etc/tinc/retiolum; tinc -n retiolum generate-keys; /etc/init.d/tinc start; fi"
+  rsync -e ssh -ac /etc/tinc/retiolum/hosts "root@{{host}}:/etc/tinc/retiolum"
+
+# perform router upgrade
+upgrade:
+  wget "{{sysupgrade_url}}" -O openwrt.sysupgrade.itb
+  rsync -e ssh -ac openwrt.sysupgrade.itb "root@{{host}}:/tmp/openwrt.sysupgrade.itb"
+  just ssh "sysupgrade -v /tmp/openwrt.sysupgrade.itb" || true
+  # wait for internet to come back
+  while ! ping -c1 -W1 8.8.8.8; do sleep 2; done
+  just apply
