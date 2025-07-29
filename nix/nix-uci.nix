@@ -13,11 +13,11 @@ buildPythonApplication {
     install ${../setup.py} $out/setup.py
   '';
 
-  meta = with lib; {
+  meta = {
     description = "Write openwrt's UCI configuration using nixos modules";
-    homepage = "https://github.com/Mic92/nix-uci";
-    license = licenses.mit;
-    maintainers = with maintainers; [ mic92 ];
-    platforms = platforms.unix;
+    homepage = "https://github.com/lonerOrz/openwrt-nix";
+    license = lib.licenses.mit;
+    maintainers = with lib.maintainers; [ lonerOrz ];
+    platforms = lib.platforms.unix;
   };
 }
