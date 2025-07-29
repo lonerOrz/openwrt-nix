@@ -17,7 +17,7 @@
       in
       {
         packages = {
-          inherit (uci) nix-uci writeUci;
+          inherit (uci) nix-uci;
         };
         # `nix run .#example` will output uci configuration
         apps.example = {
