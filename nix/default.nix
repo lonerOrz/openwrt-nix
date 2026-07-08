@@ -29,7 +29,7 @@ in
         ];
       };
       json = (formats.json { }).generate "uci.json" {
-        inherit (res.config.uci) settings secrets packages;
+        inherit (res.config.uci) settings secrets packages opkg;
       };
       sopsFiles = res.config.uci.secrets.sops.files;
     in

@@ -29,6 +29,12 @@ impl From<std::io::Error> for ConfigError {
 struct Root {
     settings: HashMap<String, HashMap<String, Section>>,
     packages: Option<Vec<String>>,
+    opkg: Option<Opkg>,
+}
+
+#[derive(Deserialize, Debug)]
+struct Opkg {
+    feeds: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -301,9 +307,26 @@ fn convert_file(path: &Path, secrets_dir: Option<&str>) -> Result<String, Config
     let mut output_buffer = String::with_capacity(4096);
     serialize_uci(&mut output_buffer, &root.settings, &secrets)?;
 
-    if let Some(pkgs) = &root.packages
-        && !pkgs.is_empty() {
-            writeln!(&mut output_buffer, "\nfor pkg in {}; do", pkgs.join(" ")).unwrap();
+    if let Some(opkg) = &root.opkg {
+        if let Some(feeds) = &opkg.feeds {
+            if !feeds.is_empty() {
+                writeln!(
+                    &mut output_buffer,
+                    "\ncat << 'EOF' > /etc/opkg/customfeeds.conf"
+                )
+                .unwrap();
+                for feed in feeds {
+                    writeln!(&mut output_buffer, "{}", feed).unwrap();
+                }
+                writeln!(&mut output_buffer, "EOF").unwrap();
+            }
+        }
+    }
+
+    if let Some(pkgs) = &root.packages {
+        if !pkgs.is_empty() {
+            writeln!(&mut output_buffer, "\nNEED_INSTALL=false").unwrap();
+            writeln!(&mut output_buffer, "for pkg in {}; do", pkgs.join(" ")).unwrap();
             writeln!(
                 &mut output_buffer,
                 "    if ! opkg list-installed \"$pkg\" >/dev/null 2>&1; then NEED_INSTALL=true; break; fi"
@@ -317,6 +340,7 @@ fn convert_file(path: &Path, secrets_dir: Option<&str>) -> Result<String, Config
             )
             .unwrap();
         }
+    }
 
     Ok(output_buffer)
 }

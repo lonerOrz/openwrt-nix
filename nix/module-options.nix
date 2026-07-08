@@ -15,5 +15,10 @@
       type = lib.types.listOf lib.types.str;
       description = "List of packages to install via opkg";
     };
+    opkg.feeds = lib.mkOption {
+      default = [ ];
+      type = lib.types.listOf lib.types.str;
+      description = "List of custom opkg feeds to write to /etc/opkg/customfeeds.conf";
+    };
   };
 }
