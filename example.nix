@@ -174,4 +174,23 @@
       ./secrets.yml
     ];
   };
+  uci.packages = [
+    "luci"
+    "tcpdump"
+    "tinc"
+    "rsync"
+    "htop"
+  ];
+  uci.opkg = {
+    feeds = [
+      "src/gz kiddin9 https://dl.openwrt.ai/packages/aarch64_cortex-a53/kiddin9"
+    ];
+    localPackages = [
+      "./packages/luci-app-nlbwmon_0.3-1_all.ipk"
+      "./packages/luci-i18n-nlbwmon-zh-cn_0.3-1_all.ipk"
+    ];
+  };
+  uci.sshKeys = [
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKbBp2dH2X3dcU1zh+xW3ZsdYROKpJd3n13ssOP092qE joerg@turingmachine"
+  ];
 }

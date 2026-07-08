@@ -18,10 +18,12 @@
       packages = forEachSystem (system: pkgs:
         let
           uci = pkgs.callPackage ./nix { };
+          config = uci.writeUci ./example.nix;
         in
         {
           nuci = uci.nuci;
           default = uci.nuci;
+          example-json = config.json;
         }
       );
 

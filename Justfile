@@ -26,6 +26,7 @@ test:
 	cargo run -- test/test_interpolate.json test/mock_secrets > /dev/null
 	cargo run -- test/test_interp2.json test/mock_secrets > /dev/null
 	cargo run -- test/test_unclosed.json > /dev/null
+	cargo run -- test/test_edge_cases.json > /dev/null
 	@echo "🚀 All local configuration tests passed successfully!"
 
 # Format both Rust and Nix files
@@ -54,37 +55,14 @@ dry-run:
 	@echo "🔍 Simulating configuration changes on root@{{host}}..."
 	@(just eval-config | sed 's/uci commit/uci changes/' && echo "uci revert") | just ssh 'sh -s'
 
-# Apply configuration to router
+# Apply configuration to router (SSH keys, password, packages, UCI, tinc — all hermetic)
 apply:
-	#!/usr/bin/env bash
-	set -eux -o pipefail
-
-	# Set root password
-	password=$(sops -d --extract '["root_password"]' secrets.yml)
-	echo -e "$password\n$password" | just ssh "passwd root"
-
-	# Set root SSH keys
-	just ssh "mkdir -p /etc/dropbear/ && umask 177 && cat > /etc/dropbear/authorized_keys" <<EOF
-	ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKbBp2dH2X3dcU1zh+xW3ZsdYROKpJd3n13ssOP092qE joerg@turingmachine
-	EOF
-
-	# Apply UCI configuration (now outputs a safe shell script)
-	just eval-config | just ssh 'sh -s'
-
-	# Set up internet after firmware reset
-	if ! just ssh "ip link | grep -q pppoe-wan"; then
-		just ssh "/etc/init.d/network restart"
-		while ! ping -c1 -W 1 8.8.8.8; do :; done
-	fi
-
-	# Setup tinc keys if needed
-	just ssh "if [ ! -f /etc/tinc/retiolum/rsa_key.priv ]; then mkdir -p /etc/tinc/retiolum; tinc -n retiolum generate-keys; /etc/init.d/tinc start; fi"
-	rsync -e ssh -ac /etc/tinc/retiolum/hosts "root@{{host}}:/etc/tinc/retiolum"
+	nix run .#example -- "root@{{host}}"
 
 # Upgrade router firmware
 upgrade:
 	wget "{{sysupgrade_url}}" -O openwrt.sysupgrade.itb
-	rsync -e ssh -ac openwrt.sysupgrade.itb "root@{{host}}:/tmp/openwrt.sysupgrade.itb"
+	ssh {{ssh_opts}} "root@{{host}}" "cat > /tmp/openwrt.sysupgrade.itb" < openwrt.sysupgrade.itb
 	just ssh "sysupgrade -v /tmp/openwrt.sysupgrade.itb" || true
 	while ! ping -c1 -W1 8.8.8.8; do sleep 2; done
 	just apply

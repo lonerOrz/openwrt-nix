@@ -20,5 +20,15 @@
       type = lib.types.listOf lib.types.str;
       description = "List of custom opkg feeds to write to /etc/opkg/customfeeds.conf";
     };
+    opkg.localPackages = lib.mkOption {
+      default = [ ];
+      type = lib.types.listOf lib.types.str;
+      description = "List of local .ipk file paths or fetched packages from Nix store to install";
+    };
+    sshKeys = lib.mkOption {
+      default = [ ];
+      type = lib.types.listOf lib.types.str;
+      description = "List of SSH authorized keys to deploy to the router";
+    };
   };
 }
