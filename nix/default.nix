@@ -3,9 +3,10 @@
   lib,
   writeShellScript,
   pkgs,
+  sops,
 }:
 let
-  nix-uci = pkgs.callPackage ./nix-uci.nix {
+  nuci = pkgs.callPackage ./nuci.nix {
     rustPlatform = pkgs.makeRustPlatform {
       cargo = pkgs.cargo;
       rustc = pkgs.rustc;
@@ -27,13 +28,27 @@ in
           configuration
         ];
       };
-      json = (formats.json { }).generate "uci.json" { inherit (res.config.uci) settings secrets; };
+      json = (formats.json { }).generate "uci.json" {
+        inherit (res.config.uci) settings secrets packages;
+      };
+      sopsFiles = res.config.uci.secrets.sops.files;
     in
     {
       inherit json;
       command = writeShellScript "uci-commands" ''
-        ${nix-uci}/bin/nix-uci "${json}"
+        set -euo pipefail
+
+        TMP_SECRETS=$(mktemp -d)
+        trap 'rm -rf "$TMP_SECRETS"' EXIT
+
+        ${lib.concatMapStringsSep "\n" (file: ''
+          if [ -f "${file}" ]; then
+            ${sops}/bin/sops -d --output-type json "${file}" > "$TMP_SECRETS/${builtins.hashString "sha256" (toString file)}.json"
+          fi
+        '') sopsFiles}
+
+        ${nuci}/bin/nuci "${json}" "$TMP_SECRETS"
       '';
     };
-  inherit nix-uci;
+  inherit nuci;
 }

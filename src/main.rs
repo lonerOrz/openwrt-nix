@@ -5,8 +5,6 @@ use std::fmt::Write as FmtWrite;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
-use std::process::Command;
-use std::thread;
 
 use serde::Deserialize;
 use serde_json::Map;
@@ -30,17 +28,7 @@ impl From<std::io::Error> for ConfigError {
 #[derive(Deserialize, Debug)]
 struct Root {
     settings: HashMap<String, HashMap<String, Section>>,
-    secrets: Option<Secrets>,
-}
-
-#[derive(Deserialize, Debug)]
-struct Secrets {
-    sops: Option<Sops>,
-}
-
-#[derive(Deserialize, Debug)]
-struct Sops {
-    files: Option<Vec<String>>,
+    packages: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -54,36 +42,57 @@ fn interpolate_secrets<'a>(
     option_val: &'a str,
     secrets: &HashMap<String, String>,
 ) -> Result<Cow<'a, str>, ConfigError> {
-    if !option_val.contains('@') {
+    if !option_val.contains('@') || secrets.is_empty() {
         return Ok(Cow::Borrowed(option_val));
     }
 
     let mut result = String::with_capacity(option_val.len());
     let mut last_pos = 0;
+    let mut current_pos = 0;
 
-    while let Some(start) = option_val[last_pos..].find('@') {
-        let absolute_start = last_pos + start;
-        result.push_str(&option_val[last_pos..absolute_start]);
+    while let Some(start_offset) = option_val[current_pos..].find('@') {
+        let start = current_pos + start_offset;
+        let remaining = &option_val[start + 1..];
 
-        let remaining = &option_val[absolute_start + 1..];
-        if let Some(end) = remaining.rfind('@') {
-            let secret_name = &remaining[..end];
+        if let Some(end_offset) = remaining.find('@') {
+            let end = start + 1 + end_offset;
+            let secret_name = &option_val[start + 1..end];
+
             if let Some(secret_val) = secrets.get(secret_name) {
+                result.push_str(&option_val[last_pos..start]);
                 result.push_str(secret_val);
+                last_pos = end + 1;
+                current_pos = end + 1;
             } else {
-                return Err(ConfigError(format!(
-                    "Tried to use secret {}, but no secret with this name specified.",
-                    secret_name
-                )));
+                let is_valid_identifier = !secret_name.is_empty()
+                    && secret_name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_');
+
+                if is_valid_identifier {
+                    return Err(ConfigError(format!(
+                        "Tried to use secret {}, but no secret with this name specified.",
+                        secret_name
+                    )));
+                } else {
+                    current_pos = start + 1;
+                }
             }
-            last_pos = absolute_start + 1 + end + 1;
         } else {
-            result.push('@');
-            last_pos = absolute_start + 1;
+            break;
         }
     }
-    result.push_str(&option_val[last_pos..]);
-    Ok(Cow::Owned(result))
+
+    if last_pos == 0 {
+        Ok(Cow::Borrowed(option_val))
+    } else {
+        result.push_str(&option_val[last_pos..]);
+        Ok(Cow::Owned(result))
+    }
+}
+
+fn escape_single_quotes(s: &str) -> String {
+    s.replace('\'', "'\\''")
 }
 
 fn serialize_option_val(
@@ -95,17 +104,35 @@ fn serialize_option_val(
     match val {
         Value::String(s) => {
             let interpolated = interpolate_secrets(s, secrets)?;
-            writeln!(writer, "set {}='{}'", key, interpolated).unwrap();
+            writeln!(
+                writer,
+                "set {}='{}'",
+                key,
+                escape_single_quotes(&interpolated)
+            )
+            .unwrap();
         }
         Value::Number(n) => {
             let s = n.to_string();
             let interpolated = interpolate_secrets(&s, secrets)?;
-            writeln!(writer, "set {}='{}'", key, interpolated).unwrap();
+            writeln!(
+                writer,
+                "set {}='{}'",
+                key,
+                escape_single_quotes(&interpolated)
+            )
+            .unwrap();
         }
         Value::Bool(b) => {
             let s = b.to_string();
             let interpolated = interpolate_secrets(&s, secrets)?;
-            writeln!(writer, "set {}='{}'", key, interpolated).unwrap();
+            writeln!(
+                writer,
+                "set {}='{}'",
+                key,
+                escape_single_quotes(&interpolated)
+            )
+            .unwrap();
         }
         Value::Array(arr) => {
             for item in arr {
@@ -117,18 +144,24 @@ fn serialize_option_val(
                         return Err(ConfigError(format!(
                             "{:?} is not a supported list value type",
                             item
-                        )))
+                        )));
                     }
                 };
                 let interpolated = interpolate_secrets(&s, secrets)?;
-                writeln!(writer, "add_list {}='{}'", key, interpolated).unwrap();
+                writeln!(
+                    writer,
+                    "add_list {}='{}'",
+                    key,
+                    escape_single_quotes(&interpolated)
+                )
+                .unwrap();
             }
         }
         _ => {
             return Err(ConfigError(format!(
                 "{:?} is not a supported option value type",
                 val
-            )))
+            )));
         }
     }
     Ok(())
@@ -139,13 +172,21 @@ fn serialize_uci(
     configs: &HashMap<String, HashMap<String, Section>>,
     secrets: &HashMap<String, String>,
 ) -> Result<(), ConfigError> {
+    writeln!(writer, "#!/bin/sh").unwrap();
+    writeln!(writer, "set -e").unwrap();
+
     for (config_name, sections) in configs {
         for (section_name, section) in sections {
             match section {
                 Section::List(arr) => {
-                    for _ in 0..10 {
-                        writeln!(writer, "delete {}.@{}[0]", config_name, section_name).unwrap();
-                    }
+                    writeln!(
+                        writer,
+                        "while uci -q delete {}.@{}[0]; do :; done",
+                        config_name, section_name
+                    )
+                    .unwrap();
+
+                    writeln!(writer, "uci batch <<EOF").unwrap();
                     for _ in 0..arr.len() {
                         writeln!(writer, "add {} {}", config_name, section_name).unwrap();
                     }
@@ -179,8 +220,10 @@ fn serialize_uci(
                             serialize_option_val(writer, &key, option, secrets)?;
                         }
                     }
+                    writeln!(writer, "EOF").unwrap();
                 }
                 Section::Named(obj) => {
+                    writeln!(writer, "uci batch <<EOF").unwrap();
                     writeln!(writer, "delete {}.{}", config_name, section_name).unwrap();
 
                     let ty = obj.get("_type").and_then(|v| v.as_str()).ok_or_else(|| {
@@ -196,53 +239,50 @@ fn serialize_uci(
                         let key = format!("{}.{}.{}", config_name, section_name, option_name);
                         serialize_option_val(writer, &key, option, secrets)?;
                     }
+                    writeln!(writer, "EOF").unwrap();
                 }
             }
         }
     }
+
+    writeln!(writer, "uci commit").unwrap();
     Ok(())
 }
 
-fn load_sops_file(file_path: &str) -> Result<HashMap<String, String>, ConfigError> {
-    let output = Command::new("sops")
-        .args(["-d", "--output-type", "json", file_path])
-        .output()
-        .map_err(|e| ConfigError(format!("Failed to run sops command: {}", e)))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(ConfigError(format!(
-            "Cannot decrypt '{}' with sops:\n{}",
-            file_path, stderr
-        )));
-    }
-
-    let parsed: Value = serde_json::from_slice(&output.stdout).map_err(|e| {
-        ConfigError(format!(
-            "Failed to parse sops output for '{}': {}",
-            file_path, e
-        ))
-    })?;
-
+fn load_secrets_dir(dir_path: &str) -> Result<HashMap<String, String>, ConfigError> {
+    let dir = Path::new(dir_path);
     let mut secrets = HashMap::new();
-    if let Some(obj) = parsed.as_object() {
-        for (k, v) in obj {
-            if k == "sops" {
-                continue;
+    if !dir.is_dir() {
+        return Ok(secrets);
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "json") {
+            let sec_file = File::open(path)?;
+            let parsed: Value = serde_json::from_reader(BufReader::new(sec_file))
+                .map_err(|e| ConfigError(format!("Failed to parse decrypted json: {}", e)))?;
+
+            if let Some(obj) = parsed.as_object() {
+                for (k, v) in obj {
+                    if k == "sops" {
+                        continue;
+                    }
+                    let val_str = match v {
+                        Value::String(s) => s.clone(),
+                        Value::Number(n) => n.to_string(),
+                        Value::Bool(b) => b.to_string(),
+                        _ => v.to_string(),
+                    };
+                    secrets.insert(k.clone(), val_str);
+                }
             }
-            let val_str = match v {
-                Value::String(s) => s.clone(),
-                Value::Number(n) => n.to_string(),
-                Value::Bool(b) => b.to_string(),
-                _ => v.to_string(),
-            };
-            secrets.insert(k.clone(), val_str);
         }
     }
     Ok(secrets)
 }
 
-fn convert_file(path: &Path) -> Result<String, ConfigError> {
+fn convert_file(path: &Path, secrets_dir: Option<&str>) -> Result<String, ConfigError> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
 
@@ -254,38 +294,43 @@ fn convert_file(path: &Path) -> Result<String, ConfigError> {
     })?;
 
     let mut secrets = HashMap::new();
-    if let Some(sec) = root.secrets {
-        if let Some(sops) = sec.sops {
-            if let Some(files) = sops.files {
-                let mut handles = vec![];
-                for file_path in files {
-                    let handle = thread::spawn(move || load_sops_file(&file_path));
-                    handles.push(handle);
-                }
-
-                for handle in handles {
-                    let res = handle.join().map_err(|_| {
-                        ConfigError("Thread panicked during sops decryption".to_string())
-                    })??;
-                    secrets.extend(res);
-                }
-            }
-        }
+    if let Some(dir_path) = secrets_dir {
+        secrets = load_secrets_dir(dir_path)?;
     }
 
     let mut output_buffer = String::with_capacity(4096);
     serialize_uci(&mut output_buffer, &root.settings, &secrets)?;
+
+    if let Some(pkgs) = &root.packages
+        && !pkgs.is_empty() {
+            writeln!(&mut output_buffer, "\nfor pkg in {}; do", pkgs.join(" ")).unwrap();
+            writeln!(
+                &mut output_buffer,
+                "    if ! opkg list-installed \"$pkg\" >/dev/null 2>&1; then NEED_INSTALL=true; break; fi"
+            )
+            .unwrap();
+            writeln!(&mut output_buffer, "done").unwrap();
+            writeln!(
+                &mut output_buffer,
+                "if [ \"$NEED_INSTALL\" = true ]; then opkg update && opkg install {}; fi",
+                pkgs.join(" ")
+            )
+            .unwrap();
+        }
+
     Ok(output_buffer)
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("USAGE: {} JSON_FILE", args[0]);
+        eprintln!("USAGE: {} JSON_FILE [SECRETS_DIR]", args[0]);
         std::process::exit(1);
     }
 
-    match convert_file(Path::new(&args[1])) {
+    let secrets_dir = args.get(2).map(|s| s.as_str());
+
+    match convert_file(Path::new(&args[1]), secrets_dir) {
         Ok(output) => print!("{}", output),
         Err(e) => {
             eprintln!("{}", e);

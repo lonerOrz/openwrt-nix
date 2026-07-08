@@ -1,10 +1,10 @@
 [package]
-name = "nix-uci"
+name = "nuci"
 version = "0.0.1"
-edition = "2021"
+edition = "2024"
 
 [[bin]]
-name = "nix-uci"
+name = "nuci"
 path = "src/main.rs"
 
 [dependencies]
