@@ -1,0 +1,16 @@
+{
+  "settings": {
+    "wireless": {
+      "default_radio0": {
+        "_type": "wifi-iface",
+        "device": "radio0",
+        "key": "@wifi_password@"
+      }
+    }
+  },
+  "secrets": {
+    "sops": {
+      "files": []
+    }
+  }
+}

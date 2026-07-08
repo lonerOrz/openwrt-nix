@@ -2,13 +2,25 @@
   rustPlatform,
   lib,
 }:
+let
+  src = builtins.path {
+    path = ../.;
+    name = "nix-uci-src";
+    filter =
+      name: type:
+        let
+          base = baseNameOf name;
+        in
+        base != ".git" && base != ".gitignore";
+  };
+in
 rustPlatform.buildRustPackage {
   pname = "nix-uci";
   version = "0.0.1";
-  src = ../.;
+  inherit src;
 
   cargoLock = {
-    lockFile = ../Cargo.lock;
+    lockFile = ./../Cargo.lock;
   };
 
   meta = {

@@ -66,7 +66,7 @@ fn interpolate_secrets<'a>(
         result.push_str(&option_val[last_pos..absolute_start]);
 
         let remaining = &option_val[absolute_start + 1..];
-        if let Some(end) = remaining.find('@') {
+        if let Some(end) = remaining.rfind('@') {
             let secret_name = &remaining[..end];
             if let Some(secret_val) = secrets.get(secret_name) {
                 result.push_str(secret_val);

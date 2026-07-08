@@ -1,5 +1,5 @@
 {
-  description = "A free and open source 3D creation suite (upstream binaries)";
+  description = "OpenWrt router management with Nix";
   inputs.nixpkgs.url = "nixpkgs/nixos-unstable";
 
   outputs =
@@ -22,16 +22,15 @@
         pkgs = nixpkgs.legacyPackages.${system};
         uci = pkgs.callPackage ./nix { };
       in
-      {
-        packages = {
-          inherit (uci) nix-uci;
-        };
+      rec {
+        packages.nix-uci = uci.nix-uci;
+        packages.writeUci = uci.writeUci;
         # `nix run .#example` will output uci configuration
         apps.example = {
           type = "app";
-          program = toString (self.packages.${system}.writeUci ./example.nix).command;
+          program = toString (uci.writeUci ./example.nix).command;
         };
-        defaultPackage = self.packages.${system}.nix-uci;
+        defaultPackage = packages.nix-uci;
         devShell = pkgs.mkShell {
           buildInputs = [
             pkgs.just
