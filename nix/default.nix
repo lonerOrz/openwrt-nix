@@ -5,7 +5,12 @@
   pkgs,
 }:
 let
-  nix-uci = pkgs.python3.pkgs.callPackage ./nix-uci.nix { };
+  nix-uci = pkgs.callPackage ./nix-uci.nix {
+    rustPlatform = pkgs.makeRustPlatform {
+      cargo = pkgs.cargo;
+      rustc = pkgs.rustc;
+    };
+  };
 in
 {
   writeUci =

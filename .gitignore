@@ -9,4 +9,4 @@
 bin/
 
 # Rust
-/target
+/target/

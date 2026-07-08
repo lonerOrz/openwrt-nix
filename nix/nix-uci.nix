@@ -1,17 +1,15 @@
 {
-  buildPythonApplication,
+  rustPlatform,
   lib,
-  runCommand,
 }:
-buildPythonApplication {
+rustPlatform.buildRustPackage {
   pname = "nix-uci";
   version = "0.0.1";
-  src = runCommand "src" { } ''
-    mkdir $out
-    cp -r ${../nix_uci} $out/nix_uci
-    install ${../setup.cfg} $out/setup.cfg
-    install ${../setup.py} $out/setup.py
-  '';
+  src = ../.;
+
+  cargoLock = {
+    lockFile = ../Cargo.lock;
+  };
 
   meta = {
     description = "Write openwrt's UCI configuration using nixos modules";

@@ -1,15 +1,22 @@
 {
   description = "A free and open source 3D creation suite (upstream binaries)";
   inputs.nixpkgs.url = "nixpkgs/nixos-unstable";
-  inputs.flake-utils.url = "github:numtide/flake-utils";
 
   outputs =
     {
       self,
       nixpkgs,
-      flake-utils,
     }:
-    flake-utils.lib.eachDefaultSystem (
+    let
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "x86_64-darwin"
+        "aarch64-darwin"
+      ];
+      lib = nixpkgs.lib;
+    in
+    lib.genAttrs systems (
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
