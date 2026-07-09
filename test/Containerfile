@@ -3,7 +3,7 @@ FROM docker.io/openwrt/rootfs:latest
 RUN mkdir -p /var/lock /var/run /etc/dropbear
 
 # Create config files that UCI needs (minimal rootfs doesn't include them)
-RUN touch /etc/config/system /etc/config/wireless
+RUN touch /etc/config/system /etc/config/wireless /etc/config/network
 
 # Set root password for container access (BusyBox passwd accepts piped input)
 RUN printf 'root\nroot\n' | passwd root
