@@ -6,15 +6,16 @@ let
   src = builtins.path {
     path = ../.;
     name = "nuci-src";
-    filter = name: type:
+    filter =
+      name: type:
       let
         base = baseNameOf name;
         isInsideSrc = lib.hasPrefix (toString ../. + "/src") name;
       in
-      base == "Cargo.toml" ||
-      base == "Cargo.lock" ||
-      (type == "directory" && base == "src") ||
-      isInsideSrc;
+      base == "Cargo.toml"
+      || base == "Cargo.lock"
+      || (type == "directory" && base == "src")
+      || isInsideSrc;
   };
 in
 rustPlatform.buildRustPackage {

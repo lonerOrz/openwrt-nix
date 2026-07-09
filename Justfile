@@ -5,10 +5,6 @@
 # Allow overriding via ROUTER_HOST env var
 host := env_var_or_default("ROUTER_HOST", "192.168.188.2")
 
-# Latest OpenWrt version info
-version := `curl --silent https://api.github.com/repos/openwrt/openwrt/releases/latest | jq -r .tag_name | sed 's/^v//'`
-sysupgrade_url := "https://downloads.openwrt.org/releases/" + version + "/targets/mediatek/mt7622/openwrt-" + version + "-mediatek-mt7622-linksys_e8450-ubi-squashfs-sysupgrade.itb"
-
 # SSH connection reuse
 ssh_opts := "-o ControlMaster=auto -o ControlPath=/tmp/ssh-%r@%h:%p -o ControlPersist=5m"
 
@@ -69,7 +65,10 @@ apply:
 
 # Upgrade router firmware
 upgrade:
-	wget "{{sysupgrade_url}}" -O openwrt.sysupgrade.itb
+	@version=$$(curl --silent https://api.github.com/repos/openwrt/openwrt/releases/latest | jq -r .tag_name | sed 's/^v//') && \
+	sysupgrade_url="https://downloads.openwrt.org/releases/$${version}/targets/mediatek/mt7622/openwrt-$${version}-mediatek-mt7622-linksys_e8450-ubi-squashfs-sysupgrade.itb" && \
+	echo "Downloading OpenWrt $${version}..." && \
+	wget "$${sysupgrade_url}" -O openwrt.sysupgrade.itb
 	ssh {{ssh_opts}} "root@{{host}}" "cat > /tmp/openwrt.sysupgrade.itb" < openwrt.sysupgrade.itb
 	just ssh "sysupgrade -v /tmp/openwrt.sysupgrade.itb" || true
 	while ! ping -c1 -W1 8.8.8.8; do sleep 2; done

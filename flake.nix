@@ -15,7 +15,8 @@
       forEachSystem = f: lib.genAttrs systems (system: f system nixpkgs.legacyPackages.${system});
     in
     {
-      packages = forEachSystem (system: pkgs:
+      packages = forEachSystem (
+        system: pkgs:
         let
           uci = pkgs.callPackage ./nix { };
           config = uci.writeUci ./example.nix;
@@ -29,7 +30,8 @@
         }
       );
 
-      apps = forEachSystem (system: pkgs:
+      apps = forEachSystem (
+        system: pkgs:
         let
           uci = pkgs.callPackage ./nix { };
         in
@@ -46,13 +48,15 @@
         }
       );
 
-      devShells = forEachSystem (system: pkgs: {
-        default = pkgs.mkShell {
-          buildInputs = [
-            pkgs.just
-            pkgs.sops
-          ];
-        };
-      });
+      devShells = forEachSystem (
+        system: pkgs: {
+          default = pkgs.mkShell {
+            buildInputs = [
+              pkgs.just
+              pkgs.sops
+            ];
+          };
+        }
+      );
     };
 }

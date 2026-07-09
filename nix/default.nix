@@ -93,7 +93,7 @@ in
           root_pwd=$($JQ -r 'select(.root_password != null) | .root_password' "$sec_file" 2>/dev/null || true)
           if [ -n "$root_pwd" ]; then
             echo "Syncing root password..." >&2
-            echo "root:$root_pwd" | $SSH $SSH_OPTS "$TARGET" "chpasswd" >/dev/null 2>&1 || true
+            printf 'root:%s\n' "$root_pwd" | $SSH $SSH_OPTS "$TARGET" "chpasswd" >/dev/null 2>&1 || true
             break
           fi
         done
@@ -123,13 +123,19 @@ in
 
         # Wait for target to come back, then kill watchdog
         echo "Waiting for target to come back (60s rollback window)..." >&2
+        CONNECTED=false
         for i in $(seq 1 30); do
           sleep 2
           if $SSH $SSH_OPTS "$TARGET" "kill \$(cat /tmp/.uci-watchdog-pid) 2>/dev/null"; then
             echo "Connectivity verified, rollback watchdog cancelled." >&2
+            CONNECTED=true
             break
           fi
         done
+        if [ "$CONNECTED" = false ]; then
+          echo "Error: Failed to reconnect to $TARGET within 60s. Target may have rolled back." >&2
+          exit 1
+        fi
         # Cleanup
         $SSH $SSH_OPTS "$TARGET" "rm -rf /tmp/.uci-rollback-backup /tmp/.uci-watchdog-pid" 2>/dev/null || true
 

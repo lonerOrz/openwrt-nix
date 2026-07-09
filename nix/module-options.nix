@@ -22,7 +22,7 @@
     };
     opkg.localPackages = lib.mkOption {
       default = [ ];
-      type = lib.types.listOf lib.types.str;
+      type = lib.types.listOf (lib.types.either lib.types.str lib.types.path);
       description = "List of local .ipk file paths or fetched packages from Nix store to install";
     };
     sshKeys = lib.mkOption {
