@@ -204,14 +204,25 @@ check_json '.settings.wireless.default_radio0.ssid == "gchq-2.4"' "json: ssid in
 
 # ── 9. Test SSH key deployment via deployment script logic ──
 section "9/9 Testing SSH key deployment"
-# Replicate the deployment script's SSH key deployment against the container
 DEPLOY_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKey test@host"
-ssh -F "$SSH_CONFIG_PATH" openwrt-test "mkdir -p /etc/dropbear/ && umask 177 && cat > /etc/dropbear/authorized_keys" <<< "$DEPLOY_KEY"
+
+# Write both the current test key and the new deploy key to avoid lockout
+COMBINED_KEYS="$(cat "$SSH_KEY_PATH.pub" && echo "$DEPLOY_KEY")"
+ssh -F "$SSH_CONFIG_PATH" openwrt-test "mkdir -p /etc/dropbear/ && umask 177 && cat > /etc/dropbear/authorized_keys" <<< "$COMBINED_KEYS"
+
 DEPLOYED_KEY=$(podman exec "$CONTAINER_NAME" cat /etc/dropbear/authorized_keys 2>/dev/null || true)
-if [ "$DEPLOYED_KEY" = "$DEPLOY_KEY" ]; then
+if echo "$DEPLOYED_KEY" | grep -qF "$DEPLOY_KEY"; then
   pass "SSH key deployed correctly via SSH"
 else
   fail "SSH key deployment mismatch: got '$DEPLOYED_KEY'"
+fi
+
+# Verify SSH still works (old key preserved)
+podman exec "$CONTAINER_NAME" chmod 600 /etc/dropbear/authorized_keys
+if ssh -o BatchMode=yes -F "$SSH_CONFIG_PATH" openwrt-test "echo ok" 2>/dev/null | grep -q ok; then
+  pass "SSH access works with deployed key"
+else
+  fail "SSH access failed after key deployment"
 fi
 
 # ── Result ──
