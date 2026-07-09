@@ -29,7 +29,13 @@ in
         ];
       };
       json = (formats.json { }).generate "uci.json" {
-        inherit (res.config.uci) settings secrets packages opkg sshKeys;
+        inherit (res.config.uci)
+          settings
+          secrets
+          packages
+          opkg
+          sshKeys
+          ;
       };
       sopsFiles = res.config.uci.secrets.sops.files;
     in
@@ -63,9 +69,18 @@ in
         RSYNC="${pkgs.rsync}/bin/rsync"
         SSH_OPTS="''${SSH_OPTS:--o ControlMaster=auto -o ControlPath=/tmp/ssh-%r@%h:%p -o ControlPersist=5m}"
 
-        # Deploy SSH authorized keys
+        # Deploy SSH authorized keys (with lockout prevention)
         SSH_KEYS=$($JQ -r '.sshKeys[]? // empty' "${json}")
+        DEPLOYER_KEY=$(${pkgs.openssh}/bin/ssh-add -L 2>/dev/null | head -1 || true)
         if [ -n "$SSH_KEYS" ]; then
+          # Ensure deployer's current key is in the new key list to prevent lockout
+          if [ -n "$DEPLOYER_KEY" ]; then
+            PUB_KEY=$(echo "$DEPLOYER_KEY" | cut -d' ' -f1,2)
+            if ! echo "$SSH_KEYS" | grep -qF "$PUB_KEY"; then
+              echo "⚠ Deployer key not found in new config, appending to prevent lockout..." >&2
+              SSH_KEYS=$(printf '%s\n%s' "$SSH_KEYS" "$DEPLOYER_KEY")
+            fi
+          fi
           echo "Deploying SSH keys to $TARGET..." >&2
           $SSH $SSH_OPTS "$TARGET" "mkdir -p /etc/dropbear/ && umask 177 && cat > /etc/dropbear/authorized_keys" <<KEYS
         $SSH_KEYS
