@@ -78,7 +78,7 @@ in
           root_pwd=$($JQ -r 'select(.root_password != null) | .root_password' "$sec_file" 2>/dev/null || true)
           if [ -n "$root_pwd" ]; then
             echo "Syncing root password..." >&2
-            printf '%s\n%s\n' "$root_pwd" "$root_pwd" | $SSH $SSH_OPTS "$TARGET" "passwd root" >/dev/null 2>&1 || true
+            echo "root:$root_pwd" | $SSH $SSH_OPTS "$TARGET" "chpasswd" >/dev/null 2>&1 || true
             break
           fi
         done

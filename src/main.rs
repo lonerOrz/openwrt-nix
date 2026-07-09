@@ -263,11 +263,15 @@ fn load_secrets_dir(dir_path: &str) -> Result<HashMap<String, String>, ConfigErr
     if !dir.is_dir() {
         return Ok(secrets);
     }
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
+
+    let mut entries = std::fs::read_dir(dir)?
+        .collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.path());
+
+    for entry in entries {
         let path = entry.path();
         if path.is_file() && path.extension().is_some_and(|ext| ext == "json") {
-            let sec_file = File::open(path)?;
+            let sec_file = File::open(&path)?;
             let parsed: Value = serde_json::from_reader(BufReader::new(sec_file))
                 .map_err(|e| ConfigError(format!("Failed to parse decrypted json: {}", e)))?;
 
@@ -282,7 +286,16 @@ fn load_secrets_dir(dir_path: &str) -> Result<HashMap<String, String>, ConfigErr
                         Value::Bool(b) => b.to_string(),
                         _ => v.to_string(),
                     };
-                    secrets.insert(k.clone(), val_str);
+
+                    if let Some(old_val) = secrets.insert(k.clone(), val_str) {
+                        if old_val != secrets[k] {
+                            return Err(ConfigError(format!(
+                                "Secret key '{}' conflicts with different values across files. File causing conflict: '{}'",
+                                k,
+                                path.display()
+                            )));
+                        }
+                    }
                 }
             }
         }
