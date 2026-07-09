@@ -21,13 +21,20 @@ eval-config:
 	nix run .#example
 
 # Run local Rust binary against mock configuration files
-test:
+test-unit:
 	cargo run -- test/test_uci.json > /dev/null
 	cargo run -- test/test_interpolate.json test/mock_secrets > /dev/null
 	cargo run -- test/test_interp2.json test/mock_secrets > /dev/null
 	cargo run -- test/test_unclosed.json > /dev/null
 	cargo run -- test/test_edge_cases.json > /dev/null
-	@echo "🚀 All local configuration tests passed successfully!"
+	@echo "All local mock configuration tests passed!"
+
+# Run Podman-based end-to-end integration tests against a real OpenWrt container
+test-integration:
+	@test/run_integration.sh
+
+# Run all test suites
+test-all: test-unit test-integration
 
 # Format both Rust and Nix files
 fmt:

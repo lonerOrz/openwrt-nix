@@ -19,11 +19,13 @@
         let
           uci = pkgs.callPackage ./nix { };
           config = uci.writeUci ./example.nix;
+          testConfig = uci.writeUci ./test/test_config.nix;
         in
         {
           nuci = uci.nuci;
           default = uci.nuci;
           example-json = config.json;
+          test-json = testConfig.json;
         }
       );
 
@@ -35,6 +37,10 @@
           example = {
             type = "app";
             program = toString (uci.writeUci ./example.nix).command;
+          };
+          test-deploy = {
+            type = "app";
+            program = toString (uci.writeUci ./test/test_config.nix).command;
           };
           default = self.apps.${system}.example;
         }

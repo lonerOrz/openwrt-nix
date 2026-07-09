@@ -61,7 +61,7 @@ in
         SSH="${pkgs.openssh}/bin/ssh"
         SCP="${pkgs.openssh}/bin/scp"
         RSYNC="${pkgs.rsync}/bin/rsync"
-        SSH_OPTS="-o ControlMaster=auto -o ControlPath=/tmp/ssh-%r@%h:%p -o ControlPersist=5m"
+        SSH_OPTS="''${SSH_OPTS:--o ControlMaster=auto -o ControlPath=/tmp/ssh-%r@%h:%p -o ControlPersist=5m}"
 
         # Deploy SSH authorized keys
         SSH_KEYS=$($JQ -r '.sshKeys[]? // empty' "${json}")

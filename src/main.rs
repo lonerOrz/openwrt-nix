@@ -114,7 +114,7 @@ fn serialize_option_val(
             let interpolated = interpolate_secrets(s, secrets)?;
             writeln!(
                 writer,
-                "set {}='{}'",
+                "uci set {}='{}'",
                 key,
                 escape_single_quotes(&interpolated)
             )
@@ -125,7 +125,7 @@ fn serialize_option_val(
             let interpolated = interpolate_secrets(&s, secrets)?;
             writeln!(
                 writer,
-                "set {}='{}'",
+                "uci set {}='{}'",
                 key,
                 escape_single_quotes(&interpolated)
             )
@@ -136,7 +136,7 @@ fn serialize_option_val(
             let interpolated = interpolate_secrets(&s, secrets)?;
             writeln!(
                 writer,
-                "set {}='{}'",
+                "uci set {}='{}'",
                 key,
                 escape_single_quotes(&interpolated)
             )
@@ -158,7 +158,7 @@ fn serialize_option_val(
                 let interpolated = interpolate_secrets(&s, secrets)?;
                 writeln!(
                     writer,
-                    "add_list {}='{}'",
+                    "uci add_list {}='{}'",
                     key,
                     escape_single_quotes(&interpolated)
                 )
@@ -180,8 +180,7 @@ fn serialize_uci(
     configs: &HashMap<String, HashMap<String, Section>>,
     secrets: &HashMap<String, String>,
 ) -> Result<(), ConfigError> {
-    writeln!(writer, "#!/bin/sh").unwrap();
-    writeln!(writer, "set -e").unwrap();
+    // ponytail: no set-e — uci delete on missing sections is non-zero, batch tolerates it
 
     for (config_name, sections) in configs {
         for (section_name, section) in sections {
@@ -194,9 +193,8 @@ fn serialize_uci(
                     )
                     .unwrap();
 
-                    writeln!(writer, "uci batch <<'EOF'").unwrap();
                     for _ in 0..arr.len() {
-                        writeln!(writer, "add {} {}", config_name, section_name).unwrap();
+                        writeln!(writer, "uci add {} {}", config_name, section_name).unwrap();
                     }
                     for (idx, list_obj) in arr.iter().enumerate() {
                         let ty =
@@ -212,7 +210,7 @@ fn serialize_uci(
 
                         writeln!(
                             writer,
-                            "set {}.@{}[{}]={}",
+                            "uci set {}.@{}[{}]={}",
                             config_name, section_name, idx, ty
                         )
                         .unwrap();
@@ -228,17 +226,15 @@ fn serialize_uci(
                             serialize_option_val(writer, &key, option, secrets)?;
                         }
                     }
-                    writeln!(writer, "EOF").unwrap();
                 }
                 Section::Named(obj) => {
-                    writeln!(writer, "uci batch <<'EOF'").unwrap();
-                    writeln!(writer, "delete {}.{}", config_name, section_name).unwrap();
+                    writeln!(writer, "uci delete {}.{}", config_name, section_name).unwrap();
 
                     let ty = obj.get("_type").and_then(|v| v.as_str()).ok_or_else(|| {
                         ConfigError(format!("{}.{} has no type", config_name, section_name))
                     })?;
 
-                    writeln!(writer, "set {}.{}={}", config_name, section_name, ty).unwrap();
+                    writeln!(writer, "uci set {}.{}={}", config_name, section_name, ty).unwrap();
 
                     for (option_name, option) in obj {
                         if option_name == "_type" {
@@ -247,7 +243,6 @@ fn serialize_uci(
                         let key = format!("{}.{}.{}", config_name, section_name, option_name);
                         serialize_option_val(writer, &key, option, secrets)?;
                     }
-                    writeln!(writer, "EOF").unwrap();
                 }
             }
         }
@@ -326,15 +321,15 @@ fn convert_file(path: &Path, secrets_dir: Option<&str>) -> Result<String, Config
         && let Some(feeds) = &opkg.feeds
         && !feeds.is_empty()
     {
-        writeln!(
-            &mut output_buffer,
-            "\ncat << 'EOF' > /etc/opkg/customfeeds.conf"
-        )
-        .unwrap();
+        writeln!(&mut output_buffer, "\nprintf '' > /etc/opkg/customfeeds.conf").unwrap();
         for feed in feeds {
-            writeln!(&mut output_buffer, "{}", feed).unwrap();
+            writeln!(
+                &mut output_buffer,
+                "printf '%s\\n' '{}' >> /etc/opkg/customfeeds.conf",
+                feed.replace('\'', "'\\''")
+            )
+            .unwrap();
         }
-        writeln!(&mut output_buffer, "EOF").unwrap();
     }
 
     if let Some(pkgs) = &root.packages
