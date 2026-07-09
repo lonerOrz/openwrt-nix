@@ -92,14 +92,31 @@ in
           fi
         done
 
+        # Backup current config before applying changes
+        echo "Backing up /etc/config/ on $TARGET..." >&2
+        $SSH $SSH_OPTS "$TARGET" "cp -a /etc/config /tmp/.uci-rollback-backup"
+
         # Generate and apply UCI configuration
         ${nuci}/bin/nuci "${json}" "$TMP_SECRETS" | $SSH $SSH_OPTS "$TARGET" 'sh -s'
 
-        # Ensure network is up (needed after firmware reset)
-        if ! $SSH $SSH_OPTS "$TARGET" "ip link | grep -q pppoe-wan"; then
-          $SSH $SSH_OPTS "$TARGET" "/etc/init.d/network restart"
-          while ! $SSH $SSH_OPTS "$TARGET" "ping -c1 -W1 8.8.8.8" >/dev/null 2>&1; do sleep 2; done
-        fi
+        # Start rollback watchdog on target (60s timeout)
+        # PID saved on target; deployer kills it after successful reconnection
+        $SSH $SSH_OPTS "$TARGET" "( sleep 60; cp -a /tmp/.uci-rollback-backup/* /etc/config/; /etc/init.d/network restart; rm -rf /tmp/.uci-rollback-backup /tmp/.uci-watchdog-pid ) & echo \$! > /tmp/.uci-watchdog-pid"
+
+        # Restart network to apply changes
+        $SSH $SSH_OPTS "$TARGET" "/etc/init.d/network restart" || true
+
+        # Wait for target to come back, then kill watchdog
+        echo "Waiting for target to come back (60s rollback window)..." >&2
+        for i in $(seq 1 30); do
+          sleep 2
+          if $SSH $SSH_OPTS "$TARGET" "kill \$(cat /tmp/.uci-watchdog-pid) 2>/dev/null"; then
+            echo "Connectivity verified, rollback watchdog cancelled." >&2
+            break
+          fi
+        done
+        # Cleanup
+        $SSH $SSH_OPTS "$TARGET" "rm -rf /tmp/.uci-rollback-backup /tmp/.uci-watchdog-pid" 2>/dev/null || true
 
         # Setup tinc keys if needed
         $SSH $SSH_OPTS "$TARGET" "if [ ! -f /etc/tinc/retiolum/rsa_key.priv ]; then mkdir -p /etc/tinc/retiolum; tinc -n retiolum generate-keys; /etc/init.d/tinc start; fi"
