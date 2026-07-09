@@ -180,8 +180,6 @@ fn serialize_uci(
     configs: &HashMap<String, HashMap<String, Section>>,
     secrets: &HashMap<String, String>,
 ) -> Result<(), ConfigError> {
-    // ponytail: no set-e — uci delete on missing sections is non-zero, batch tolerates it
-
     for (config_name, sections) in configs {
         for (section_name, section) in sections {
             match section {
@@ -197,23 +195,12 @@ fn serialize_uci(
                         writeln!(writer, "uci add {} {}", config_name, section_name).unwrap();
                     }
                     for (idx, list_obj) in arr.iter().enumerate() {
-                        let ty =
-                            list_obj
-                                .get("_type")
-                                .and_then(|v| v.as_str())
-                                .ok_or_else(|| {
-                                    ConfigError(format!(
-                                        "{}.@{}[{}] has no type!",
-                                        config_name, section_name, idx
-                                    ))
-                                })?;
-
-                        writeln!(
-                            writer,
-                            "uci set {}.@{}[{}]={}",
-                            config_name, section_name, idx, ty
-                        )
-                        .unwrap();
+                        list_obj.get("_type").ok_or_else(|| {
+                            ConfigError(format!(
+                                "{}.@{}[{}] has no type!",
+                                config_name, section_name, idx
+                            ))
+                        })?;
 
                         for (option_name, option) in list_obj {
                             if option_name == "_type" {
@@ -259,8 +246,7 @@ fn load_secrets_dir(dir_path: &str) -> Result<HashMap<String, String>, ConfigErr
         return Ok(secrets);
     }
 
-    let mut entries = std::fs::read_dir(dir)?
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut entries = std::fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
     entries.sort_by_key(|entry| entry.path());
 
     for entry in entries {
@@ -282,15 +268,14 @@ fn load_secrets_dir(dir_path: &str) -> Result<HashMap<String, String>, ConfigErr
                         _ => v.to_string(),
                     };
 
-                    if let Some(old_val) = secrets.insert(k.clone(), val_str) {
-                        if old_val != secrets[k] {
+                    if let Some(old_val) = secrets.insert(k.clone(), val_str)
+                        && old_val != secrets[k] {
                             return Err(ConfigError(format!(
                                 "Secret key '{}' conflicts with different values across files. File causing conflict: '{}'",
                                 k,
                                 path.display()
                             )));
                         }
-                    }
                 }
             }
         }
@@ -321,7 +306,11 @@ fn convert_file(path: &Path, secrets_dir: Option<&str>) -> Result<String, Config
         && let Some(feeds) = &opkg.feeds
         && !feeds.is_empty()
     {
-        writeln!(&mut output_buffer, "\nprintf '' > /etc/opkg/customfeeds.conf").unwrap();
+        writeln!(
+            &mut output_buffer,
+            "\nprintf '' > /etc/opkg/customfeeds.conf"
+        )
+        .unwrap();
         for feed in feeds {
             writeln!(
                 &mut output_buffer,
@@ -393,5 +382,486 @@ fn main() {
             eprintln!("{}", e);
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn secrets(map: &[(&str, &str)]) -> HashMap<String, String> {
+        map.iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    // ── interpolate_secrets ──
+
+    #[test]
+    fn interpolate_no_at() {
+        let s = interpolate_secrets("plain text", &secrets(&[])).unwrap();
+        assert_eq!(s.as_ref(), "plain text");
+    }
+
+    #[test]
+    fn interpolate_empty_secrets() {
+        let s = interpolate_secrets("@secret@", &HashMap::new()).unwrap();
+        assert_eq!(s.as_ref(), "@secret@");
+    }
+
+    #[test]
+    fn interpolate_single_secret() {
+        let s =
+            interpolate_secrets("key=@wifi_key@", &secrets(&[("wifi_key", "hunter2")])).unwrap();
+        assert_eq!(s.as_ref(), "key=hunter2");
+    }
+
+    #[test]
+    fn interpolate_multiple_secrets() {
+        let s = interpolate_secrets("@a@_@b@", &secrets(&[("a", "x"), ("b", "y")])).unwrap();
+        assert_eq!(s.as_ref(), "x_y");
+    }
+
+    #[test]
+    fn interpolate_missing_secret_errors() {
+        let err = interpolate_secrets("@missing@", &secrets(&[("other", "v")])).unwrap_err();
+        assert!(err.0.contains("missing"));
+    }
+
+    #[test]
+    fn interpolate_non_identifier_passthrough() {
+        // "@not valid@" contains a space — not a valid identifier, so it's passed through
+        let s = interpolate_secrets("@not valid@", &secrets(&[])).unwrap();
+        assert_eq!(s.as_ref(), "@not valid@");
+    }
+
+    #[test]
+    fn interpolate_at_boundary_only() {
+        // "@@" — second @ starts a new search but finds nothing
+        let s = interpolate_secrets("@@", &secrets(&[])).unwrap();
+        assert_eq!(s.as_ref(), "@@");
+    }
+
+    // ── escape_single_quotes ──
+
+    #[test]
+    fn escape_no_quotes() {
+        assert_eq!(escape_single_quotes("hello"), "hello");
+    }
+
+    #[test]
+    fn escape_with_quotes() {
+        assert_eq!(escape_single_quotes("it's"), "it'\\''s");
+    }
+
+    // ── extract_package_name ──
+
+    #[test]
+    fn extract_pkg_standard() {
+        assert_eq!(
+            extract_package_name("luci-app-nlbwmon_0.3-1_all.ipk"),
+            "luci-app-nlbwmon"
+        );
+    }
+
+    #[test]
+    fn extract_pkg_no_version() {
+        assert_eq!(extract_package_name("luci.ipk"), "luci");
+    }
+
+    #[test]
+    fn extract_pkg_no_extension() {
+        assert_eq!(extract_package_name("luci-app_1.0"), "luci-app");
+    }
+
+    // ── serialize_option_val ──
+
+    #[test]
+    fn serialize_string_val() {
+        let mut w = String::new();
+        serialize_option_val(
+            &mut w,
+            "system.hostname",
+            &Value::String("test".into()),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(w, "uci set system.hostname='test'\n");
+    }
+
+    #[test]
+    fn serialize_number_val() {
+        let mut w = String::new();
+        serialize_option_val(
+            &mut w,
+            "dhcp.start",
+            &Value::Number(100.into()),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(w, "uci set dhcp.start='100'\n");
+    }
+
+    #[test]
+    fn serialize_bool_val() {
+        let mut w = String::new();
+        serialize_option_val(&mut w, "wifi.enabled", &Value::Bool(true), &HashMap::new()).unwrap();
+        assert_eq!(w, "uci set wifi.enabled='true'\n");
+    }
+
+    #[test]
+    fn serialize_array_val() {
+        let mut w = String::new();
+        let arr = Value::Array(vec!["a".into(), "b".into()]);
+        serialize_option_val(&mut w, "net.dns", &arr, &HashMap::new()).unwrap();
+        assert!(w.contains("uci add_list net.dns='a'"));
+        assert!(w.contains("uci add_list net.dns='b'"));
+    }
+
+    #[test]
+    fn serialize_nested_object_errors() {
+        let mut w = String::new();
+        let obj = serde_json::json!({"nested": "value"});
+        let err = serialize_option_val(&mut w, "key", &obj, &HashMap::new()).unwrap_err();
+        assert!(err.0.contains("not a supported option value type"));
+    }
+
+    #[test]
+    fn serialize_array_with_nested_object_errors() {
+        let mut w = String::new();
+        let arr = Value::Array(vec![serde_json::json!({"bad": true})]);
+        let err = serialize_option_val(&mut w, "key", &arr, &HashMap::new()).unwrap_err();
+        assert!(err.0.contains("not a supported list value type"));
+    }
+
+    #[test]
+    fn serialize_with_secret_interpolation() {
+        let mut w = String::new();
+        let val = Value::String("@wifi_key@".into());
+        let secs = secrets(&[("wifi_key", "s3cret")]);
+        serialize_option_val(&mut w, "wifi.key", &val, &secs).unwrap();
+        assert_eq!(w, "uci set wifi.key='s3cret'\n");
+    }
+
+    #[test]
+    fn serialize_with_quote_escaping() {
+        let mut w = String::new();
+        let val = Value::String("it's".into());
+        serialize_option_val(&mut w, "sys.name", &val, &HashMap::new()).unwrap();
+        assert_eq!(w, "uci set sys.name='it'\\''s'\n");
+    }
+
+    // ── serialize_uci ──
+
+    #[test]
+    fn serialize_named_section() {
+        let mut configs = HashMap::new();
+        let mut sections = HashMap::new();
+        let mut obj = Map::new();
+        obj.insert("_type".into(), Value::String("interface".into()));
+        obj.insert("proto".into(), Value::String("static".into()));
+        sections.insert("lan".into(), Section::Named(obj));
+        configs.insert("network".into(), sections);
+
+        let mut w = String::new();
+        serialize_uci(&mut w, &configs, &HashMap::new()).unwrap();
+
+        assert!(w.contains("uci delete network.lan"));
+        assert!(w.contains("uci set network.lan=interface"));
+        assert!(w.contains("uci set network.lan.proto='static'"));
+        assert!(w.contains("uci commit"));
+        assert!(!w.contains("set -e"));
+    }
+
+    #[test]
+    fn serialize_list_section() {
+        let mut configs = HashMap::new();
+        let mut sections = HashMap::new();
+        let mut item = Map::new();
+        item.insert("_type".into(), Value::String("dropbear".into()));
+        item.insert("Port".into(), Value::String("22".into()));
+        sections.insert("dropbear".into(), Section::List(vec![item]));
+        configs.insert("dropbear".into(), sections);
+
+        let mut w = String::new();
+        serialize_uci(&mut w, &configs, &HashMap::new()).unwrap();
+
+        assert!(w.contains("while uci -q delete dropbear.@dropbear[0]; do :; done"));
+        assert!(w.contains("uci add dropbear dropbear"));
+        assert!(w.contains("uci set dropbear.@dropbear[0].Port='22'"));
+        assert!(!w.contains("uci set dropbear.@dropbear[0]=dropbear"));
+    }
+
+    #[test]
+    fn serialize_named_section_missing_type_errors() {
+        let mut configs = HashMap::new();
+        let mut sections = HashMap::new();
+        let mut obj = Map::new();
+        obj.insert("proto".into(), Value::String("static".into()));
+        sections.insert("lan".into(), Section::Named(obj));
+        configs.insert("network".into(), sections);
+
+        let mut w = String::new();
+        let err = serialize_uci(&mut w, &configs, &HashMap::new()).unwrap_err();
+        assert!(err.0.contains("has no type"));
+    }
+
+    #[test]
+    fn serialize_list_section_missing_type_errors() {
+        let mut configs = HashMap::new();
+        let mut sections = HashMap::new();
+        let mut item = Map::new();
+        item.insert("Port".into(), Value::String("22".into()));
+        sections.insert("dropbear".into(), Section::List(vec![item]));
+        configs.insert("dropbear".into(), sections);
+
+        let mut w = String::new();
+        let err = serialize_uci(&mut w, &configs, &HashMap::new()).unwrap_err();
+        assert!(err.0.contains("has no type"));
+    }
+
+    #[test]
+    fn serialize_multiple_list_items() {
+        let mut configs = HashMap::new();
+        let mut sections = HashMap::new();
+        let mut item1 = Map::new();
+        item1.insert("_type".into(), Value::String("dropbear".into()));
+        item1.insert("Port".into(), Value::String("22".into()));
+        let mut item2 = Map::new();
+        item2.insert("_type".into(), Value::String("dropbear".into()));
+        item2.insert("Port".into(), Value::String("2222".into()));
+        sections.insert("dropbear".into(), Section::List(vec![item1, item2]));
+        configs.insert("dropbear".into(), sections);
+
+        let mut w = String::new();
+        serialize_uci(&mut w, &configs, &HashMap::new()).unwrap();
+
+        assert_eq!(w.matches("uci add dropbear dropbear").count(), 2);
+        assert!(w.contains("uci set dropbear.@dropbear[0].Port='22'"));
+        assert!(w.contains("uci set dropbear.@dropbear[1].Port='2222'"));
+    }
+
+    // ── load_secrets_dir ──
+
+    #[test]
+    fn load_secrets_nonexistent_dir() {
+        let result = load_secrets_dir("/tmp/nonexistent_secrets_dir_xyz").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn load_secrets_normal() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("a.json"),
+            r#"{"key1": "val1", "key2": "val2"}"#,
+        )
+        .unwrap();
+        let result = load_secrets_dir(dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(result["key1"], "val1");
+        assert_eq!(result["key2"], "val2");
+    }
+
+    #[test]
+    fn load_secrets_skips_sops_key() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("sec.json"),
+            r#"{"key": "val", "sops": {"encrypted": "data"}}"#,
+        )
+        .unwrap();
+        let result = load_secrets_dir(dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(result["key"], "val");
+        assert!(!result.contains_key("sops"));
+    }
+
+    #[test]
+    fn load_secrets_deterministic_order() {
+        let dir = TempDir::new().unwrap();
+        // Same value in both files — no conflict, last writer wins (z after a)
+        fs::write(dir.path().join("z.json"), r#"{"key": "same_val"}"#).unwrap();
+        fs::write(dir.path().join("a.json"), r#"{"key": "same_val"}"#).unwrap();
+        let result = load_secrets_dir(dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(result["key"], "same_val");
+    }
+
+    #[test]
+    fn load_secrets_multiple_files_different_keys() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("a.json"), r#"{"key_a": "from_a"}"#).unwrap();
+        fs::write(dir.path().join("b.json"), r#"{"key_b": "from_b"}"#).unwrap();
+        let result = load_secrets_dir(dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(result["key_a"], "from_a");
+        assert_eq!(result["key_b"], "from_b");
+    }
+
+    #[test]
+    fn load_secrets_conflict_errors() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("a.json"), r#"{"key": "val_a"}"#).unwrap();
+        fs::write(dir.path().join("b.json"), r#"{"key": "val_b"}"#).unwrap();
+        let err = load_secrets_dir(dir.path().to_str().unwrap()).unwrap_err();
+        assert!(err.0.contains("conflicts"));
+        assert!(err.0.contains("key"));
+    }
+
+    #[test]
+    fn load_secrets_skips_non_json() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("notes.txt"), "not json").unwrap();
+        fs::write(dir.path().join("ok.json"), r#"{"k": "v"}"#).unwrap();
+        let result = load_secrets_dir(dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(result["k"], "v");
+    }
+
+    #[test]
+    fn load_secrets_invalid_json_errors() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("bad.json"), "not valid json {{{").unwrap();
+        let err = load_secrets_dir(dir.path().to_str().unwrap()).unwrap_err();
+        assert!(err.0.contains("Failed to parse"));
+    }
+
+    #[test]
+    fn load_secrets_non_string_values() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("mix.json"),
+            r#"{"str": "hello", "num": 42, "bool": true}"#,
+        )
+        .unwrap();
+        let result = load_secrets_dir(dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(result["str"], "hello");
+        assert_eq!(result["num"], "42");
+        assert_eq!(result["bool"], "true");
+    }
+
+    // ── convert_file end-to-end ──
+
+    #[test]
+    fn convert_file_full() {
+        let dir = TempDir::new().unwrap();
+        let json_path = dir.path().join("config.json");
+        fs::write(
+            &json_path,
+            r#"{
+            "settings": {
+                "system": {
+                    "system": { "_type": "system", "hostname": "test" }
+                }
+            }
+        }"#,
+        )
+        .unwrap();
+        let output = convert_file(&json_path, None).unwrap();
+        assert!(output.starts_with("uci delete system.system"));
+        assert!(output.contains("uci set system.system.hostname='test'"));
+        assert!(output.contains("uci commit"));
+    }
+
+    #[test]
+    fn convert_file_with_secrets() {
+        let dir = TempDir::new().unwrap();
+        let json_path = dir.path().join("config.json");
+        let secrets_path = dir.path().join("secrets");
+        fs::create_dir(&secrets_path).unwrap();
+        fs::write(
+            &json_path,
+            r#"{
+            "settings": {
+                "wifi": {
+                    "radio0": { "_type": "wifi-iface", "key": "@wifi_pass@" }
+                }
+            }
+        }"#,
+        )
+        .unwrap();
+        fs::write(secrets_path.join("s.json"), r#"{"wifi_pass": "secret123"}"#).unwrap();
+        let output = convert_file(&json_path, Some(secrets_path.to_str().unwrap())).unwrap();
+        assert!(output.contains("uci set wifi.radio0.key='secret123'"));
+    }
+
+    #[test]
+    fn convert_file_missing_file() {
+        let err = convert_file(Path::new("/tmp/nonexistent_xyz.json"), None).unwrap_err();
+        assert!(err.0.contains("No such file"));
+    }
+
+    #[test]
+    fn convert_file_invalid_json() {
+        let dir = TempDir::new().unwrap();
+        let json_path = dir.path().join("bad.json");
+        fs::write(&json_path, "not json").unwrap();
+        let err = convert_file(&json_path, None).unwrap_err();
+        assert!(err.0.contains("Failed to parse JSON"));
+    }
+
+    #[test]
+    fn convert_file_opkg_feeds() {
+        let dir = TempDir::new().unwrap();
+        let json_path = dir.path().join("config.json");
+        fs::write(
+            &json_path,
+            r#"{
+            "settings": {},
+            "opkg": { "feeds": ["src/gz custom https://example.com/repo"] }
+        }"#,
+        )
+        .unwrap();
+        let output = convert_file(&json_path, None).unwrap();
+        assert!(output.contains("printf '' > /etc/opkg/customfeeds.conf"));
+        assert!(output.contains("src/gz custom https://example.com/repo"));
+    }
+
+    #[test]
+    fn convert_file_packages() {
+        let dir = TempDir::new().unwrap();
+        let json_path = dir.path().join("config.json");
+        fs::write(
+            &json_path,
+            r#"{
+            "settings": {},
+            "packages": ["luci", "tcpdump"]
+        }"#,
+        )
+        .unwrap();
+        let output = convert_file(&json_path, None).unwrap();
+        assert!(output.contains("for pkg in luci tcpdump"));
+        assert!(output.contains("opkg update && opkg install luci tcpdump"));
+    }
+
+    #[test]
+    fn convert_file_local_packages() {
+        let dir = TempDir::new().unwrap();
+        let json_path = dir.path().join("config.json");
+        fs::write(
+            &json_path,
+            r#"{
+            "settings": {},
+            "opkg": { "localPackages": ["./pkg/foo_1.0.ipk"] }
+        }"#,
+        )
+        .unwrap();
+        let output = convert_file(&json_path, None).unwrap();
+        assert!(output.contains("opkg list-installed \"foo\""));
+        assert!(output.contains("opkg install /tmp/foo_1.0.ipk"));
+    }
+
+    #[test]
+    fn convert_file_feed_single_quote_escaping() {
+        let dir = TempDir::new().unwrap();
+        let json_path = dir.path().join("config.json");
+        fs::write(
+            &json_path,
+            r#"{
+            "settings": {},
+            "opkg": { "feeds": ["src/gz test it's a feed"] }
+        }"#,
+        )
+        .unwrap();
+        let output = convert_file(&json_path, None).unwrap();
+        assert!(output.contains("'\\''"));
     }
 }

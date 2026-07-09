@@ -22,6 +22,7 @@ eval-config:
 
 # Run local Rust binary against mock configuration files
 test-unit:
+	cargo test
 	cargo run -- test/test_uci.json > /dev/null
 	cargo run -- test/test_interpolate.json test/mock_secrets > /dev/null
 	cargo run -- test/test_interp2.json test/mock_secrets > /dev/null

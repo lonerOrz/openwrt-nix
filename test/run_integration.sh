@@ -29,17 +29,17 @@ cleanup() {
 trap cleanup EXIT
 
 # ── 1. Clean previous artifacts ──
-section "1/8 Cleaning previous artifacts"
+section "1/9 Cleaning previous artifacts"
 podman rm -f "$CONTAINER_NAME" 2>/dev/null || true
 rm -f "$SSH_KEY_PATH" "$SSH_KEY_PATH.pub" "$SSH_CONFIG_PATH"
 
 # ── 2. Build and start container ──
-section "2/8 Building OpenWrt test container"
+section "2/9 Building OpenWrt test container"
 podman build -q -t openwrt-test-env -f "$PROJECT_ROOT/test/Containerfile" "$PROJECT_ROOT" >/dev/null
 podman run -d --name "$CONTAINER_NAME" -p 2222:22 openwrt-test-env >/dev/null
 
 # ── 3. Wait for dropbear ──
-section "3/8 Waiting for dropbear"
+section "3/9 Waiting for dropbear"
 for i in {1..15}; do
   if (echo > /dev/tcp/127.0.0.1/2222) >/dev/null 2>&1; then
     ok "dropbear ready on port 2222"
@@ -54,7 +54,7 @@ for i in {1..15}; do
 done
 
 # ── 4. Inject SSH key ──
-section "4/8 Injecting SSH key"
+section "4/9 Injecting SSH key"
 ssh-keygen -t ed25519 -N "" -f "$SSH_KEY_PATH" -C "openwrt-test" -q
 podman exec -i "$CONTAINER_NAME" sh -c "mkdir -p /etc/dropbear && cat > /etc/dropbear/authorized_keys" < "$SSH_KEY_PATH.pub"
 podman exec "$CONTAINER_NAME" chmod 700 /etc/dropbear
@@ -62,7 +62,7 @@ podman exec "$CONTAINER_NAME" chmod 600 /etc/dropbear/authorized_keys
 ok "SSH key installed"
 
 # ── 5. Create SSH config ──
-section "5/8 Creating SSH config"
+section "5/9 Creating SSH config"
 cat <<EOF > "$SSH_CONFIG_PATH"
 Host openwrt-test
     HostName localhost
@@ -74,7 +74,7 @@ Host openwrt-test
 EOF
 
 # ── 6. Verify nuci command generation ──
-section "6/8 Verifying nuci command generation"
+section "6/9 Verifying nuci command generation"
 NUCI_OUTPUT=$(nix run "$PROJECT_ROOT#test-deploy" -- 2>/dev/null)
 
 check_cmd() {
@@ -86,7 +86,12 @@ check_cmd() {
 }
 
 check_cmd "uci add system system" "list section: system created via add"
-check_cmd "uci set system.@system[0]=system" "list section: system type set"
+# Verify redundant type set was removed (uci add already sets type)
+if echo "$NUCI_OUTPUT" | grep -qF "uci set system.@system[0]=system"; then
+  fail "Redundant type set still present for list sections"
+else
+  pass "Redundant type set correctly removed"
+fi
 check_cmd "uci set system.@system[0].hostname='rauter'" "list section: hostname set"
 check_cmd "uci set system.@system[0].timezone='UTC'" "list section: timezone set"
 check_cmd "uci delete wireless.default_radio0" "named section: wireless deleted before recreate"
@@ -103,17 +108,24 @@ check_cmd "src/gz custom https://example.com/packages" "opkg: feed entry correct
 check_cmd "opkg update && opkg install luci tcpdump" "opkg: packages install command"
 check_cmd "opkg install /tmp/test-package_1.0_all.ipk" "opkg: local package install"
 
-# ── 7. Deploy UCI to container and verify state ──
-section "7/8 Deploying UCI and verifying container state"
-# Only send UCI commands to container (skip opkg/package commands — no opkg in minimal rootfs)
-UCI_ONLY=$(echo "$NUCI_OUTPUT" | grep -E '^(uci |while )')
-DEPLOY_STDERR=$(echo "$UCI_ONLY" | podman exec -i "$CONTAINER_NAME" sh -s 2>&1 >/dev/null)
+# ── 7. Deploy to container and verify state ──
+section "7/9 Deploying full script and verifying container state"
+# Validate full script syntax before execution
+SYNTAX_ERR=$(echo "$NUCI_OUTPUT" | podman exec -i "$CONTAINER_NAME" sh -n 2>&1)
+if [ -n "$SYNTAX_ERR" ]; then
+  fail "Syntax error in deployment script: $SYNTAX_ERR"
+else
+  ok "Full deployment script passes sh -n syntax check"
+fi
+
+# Deploy full script (UCI + opkg + feeds) — mock opkg handles package commands
+DEPLOY_STDERR=$(echo "$NUCI_OUTPUT" | podman exec -i "$CONTAINER_NAME" sh -s 2>&1 >/dev/null || true)
 UNEXPECTED_ERRORS=$(echo "$DEPLOY_STDERR" | grep -v "uci: Entry not found" | grep -v "^$" || true)
 if [ -n "$UNEXPECTED_ERRORS" ]; then
   fail "Unexpected errors during deployment:"
   echo "$UNEXPECTED_ERRORS"
 else
-  ok "All UCI commands executed without errors"
+  ok "All commands executed without errors"
 fi
 
 check_value() {
@@ -148,10 +160,29 @@ check_value "network.lan.ipaddr" "192.168.1.1" "lan ipaddr"
 check_value "network.lan.netmask" "255.255.255.0" "lan netmask"
 check_value "dropbear.@dropbear[0].PasswordAuth" "off" "dropbear PasswordAuth"
 
+# Verify opkg feeds were written by the full script
+FEEDS_CONTENT=$(podman exec "$CONTAINER_NAME" cat /etc/opkg/customfeeds.conf 2>/dev/null || true)
+if echo "$FEEDS_CONTENT" | grep -qF "src/gz custom https://example.com/packages"; then
+  pass "opkg: customfeeds.conf has correct feed"
+else
+  fail "opkg: customfeeds.conf missing or incorrect"
+fi
+
+# Verify mock opkg was invoked (list-installed + update + install)
+OPKG_LOG=$(podman exec "$CONTAINER_NAME" cat /tmp/opkg.log 2>/dev/null || true)
+if echo "$OPKG_LOG" | grep -q "list-installed"; then
+  pass "opkg: list-installed was called"
+else
+  fail "opkg: list-installed was not called"
+fi
+if echo "$OPKG_LOG" | grep -q "update"; then
+  pass "opkg: update was called"
+else
+  fail "opkg: update was not called"
+fi
+
 # ── 8. Verify deployment script logic ──
-section "8/8 Verifying deployment script features"
-# The command script (nix run .#test-deploy) includes package/feed/ssh logic
-# In no-target mode it only outputs nuci UCI commands, so we test the JSON
+section "8/9 Verifying deployment script features"
 TEST_JSON=$(nix build "$PROJECT_ROOT#test-json" --print-out-paths --no-link 2>/dev/null)
 
 check_json() {
@@ -170,6 +201,18 @@ check_json '.opkg.feeds[0] | test("src/gz custom")' "feeds: feed entry correct"
 check_json '.sshKeys | length == 1' "sshKeys: 1 key defined"
 check_json '.sshKeys[0] | startswith("ssh-ed25519")' "sshKeys: key type correct"
 check_json '.settings.wireless.default_radio0.ssid == "gchq-2.4"' "json: ssid in settings"
+
+# ── 9. Test SSH key deployment via deployment script logic ──
+section "9/9 Testing SSH key deployment"
+# Replicate the deployment script's SSH key deployment against the container
+DEPLOY_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKey test@host"
+ssh -F "$SSH_CONFIG_PATH" openwrt-test "mkdir -p /etc/dropbear/ && umask 177 && cat > /etc/dropbear/authorized_keys" <<< "$DEPLOY_KEY"
+DEPLOYED_KEY=$(podman exec "$CONTAINER_NAME" cat /etc/dropbear/authorized_keys 2>/dev/null || true)
+if [ "$DEPLOYED_KEY" = "$DEPLOY_KEY" ]; then
+  pass "SSH key deployed correctly via SSH"
+else
+  fail "SSH key deployment mismatch: got '$DEPLOYED_KEY'"
+fi
 
 # ── Result ──
 echo ""
