@@ -19,4 +19,7 @@ RUN uci set dropbear.@dropbear[0].PasswordAuth='off' && \
 
 EXPOSE 22
 
-CMD ["/usr/sbin/dropbear", "-F", "-E", "-p", "22", "-R"]
+# Wrapper: init.d tracks dropbear PID, sleep keeps container alive
+RUN printf '#!/bin/sh\n/etc/init.d/dropbear start\nexec sleep infinity\n' \
+    > /start.sh && chmod +x /start.sh
+CMD ["/start.sh"]

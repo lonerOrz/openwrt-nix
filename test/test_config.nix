@@ -15,7 +15,7 @@
         mode = "ap";
         ssid = "gchq-2.4";
         encryption = "sae-mixed";
-        key = "test-wifi-plain-password";
+        key = "@wifi_password@";
       };
     };
     network = {
@@ -36,6 +36,9 @@
       "./packages/test-package_1.0_all.ipk"
     ];
   };
+  uci.secrets.sops.files = [
+    ./secrets.enc.json
+  ];
   uci.sshKeys = [
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKey test@host"
   ];
