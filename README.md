@@ -30,11 +30,12 @@ SOPS secrets ──► age decrypt (local)
 
 - **`uci batch` blocks** — atomic writes per config file, minimizing fork/exec overhead on embedded devices
 - **AST secret resolution** — `@placeholder@` interpolation happens in a dedicated pass before serialization; the serializer never sees secrets
-- **UCI spec validation** — config/section/option names enforced as `[a-zA-Z0-9_]`, types allow `[a-zA-Z0-9_-]` (for `wifi-iface` etc.), null values blocked; fails fast at parse time
+- **Deterministic output** — `BTreeMap` ordering guarantees consistent UCI command sequences and reproducible `dry-run` diffs
+- **UCI spec validation** — config/section/option names enforced as `[a-zA-Z0-9_]`, types allow `[a-zA-Z0-9_-]` (for `wifi-iface` etc.), null values blocked; empty list sections are rejected to prevent spurious type-mismatched cleanup loops; fails fast at parse time
 - **Deploy-time decryption** — SOPS files decrypted locally via `age`, only plaintext UCI batch crosses the SSH pipe; no private keys on the router
 - **Rollback watchdog** — background process on the target restores `/etc/config` backup if connectivity isn't re-established within 60s
 - **SSH key lockout prevention** — deployment script ensures the deployer's current key is always appended to `authorized_keys`
-- **Package management** — opkg feeds, remote packages, and local `.ipk` transfer via SCP
+- **Package management** — dual-backend support (`opkg` for older releases, `apk` for OpenWrt 25.12+); manages feeds, remote packages, and local `.ipk`/`.apk` transfer via SCP
 
 ## Getting Started
 
@@ -100,7 +101,7 @@ just upgrade        # download + flash latest OpenWrt, then re-apply config
 just test-all
 ```
 
-### Unit tests (59)
+### Unit tests (69)
 
 ```bash
 just test-unit      # cargo test + 5 mock JSON files through the binary
@@ -114,15 +115,15 @@ just test-integration
 
 Runs `test/run_integration.sh` against a Podman container (`openwrt/rootfs:latest`):
 
-| Phase | What |
-|-------|------|
-| 1-2 | Build & start container |
-| 3-5 | Wait for dropbear, inject SSH key, create SSH config |
-| 6 | Generate temp age key, SOPS-encrypt mock secrets |
-| 7 | Verify `nuci` command generation via `nix run .#test-deploy` |
-| 8 | Deploy into container, verify UCI state with `uci get` |
-| 9 | Verify JSON artifact structure |
-| 10 | Watchdog rollback test: break config, verify auto-restore |
+| Phase | What                                                         |
+| ----- | ------------------------------------------------------------ |
+| 1-2   | Build & start container                                      |
+| 3-5   | Wait for dropbear, inject SSH key, create SSH config         |
+| 6     | Generate temp age key, SOPS-encrypt mock secrets             |
+| 7     | Verify `nuci` command generation via `nix run .#test-deploy` |
+| 8     | Deploy into container, verify UCI state with `uci get`       |
+| 9     | Verify JSON artifact structure                               |
+| 10    | Watchdog rollback test: break config, verify auto-restore    |
 
 ### Other commands
 
@@ -136,7 +137,7 @@ just ssh <cmd>      # execute command on router
 ## Project Structure
 
 ```
-├── src/main.rs              # Rust UCI compiler (~1200 LOC, 59 tests)
+├── src/main.rs              # Rust UCI compiler (~1200 LOC, 69 tests)
 ├── nix/
 │   ├── default.nix          # writeUci: JSON generator + deployment script
 │   ├── module-options.nix   # NixOS-style option declarations
