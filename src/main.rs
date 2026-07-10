@@ -33,9 +33,31 @@ impl From<serde_json::Error> for ConfigError {
 
 #[derive(Deserialize, Debug)]
 struct Root {
+    #[serde(default = "default_package_manager")]
+    #[serde(rename = "packageManager")]
+    package_manager: String,
     settings: BTreeMap<String, BTreeMap<String, Section>>,
     packages: Option<Vec<String>>,
     opkg: Option<Opkg>,
+}
+
+fn default_package_manager() -> String {
+    "opkg".to_string()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PkgBackend {
+    Opkg,
+    Apk,
+}
+
+impl PkgBackend {
+    fn from_str(s: &str) -> Self {
+        match s {
+            "apk" => PkgBackend::Apk,
+            _ => PkgBackend::Opkg,
+        }
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -453,6 +475,7 @@ fn load_secrets_dir(dir_path: &str) -> Result<HashMap<String, String>, ConfigErr
 
 fn serialize_opkg(
     writer: &mut String,
+    backend: PkgBackend,
     opkg: Option<&Opkg>,
     packages: Option<&[String]>,
 ) -> Result<(), ConfigError> {
@@ -460,14 +483,34 @@ fn serialize_opkg(
         && let Some(feeds) = &opkg_val.feeds
         && !feeds.is_empty()
     {
-        writeln!(writer, "\nprintf '' > /etc/opkg/customfeeds.conf").unwrap();
-        for feed in feeds {
-            writeln!(
-                writer,
-                "printf '%s\\n' '{}' >> /etc/opkg/customfeeds.conf",
-                feed.replace('\'', "'\\''")
-            )
-            .unwrap();
+        match backend {
+            PkgBackend::Opkg => {
+                writeln!(writer, "\nprintf '' > /etc/opkg/customfeeds.conf").unwrap();
+                for feed in feeds {
+                    writeln!(
+                        writer,
+                        "printf '%s\\n' '{}' >> /etc/opkg/customfeeds.conf",
+                        escape_single_quotes(feed)
+                    )
+                    .unwrap();
+                }
+            }
+            PkgBackend::Apk => {
+                writeln!(writer, "\nmkdir -p /etc/apk/repositories.d").unwrap();
+                writeln!(
+                    writer,
+                    "printf '' > /etc/apk/repositories.d/customfeeds.list"
+                )
+                .unwrap();
+                for feed in feeds {
+                    writeln!(
+                        writer,
+                        "printf '%s\\n' '{}' >> /etc/apk/repositories.d/customfeeds.list",
+                        escape_single_quotes(feed)
+                    )
+                    .unwrap();
+                }
+            }
         }
     }
 
@@ -476,18 +519,42 @@ fn serialize_opkg(
     {
         writeln!(writer, "\nNEED_INSTALL=false").unwrap();
         writeln!(writer, "for pkg in {}; do", pkgs.join(" ")).unwrap();
-        writeln!(
-            writer,
-            "    if ! opkg list-installed \"$pkg\" >/dev/null 2>&1; then NEED_INSTALL=true; break; fi"
-        )
-        .unwrap();
+        match backend {
+            PkgBackend::Opkg => {
+                writeln!(
+                    writer,
+                    "    if ! opkg list-installed \"$pkg\" >/dev/null 2>&1; then NEED_INSTALL=true; break; fi"
+                )
+                .unwrap();
+            }
+            PkgBackend::Apk => {
+                writeln!(
+                    writer,
+                    "    if ! apk info -e \"$pkg\" >/dev/null 2>&1; then NEED_INSTALL=true; break; fi"
+                )
+                .unwrap();
+            }
+        }
         writeln!(writer, "done").unwrap();
-        writeln!(
-            writer,
-            "if [ \"$NEED_INSTALL\" = true ]; then opkg update && opkg install {}; fi",
-            pkgs.join(" ")
-        )
-        .unwrap();
+
+        match backend {
+            PkgBackend::Opkg => {
+                writeln!(
+                    writer,
+                    "if [ \"$NEED_INSTALL\" = true ]; then opkg update && opkg install {}; fi",
+                    pkgs.join(" ")
+                )
+                .unwrap();
+            }
+            PkgBackend::Apk => {
+                writeln!(
+                    writer,
+                    "if [ \"$NEED_INSTALL\" = true ]; then apk -U add {}; fi",
+                    pkgs.join(" ")
+                )
+                .unwrap();
+            }
+        }
     }
 
     if let Some(opkg_val) = opkg
@@ -497,14 +564,29 @@ fn serialize_opkg(
             let ipk_path = Path::new(ipk_path_str);
             if let Some(file_name) = ipk_path.file_name().and_then(|n| n.to_str()) {
                 let pkg_name = extract_package_name(file_name);
-                writeln!(
-                    writer,
-                    "\nif ! opkg list-installed \"{}\" >/dev/null 2>&1; then",
-                    pkg_name
-                )
-                .unwrap();
-                writeln!(writer, "    opkg install /tmp/{}", file_name).unwrap();
-                writeln!(writer, "fi").unwrap();
+                match backend {
+                    PkgBackend::Opkg => {
+                        writeln!(
+                            writer,
+                            "\nif ! opkg list-installed \"{}\" >/dev/null 2>&1; then",
+                            pkg_name
+                        )
+                        .unwrap();
+                        writeln!(writer, "    opkg install /tmp/{}", file_name).unwrap();
+                        writeln!(writer, "fi").unwrap();
+                    }
+                    PkgBackend::Apk => {
+                        writeln!(
+                            writer,
+                            "\nif ! apk info -e \"{}\" >/dev/null 2>&1; then",
+                            pkg_name
+                        )
+                        .unwrap();
+                        writeln!(writer, "    apk add --allow-untrusted /tmp/{}", file_name)
+                            .unwrap();
+                        writeln!(writer, "fi").unwrap();
+                    }
+                }
             }
         }
     }
@@ -528,8 +610,11 @@ fn convert_file(path: &Path, secrets_dir: Option<&str>) -> Result<String, Config
 
     let mut output_buffer = String::with_capacity(4096);
     serialize_uci(&mut output_buffer, &resolved_root.settings)?;
+
+    let backend = PkgBackend::from_str(&resolved_root.package_manager);
     serialize_opkg(
         &mut output_buffer,
+        backend,
         resolved_root.opkg.as_ref(),
         resolved_root.packages.as_deref(),
     )?;
@@ -538,7 +623,10 @@ fn convert_file(path: &Path, secrets_dir: Option<&str>) -> Result<String, Config
 }
 
 fn extract_package_name(file_name: &str) -> &str {
-    let without_ext = file_name.strip_suffix(".ipk").unwrap_or(file_name);
+    let without_ext = file_name
+        .strip_suffix(".ipk")
+        .or_else(|| file_name.strip_suffix(".apk"))
+        .unwrap_or(file_name);
     without_ext.split('_').next().unwrap_or(without_ext)
 }
 
@@ -642,6 +730,14 @@ mod tests {
     }
 
     #[test]
+    fn extract_pkg_apk_extension() {
+        assert_eq!(
+            extract_package_name("luci-app-nlbwmon_0.3-1_all.apk"),
+            "luci-app-nlbwmon"
+        );
+    }
+
+    #[test]
     fn extract_pkg_no_version() {
         assert_eq!(extract_package_name("luci.ipk"), "luci");
     }
@@ -666,6 +762,7 @@ mod tests {
         settings.insert("wireless".into(), sections);
 
         let root = Root {
+            package_manager: "opkg".into(),
             settings,
             packages: None,
             opkg: None,
@@ -694,6 +791,7 @@ mod tests {
         settings.insert("wireless".into(), sections);
 
         let root = Root {
+            package_manager: "opkg".into(),
             settings,
             packages: None,
             opkg: None,
@@ -716,6 +814,7 @@ mod tests {
         settings.insert("config".into(), sections);
 
         let root = Root {
+            package_manager: "opkg".into(),
             settings,
             packages: None,
             opkg: None,
@@ -740,6 +839,7 @@ mod tests {
         let mut settings = BTreeMap::new();
         settings.insert("c".into(), sections);
         let root = Root {
+            package_manager: "opkg".into(),
             settings,
             packages: None,
             opkg: None,
@@ -764,6 +864,7 @@ mod tests {
         let mut settings = BTreeMap::new();
         settings.insert("dropbear".into(), sections);
         let root = Root {
+            package_manager: "opkg".into(),
             settings,
             packages: None,
             opkg: None,
@@ -782,6 +883,7 @@ mod tests {
     #[test]
     fn resolve_secrets_feeds() {
         let root = Root {
+            package_manager: "opkg".into(),
             settings: BTreeMap::new(),
             packages: None,
             opkg: Some(Opkg {
@@ -801,6 +903,7 @@ mod tests {
     #[test]
     fn validate_rejects_hyphen_in_config_name() {
         let root = Root {
+            package_manager: "opkg".into(),
             settings: BTreeMap::from([("network-config".into(), BTreeMap::new())]),
             packages: None,
             opkg: None,
@@ -814,6 +917,7 @@ mod tests {
         let mut obj = Map::new();
         obj.insert("_type".into(), Value::String("wifi-iface".into()));
         let root = Root {
+            package_manager: "opkg".into(),
             settings: BTreeMap::from([(
                 "wireless".into(),
                 BTreeMap::from([("radio0".into(), Section::Named(obj))]),
@@ -830,6 +934,7 @@ mod tests {
         obj.insert("_type".into(), Value::String("interface".into()));
         obj.insert("ip-address".into(), Value::String("192.168.1.1".into()));
         let root = Root {
+            package_manager: "opkg".into(),
             settings: BTreeMap::from([(
                 "network".into(),
                 BTreeMap::from([("lan".into(), Section::Named(obj))]),
@@ -846,6 +951,7 @@ mod tests {
         let mut obj = Map::new();
         obj.insert("_type".into(), Value::String("interface".into()));
         let root = Root {
+            package_manager: "opkg".into(),
             settings: BTreeMap::from([(
                 "network".into(),
                 BTreeMap::from([("my-section".into(), Section::Named(obj))]),
@@ -863,6 +969,7 @@ mod tests {
         obj.insert("_type".into(), Value::String("interface".into()));
         obj.insert("proto".into(), Value::Null);
         let root = Root {
+            package_manager: "opkg".into(),
             settings: BTreeMap::from([(
                 "network".into(),
                 BTreeMap::from([("lan".into(), Section::Named(obj))]),
@@ -879,6 +986,7 @@ mod tests {
         let mut obj = Map::new();
         obj.insert("proto".into(), Value::String("static".into()));
         let root = Root {
+            package_manager: "opkg".into(),
             settings: BTreeMap::from([(
                 "network".into(),
                 BTreeMap::from([("lan".into(), Section::Named(obj))]),
@@ -895,6 +1003,7 @@ mod tests {
         let mut item = Map::new();
         item.insert("Port".into(), Value::String("22".into()));
         let root = Root {
+            package_manager: "opkg".into(),
             settings: BTreeMap::from([(
                 "dropbear".into(),
                 BTreeMap::from([("dropbear".into(), Section::List(vec![item]))]),
@@ -912,6 +1021,7 @@ mod tests {
         item.insert("_type".into(), Value::String("dropbear".into()));
         item.insert("listen-port".into(), Value::String("22".into()));
         let root = Root {
+            package_manager: "opkg".into(),
             settings: BTreeMap::from([(
                 "dropbear".into(),
                 BTreeMap::from([("dropbear".into(), Section::List(vec![item]))]),
@@ -926,6 +1036,7 @@ mod tests {
     #[test]
     fn validate_empty_settings_ok() {
         let root = Root {
+            package_manager: "opkg".into(),
             settings: BTreeMap::new(),
             packages: None,
             opkg: None,
@@ -996,7 +1107,7 @@ mod tests {
         assert_eq!(w, "set sys.name='it'\\''s'\n");
     }
 
-    // ── serialize_uci (no secrets param) ──
+    // ── serialize_uci ──
 
     #[test]
     fn serialize_named_section() {
@@ -1109,6 +1220,83 @@ mod tests {
         assert!(!w.contains("add network interfaces"));
         assert!(w.contains("set network.@interface[0].proto='static'"));
         assert!(!w.contains("set network.@interfaces[0].proto"));
+    }
+
+    // ── serialize_opkg (opkg and apk direct testing) ──
+
+    #[test]
+    fn test_serialize_opkg_empty() {
+        let mut w = String::new();
+        serialize_opkg(&mut w, PkgBackend::Opkg, None, None).unwrap();
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn test_serialize_opkg_feeds_opkg() {
+        let mut w = String::new();
+        let opkg = Opkg {
+            feeds: Some(vec!["src/gz custom 'test' https://example.com".into()]),
+            local_packages: None,
+        };
+        serialize_opkg(&mut w, PkgBackend::Opkg, Some(&opkg), None).unwrap();
+        assert!(w.contains("/etc/opkg/customfeeds.conf"));
+        assert!(w.contains("printf '%s\\n' 'src/gz custom '\\''test'\\'' https://example.com'"));
+    }
+
+    #[test]
+    fn test_serialize_opkg_feeds_apk() {
+        let mut w = String::new();
+        let opkg = Opkg {
+            feeds: Some(vec!["https://example.com/packages".into()]),
+            local_packages: None,
+        };
+        serialize_opkg(&mut w, PkgBackend::Apk, Some(&opkg), None).unwrap();
+        assert!(w.contains("/etc/apk/repositories.d/customfeeds.list"));
+        assert!(w.contains("printf '%s\\n' 'https://example.com/packages'"));
+    }
+
+    #[test]
+    fn test_serialize_opkg_packages_opkg() {
+        let mut w = String::new();
+        let pkgs = vec!["luci".into(), "tcpdump".into()];
+        serialize_opkg(&mut w, PkgBackend::Opkg, None, Some(&pkgs)).unwrap();
+        assert!(w.contains("NEED_INSTALL=false"));
+        assert!(w.contains("opkg list-installed"));
+        assert!(w.contains("opkg update && opkg install luci tcpdump"));
+    }
+
+    #[test]
+    fn test_serialize_opkg_packages_apk() {
+        let mut w = String::new();
+        let pkgs = vec!["luci".into(), "tcpdump".into()];
+        serialize_opkg(&mut w, PkgBackend::Apk, None, Some(&pkgs)).unwrap();
+        assert!(w.contains("NEED_INSTALL=false"));
+        assert!(w.contains("apk info -e"));
+        assert!(w.contains("apk -U add luci tcpdump"));
+    }
+
+    #[test]
+    fn test_serialize_opkg_local_packages_opkg() {
+        let mut w = String::new();
+        let opkg = Opkg {
+            feeds: None,
+            local_packages: Some(vec!["./packages/test_1.0_all.ipk".into()]),
+        };
+        serialize_opkg(&mut w, PkgBackend::Opkg, Some(&opkg), None).unwrap();
+        assert!(w.contains("opkg list-installed \"test\""));
+        assert!(w.contains("opkg install /tmp/test_1.0_all.ipk"));
+    }
+
+    #[test]
+    fn test_serialize_opkg_local_packages_apk() {
+        let mut w = String::new();
+        let opkg = Opkg {
+            feeds: None,
+            local_packages: Some(vec!["./packages/test_1.0_all.apk".into()]),
+        };
+        serialize_opkg(&mut w, PkgBackend::Apk, Some(&opkg), None).unwrap();
+        assert!(w.contains("apk info -e \"test\""));
+        assert!(w.contains("apk add --allow-untrusted /tmp/test_1.0_all.apk"));
     }
 
     // ── load_secrets_dir ──
@@ -1230,6 +1418,7 @@ mod tests {
         fs::write(
             &json_path,
             r#"{
+            "packageManager": "opkg",
             "settings": {
                 "system": {
                     "system": { "_type": "system", "hostname": "test" }
@@ -1253,6 +1442,7 @@ mod tests {
         fs::write(
             &json_path,
             r#"{
+            "packageManager": "opkg",
             "settings": {
                 "wifi": {
                     "radio0": { "_type": "wifi-iface", "key": "@wifi_pass@" }
@@ -1288,6 +1478,7 @@ mod tests {
         fs::write(
             &json_path,
             r#"{
+            "packageManager": "opkg",
             "settings": {},
             "opkg": { "feeds": ["src/gz custom https://example.com/repo"] }
         }"#,
@@ -1305,6 +1496,7 @@ mod tests {
         fs::write(
             &json_path,
             r#"{
+            "packageManager": "opkg",
             "settings": {},
             "packages": ["luci", "tcpdump"]
         }"#,
@@ -1322,6 +1514,7 @@ mod tests {
         fs::write(
             &json_path,
             r#"{
+            "packageManager": "opkg",
             "settings": {},
             "opkg": { "localPackages": ["./pkg/foo_1.0.ipk"] }
         }"#,
@@ -1339,6 +1532,7 @@ mod tests {
         fs::write(
             &json_path,
             r#"{
+            "packageManager": "opkg",
             "settings": {},
             "opkg": { "feeds": ["src/gz test it's a feed"] }
         }"#,
@@ -1346,5 +1540,28 @@ mod tests {
         .unwrap();
         let output = convert_file(&json_path, None).unwrap();
         assert!(output.contains("'\\''"));
+    }
+
+    #[test]
+    fn convert_file_apk_backend() {
+        let dir = TempDir::new().unwrap();
+        let json_path = dir.path().join("config.json");
+        fs::write(
+            &json_path,
+            r#"{
+            "packageManager": "apk",
+            "settings": {},
+            "packages": ["luci"],
+            "opkg": {
+                "feeds": ["https://example.com/packages"],
+                "localPackages": ["./pkg/foo_1.0_all.apk"]
+            }
+        }"#,
+        )
+        .unwrap();
+        let output = convert_file(&json_path, None).unwrap();
+        assert!(output.contains("/etc/apk/repositories.d/customfeeds.list"));
+        assert!(output.contains("apk -U add luci"));
+        assert!(output.contains("apk add --allow-untrusted /tmp/foo_1.0_all.apk"));
     }
 }

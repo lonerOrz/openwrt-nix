@@ -30,6 +30,7 @@ in
       };
       json = (formats.json { }).generate "uci.json" {
         inherit (res.config.uci)
+          packageManager
           settings
           secrets
           packages

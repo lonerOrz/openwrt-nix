@@ -1,6 +1,11 @@
 { pkgs, lib, ... }:
 {
-  options.uci = {
+    options.uci = {
+    packageManager = lib.mkOption {
+      default = "opkg";
+      type = lib.types.enum [ "opkg" "apk" ];
+      description = "Package manager backend: opkg (OpenWrt ≤24.10) or apk (OpenWrt ≥25.12).";
+    };
     settings = lib.mkOption {
       default = { };
       inherit (pkgs.formats.json { }) type;
