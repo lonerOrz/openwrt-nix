@@ -1,131 +1,157 @@
-<!-- README_en.md -->
+# nuci (Nix-UCI)
 
-<p align="right">
-  <a href=".github/doc/README_zh.md">🇨🇳 中文</a>
-</p>
+Declarative configuration management for OpenWrt routers. Nix defines the config, Rust compiles it to UCI, and a hermetic shell script deploys it over SSH.
 
-# 🧙 Declarative Management of OpenWrt Routers with Nix
+## Architecture
 
-This project provides a comprehensive and declarative framework for managing the entire lifecycle of OpenWrt routers using [Nix](https://nixos.org/) and [Just](https://github.com/casey/just).
-It transforms your router configuration into code, enabling full reproducibility, version control, and automation.
+```
+Nix Config (.nix)
+       │
+       ▼
+  lib.evalModules ──► uci.json
+                          │
+SOPS secrets ──► age decrypt (local)
+                          │
+                          ▼
+                    nuci (Rust)
+                 validate → resolve → serialize
+                          │
+                          ▼
+               uci -q batch <<'EOF'
+               commit <config>
+               EOF
+                          │
+                     SSH pipe ──► Target Router
+```
 
-> This is not just a UCI configuration tool — it’s a complete router management solution covering everything from initial setup and firmware upgrades to daily maintenance.
+**Pipeline:** `JSON → parse → validate_root → resolve_secrets → serialize_uci → serialize_opkg → shell`
 
-## ✨ Features
+## Features
 
-- **Declarative Configuration**: Define all UCI settings (network, wireless, firewall, etc.) intuitively using the Nix language. Say goodbye to manual `uci` commands.
-- **Complete Device Initialization**: Run `just apply` once to fully configure new devices, set passwords, install SSH keys, and apply all system settings.
-- **Automated Firmware Upgrades**: `just upgrade` automatically detects the latest OpenWrt version, downloads the firmware, upgrades the device, and restores your configuration.
-- **Secure Secret Management**: Seamlessly integrated with [sops](https://github.com/mozilla/sops) to securely manage and encrypt sensitive information like WiFi passwords and API keys.
-- **Package Management**: Declare packages to install via `opkg` within the Nix config for automated deployment (WIP).
+- **`uci batch` blocks** — atomic writes per config file, minimizing fork/exec overhead on embedded devices
+- **AST secret resolution** — `@placeholder@` interpolation happens in a dedicated pass before serialization; the serializer never sees secrets
+- **Deterministic output** — `BTreeMap` ordering guarantees consistent UCI command sequences and reproducible `dry-run` diffs
+- **UCI spec validation** — config/section/option names enforced as `[a-zA-Z0-9_]`, types allow `[a-zA-Z0-9_-]` (for `wifi-iface` etc.), null values blocked; empty list sections are rejected to prevent spurious type-mismatched cleanup loops; fails fast at parse time
+- **Deploy-time decryption** — SOPS files decrypted locally via `age`, only plaintext UCI batch crosses the SSH pipe; no private keys on the router
+- **Rollback watchdog** — background process on the target restores `/etc/config` backup if connectivity isn't re-established within 60s
+- **SSH key lockout prevention** — deployment script ensures the deployer's current key is always appended to `authorized_keys`
+- **Package management** — dual-backend support (`opkg` for older releases, `apk` for OpenWrt 25.12+); manages feeds, remote packages, and local `.ipk`/`.apk` transfer via SCP
 
-## 🚀 Getting Started
+## Getting Started
 
-### 1️⃣ Install Dependencies
+### Prerequisites
 
-Make sure the following tools are installed:
+- [Nix](https://nixos.org/download.html) with flakes enabled (`experimental-features = nix-command flakes`)
+- [Just](https://github.com/casey/just) task runner
+- [age](https://github.com/FiloSottile/age) for SOPS encryption
+- Target device: default `Justfile` targets Linksys E8450 (UBI); edit `sysupgrade_url` for other devices
 
-- **Nix (with Flakes enabled)**:
-  Install Nix following the [official guide](https://nixos.org/download.html) and add the following to your `nix.conf`:
+### 1. Clone and enter the project
 
-  ```bash
-  experimental-features = nix-command flakes
-  ```
+```bash
+git clone https://github.com/lonerOrz/openwrt-nix.git
+cd openwrt-nix
+```
 
-- **Just (task runner)**:
+### 2. Set up secrets
 
-  ```bash
-  nix-env -iA nixpkgs.just
-  ```
+```bash
+age-keygen -o age.key
+```
 
-- **age (used for SOPS encryption)**:
+Create `.sops.yaml`:
 
-  ```bash
-  nix-env -iA nixpkgs.age
-  ```
+```yaml
+creation_rules:
+  - path_regex: secrets\.enc\.json$
+    age:
+      - <YOUR_AGE_PUBLIC_KEY>
+```
 
-- **Target Device**:
-  The default firmware download URL in the `Justfile` is hardcoded for the Linksys E8450 (UBI). If you're using another device, be sure to modify the `sysupgrade_url` in `Justfile`.
+Create and encrypt your secrets file:
 
-### 2️⃣ Initialize the Project
+```bash
+sops secrets.enc.json
+# add keys like: wifi_password, root_password, tsig_key, etc.
+```
 
-1. Clone the repository:
+### 3. Configure
 
-   ```bash
-   git clone https://github.com/Mic92/openwrt-nix.git
-   cd openwrt-nix
-   ```
+Edit `example.nix` (or create your own config). Reference secrets with `@placeholder@`:
 
-2. Configure Secrets (sops):
-   - Generate an `age` key pair:
+```nix
+uci.settings.wireless.radio0.key = "@wifi_password@";
+```
 
-     ```bash
-     age-keygen -o age.key
-     ```
+Set your router IP in the `Justfile` (`host` variable) or export `ROUTER_HOST`.
 
-     Save the `age.key` private key and copy the public key (`age1...`) for configuration use.
+### 4. Deploy
 
-   - Create a `.sops.yaml` file:
+```bash
+just apply          # full deployment: SSH keys, password, UCI, packages
+just dry-run        # preview changes without applying
+just upgrade        # download + flash latest OpenWrt, then re-apply config
+```
 
-     ```yaml
-     creation_rules:
-       - path_regex: secrets.yml
-         age:
-           - YOUR_AGE_PUBLIC_KEY_HERE
-     ```
+## Development
 
-     > Replace `YOUR_AGE_PUBLIC_KEY_HERE` with your actual public key.
+### Run all tests
 
-   - Create and encrypt the `secrets.yml` file:
+```bash
+just test-all
+```
 
-     ```bash
-     sops secrets.yml
-     ```
+### Unit tests (69)
 
-     Example content:
+```bash
+just test-unit      # cargo test + 5 mock JSON files through the binary
+```
 
-     ```yaml
-     root_password: "your-super-secret-password"
-     wifi_password: "your-wifi-password"
-     ```
+### Integration tests (10 phases)
 
-### 3️⃣ Customize Your Configuration
+```bash
+just test-integration
+```
 
-1. Edit the `Justfile`:
-   - Set your router's IP address: `host = "192.168.1.1"`
-   - If not using the Linksys E8450, modify `sysupgrade_url` to point to your device’s firmware.
+Runs `test/run_integration.sh` against a Podman container (`openwrt/rootfs:latest`):
 
-2. Write your Nix configuration:
-   - Use `example.nix` as a template.
+| Phase | What                                                         |
+| ----- | ------------------------------------------------------------ |
+| 1-2   | Build & start container                                      |
+| 3-5   | Wait for dropbear, inject SSH key, create SSH config         |
+| 6     | Generate temp age key, SOPS-encrypt mock secrets             |
+| 7     | Verify `nuci` command generation via `nix run .#test-deploy` |
+| 8     | Deploy into container, verify UCI state with `uci get`       |
+| 9     | Verify JSON artifact structure                               |
+| 10    | Watchdog rollback test: break config, verify auto-restore    |
 
-   - Declare UCI settings and reference secrets via placeholders, e.g.:
+### Other commands
 
-     ```nix
-     key = "@wifi_password@";
-     ```
+```bash
+just fmt            # cargo fmt + nix fmt
+just clippy         # cargo clippy -D warnings
+just eval-config    # render UCI commands to stdout
+just ssh <cmd>      # execute command on router
+```
 
-   - Placeholders will be replaced with actual values from `secrets.yml` during deployment.
+## Project Structure
 
-### 4️⃣ Deploy and Manage
+```
+├── src/main.rs              # Rust UCI compiler (~1200 LOC, 69 tests)
+├── nix/
+│   ├── default.nix          # writeUci: JSON generator + deployment script
+│   ├── module-options.nix   # NixOS-style option declarations
+│   └── nuci.nix             # Rust package build
+├── flake.nix                # Build system entry
+├── Justfile                 # Task runner
+├── example.nix              # Example/real router config
+├── test/
+│   ├── run_integration.sh   # 10-phase E2E test
+│   ├── Containerfile        # OpenWrt test container
+│   └── test_config.nix      # Test fixture
+└── Cargo.toml
+```
 
-Use the following commands to manage your router:
+## License
 
-- **Apply Configuration (Init/Update):**
-
-  ```bash
-  just apply
-  ```
-
-- **Upgrade Firmware and Restore Config:**
-
-  ```bash
-  just upgrade
-  ```
-
-## 🤝 Contributing
-
-PRs and issues are welcome! If you have any suggestions, improvements, or problems, feel free to open an issue.
-
-## 📄 License
-
-This project is licensed under the [MIT License](LICENSE).
+MIT

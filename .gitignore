@@ -1,3 +1,12 @@
+# Nix
 .direnv/
 .envrc
+/result
+/result-*
+**/*.rs.bk
+
+# Src
 bin/
+
+# Rust
+/target/

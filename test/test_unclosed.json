@@ -1,0 +1,11 @@
+{
+  "settings": {
+    "test": {
+      "config": {
+        "_type": "system",
+        "hostname": "my@unclosed",
+        "partial": "has@in@middle@here"
+      }
+    }
+  }
+}
