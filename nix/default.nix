@@ -117,10 +117,10 @@ in
 
         # Start rollback watchdog on target (60s timeout)
         # PID saved on target; deployer kills it after successful reconnection
-        $SSH $SSH_OPTS "$TARGET" "( sleep 60; cp -a /tmp/.uci-rollback-backup/* /etc/config/; /etc/init.d/network restart; rm -rf /tmp/.uci-rollback-backup /tmp/.uci-watchdog-pid ) & echo \$! > /tmp/.uci-watchdog-pid"
+        $SSH $SSH_OPTS "$TARGET" "( sleep 60; cp -a /tmp/.uci-rollback-backup/* /etc/config/; if [ -x /sbin/reload_config ]; then /sbin/reload_config; else /etc/init.d/network restart; fi || true; rm -rf /tmp/.uci-rollback-backup /tmp/.uci-watchdog-pid ) & echo \$! > /tmp/.uci-watchdog-pid"
 
-        # Restart network to apply changes
-        $SSH $SSH_OPTS "$TARGET" "/etc/init.d/network restart" || true
+        # Restart services to apply changes gracefully
+        $SSH $SSH_OPTS "$TARGET" "if [ -x /sbin/reload_config ]; then /sbin/reload_config; else /etc/init.d/network restart; fi" || true
 
         # Wait for target to come back, then kill watchdog
         echo "Waiting for target to come back (60s rollback window)..." >&2
