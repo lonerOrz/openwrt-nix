@@ -153,19 +153,13 @@ fn resolve_secrets(mut root: Root, secrets: &HashMap<String, String>) -> Result<
             match section {
                 Section::List(arr) => {
                     for map in arr {
-                        for (k, v) in map.iter_mut() {
-                            if k == "_type" {
-                                continue;
-                            }
+                        for (_, v) in iter_options_mut(map) {
                             resolve_value(v, secrets)?;
                         }
                     }
                 }
                 Section::Named(map) => {
-                    for (k, v) in map.iter_mut() {
-                        if k == "_type" {
-                            continue;
-                        }
+                    for (_, v) in iter_options_mut(map) {
                         resolve_value(v, secrets)?;
                     }
                 }
@@ -187,6 +181,18 @@ fn resolve_secrets(mut root: Root, secrets: &HashMap<String, String>) -> Result<
 
 fn escape_single_quotes(s: &str) -> String {
     s.replace('\'', "'\\''")
+}
+
+fn iter_options(map: &Map<String, Value>) -> impl Iterator<Item = (&str, &Value)> {
+    map.iter()
+        .filter(|(k, _)| k.as_str() != "_type")
+        .map(|(k, v)| (k.as_str(), v))
+}
+
+fn iter_options_mut(map: &mut Map<String, Value>) -> impl Iterator<Item = (&str, &mut Value)> {
+    map.iter_mut()
+        .filter(|(k, _)| k.as_str() != "_type")
+        .map(|(k, v)| (k.as_str(), v))
 }
 
 fn is_valid_uci_identifier(s: &str) -> bool {
@@ -211,6 +217,12 @@ fn validate_root(root: &Root) -> Result<(), ConfigError> {
         for (section_name, section) in sections {
             match section {
                 Section::List(arr) => {
+                    if arr.is_empty() {
+                        return Err(ConfigError(format!(
+                            "Empty list section '{}' in config '{}' is not supported: its UCI type cannot be determined. To remove a section, omit it from your Nix configuration.",
+                            section_name, config_name
+                        )));
+                    }
                     if !is_valid_uci_type(section_name) {
                         return Err(ConfigError(format!(
                             "Invalid list identifier '{}' in config '{}': only [a-zA-Z0-9_-] allowed",
@@ -233,10 +245,7 @@ fn validate_root(root: &Root) -> Result<(), ConfigError> {
                             )));
                         }
 
-                        for (opt_name, opt_val) in item {
-                            if opt_name == "_type" {
-                                continue;
-                            }
+                        for (opt_name, opt_val) in iter_options(item) {
                             if !is_valid_uci_identifier(opt_name) {
                                 return Err(ConfigError(format!(
                                     "Invalid option '{}' in {}.@{}[{}]: only [a-zA-Z0-9_] allowed",
@@ -274,10 +283,7 @@ fn validate_root(root: &Root) -> Result<(), ConfigError> {
                         )));
                     }
 
-                    for (opt_name, opt_val) in map {
-                        if opt_name == "_type" {
-                            continue;
-                        }
+                    for (opt_name, opt_val) in iter_options(map) {
                         if !is_valid_uci_identifier(opt_name) {
                             return Err(ConfigError(format!(
                                 "Invalid option '{}' in {}.{}: only [a-zA-Z0-9_] allowed",
@@ -388,10 +394,7 @@ fn serialize_uci(
 
                         writeln!(uci_cmds, "add {} {}", config_name, ty).unwrap();
 
-                        for (option_name, option) in list_obj {
-                            if option_name == "_type" {
-                                continue;
-                            }
+                        for (option_name, option) in iter_options(list_obj) {
                             let key = format!("{}.@{}[{}].{}", config_name, ty, idx, option_name);
                             serialize_option_val(&mut uci_cmds, &key, option)?;
                         }
@@ -405,10 +408,7 @@ fn serialize_uci(
                     writeln!(uci_cmds, "delete {}.{}", config_name, section_name).unwrap();
                     writeln!(uci_cmds, "set {}.{}={}", config_name, section_name, ty).unwrap();
 
-                    for (option_name, option) in obj {
-                        if option_name == "_type" {
-                            continue;
-                        }
+                    for (option_name, option) in iter_options(obj) {
                         let key = format!("{}.{}.{}", config_name, section_name, option_name);
                         serialize_option_val(&mut uci_cmds, &key, option)?;
                     }
@@ -1013,6 +1013,21 @@ mod tests {
         };
         let err = validate_root(&root).unwrap_err();
         assert!(err.0.contains("missing required '_type'"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_list_section() {
+        let root = Root {
+            package_manager: "opkg".into(),
+            settings: BTreeMap::from([(
+                "wireless".into(),
+                BTreeMap::from([("wifi-iface".into(), Section::List(vec![]))]),
+            )]),
+            packages: None,
+            opkg: None,
+        };
+        let err = validate_root(&root).unwrap_err();
+        assert!(err.0.contains("Empty list section"));
     }
 
     #[test]
