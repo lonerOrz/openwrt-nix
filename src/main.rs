@@ -342,6 +342,67 @@ fn load_secrets_dir(dir_path: &str) -> Result<HashMap<String, String>, ConfigErr
     Ok(secrets)
 }
 
+fn serialize_opkg(
+    writer: &mut String,
+    opkg: Option<&Opkg>,
+    packages: Option<&[String]>,
+) -> Result<(), ConfigError> {
+    if let Some(opkg_val) = opkg
+        && let Some(feeds) = &opkg_val.feeds
+        && !feeds.is_empty()
+    {
+        writeln!(writer, "\nprintf '' > /etc/opkg/customfeeds.conf").unwrap();
+        for feed in feeds {
+            writeln!(
+                writer,
+                "printf '%s\\n' '{}' >> /etc/opkg/customfeeds.conf",
+                feed.replace('\'', "'\\''")
+            )
+            .unwrap();
+        }
+    }
+
+    if let Some(pkgs) = packages
+        && !pkgs.is_empty()
+    {
+        writeln!(writer, "\nNEED_INSTALL=false").unwrap();
+        writeln!(writer, "for pkg in {}; do", pkgs.join(" ")).unwrap();
+        writeln!(
+            writer,
+            "    if ! opkg list-installed \"$pkg\" >/dev/null 2>&1; then NEED_INSTALL=true; break; fi"
+        )
+        .unwrap();
+        writeln!(writer, "done").unwrap();
+        writeln!(
+            writer,
+            "if [ \"$NEED_INSTALL\" = true ]; then opkg update && opkg install {}; fi",
+            pkgs.join(" ")
+        )
+        .unwrap();
+    }
+
+    if let Some(opkg_val) = opkg
+        && let Some(local_pkgs) = &opkg_val.local_packages
+    {
+        for ipk_path_str in local_pkgs {
+            let ipk_path = Path::new(ipk_path_str);
+            if let Some(file_name) = ipk_path.file_name().and_then(|n| n.to_str()) {
+                let pkg_name = extract_package_name(file_name);
+                writeln!(
+                    writer,
+                    "\nif ! opkg list-installed \"{}\" >/dev/null 2>&1; then",
+                    pkg_name
+                )
+                .unwrap();
+                writeln!(writer, "    opkg install /tmp/{}", file_name).unwrap();
+                writeln!(writer, "fi").unwrap();
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn convert_file(path: &Path, secrets_dir: Option<&str>) -> Result<String, ConfigError> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
@@ -357,63 +418,11 @@ fn convert_file(path: &Path, secrets_dir: Option<&str>) -> Result<String, Config
 
     let mut output_buffer = String::with_capacity(4096);
     serialize_uci(&mut output_buffer, &resolved_root.settings)?;
-
-    if let Some(opkg) = &resolved_root.opkg
-        && let Some(feeds) = &opkg.feeds
-        && !feeds.is_empty()
-    {
-        writeln!(
-            &mut output_buffer,
-            "\nprintf '' > /etc/opkg/customfeeds.conf"
-        )
-        .unwrap();
-        for feed in feeds {
-            writeln!(
-                &mut output_buffer,
-                "printf '%s\\n' '{}' >> /etc/opkg/customfeeds.conf",
-                feed.replace('\'', "'\\''")
-            )
-            .unwrap();
-        }
-    }
-
-    if let Some(pkgs) = &resolved_root.packages
-        && !pkgs.is_empty()
-    {
-        writeln!(&mut output_buffer, "\nNEED_INSTALL=false").unwrap();
-        writeln!(&mut output_buffer, "for pkg in {}; do", pkgs.join(" ")).unwrap();
-        writeln!(
-                &mut output_buffer,
-                "    if ! opkg list-installed \"$pkg\" >/dev/null 2>&1; then NEED_INSTALL=true; break; fi"
-            )
-            .unwrap();
-        writeln!(&mut output_buffer, "done").unwrap();
-        writeln!(
-            &mut output_buffer,
-            "if [ \"$NEED_INSTALL\" = true ]; then opkg update && opkg install {}; fi",
-            pkgs.join(" ")
-        )
-        .unwrap();
-    }
-
-    if let Some(opkg) = &resolved_root.opkg
-        && let Some(local_pkgs) = &opkg.local_packages
-    {
-        for ipk_path_str in local_pkgs {
-            let ipk_path = Path::new(ipk_path_str);
-            if let Some(file_name) = ipk_path.file_name().and_then(|n| n.to_str()) {
-                let pkg_name = extract_package_name(file_name);
-                writeln!(
-                    &mut output_buffer,
-                    "\nif ! opkg list-installed \"{}\" >/dev/null 2>&1; then",
-                    pkg_name
-                )
-                .unwrap();
-                writeln!(&mut output_buffer, "    opkg install /tmp/{}", file_name).unwrap();
-                writeln!(&mut output_buffer, "fi").unwrap();
-            }
-        }
-    }
+    serialize_opkg(
+        &mut output_buffer,
+        resolved_root.opkg.as_ref(),
+        resolved_root.packages.as_deref(),
+    )?;
 
     Ok(output_buffer)
 }
