@@ -28,7 +28,10 @@
       };
     };
   };
-  uci.packages = [ "luci" "tcpdump" ];
+  uci.packages = [
+    "luci"
+    "tcpdump"
+  ];
   uci.opkg = {
     feeds = [
       "https://example.com/packages"
@@ -37,9 +40,8 @@
       "./packages/test-package_1.0_all.apk"
     ];
   };
-  uci.secrets.sops.files = [
-    ./secrets.enc.json
-  ];
+  uci.secrets =
+    if builtins.pathExists ./secrets.enc.json then { sops.files = [ ./secrets.enc.json ]; } else { };
   uci.sshKeys = [
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKey test@host"
   ];
