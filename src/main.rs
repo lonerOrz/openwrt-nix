@@ -114,7 +114,7 @@ fn serialize_option_val(
             let interpolated = interpolate_secrets(s, secrets)?;
             writeln!(
                 writer,
-                "uci set {}='{}'",
+                "set {}='{}'",
                 key,
                 escape_single_quotes(&interpolated)
             )
@@ -125,7 +125,7 @@ fn serialize_option_val(
             let interpolated = interpolate_secrets(&s, secrets)?;
             writeln!(
                 writer,
-                "uci set {}='{}'",
+                "set {}='{}'",
                 key,
                 escape_single_quotes(&interpolated)
             )
@@ -136,7 +136,7 @@ fn serialize_option_val(
             let interpolated = interpolate_secrets(&s, secrets)?;
             writeln!(
                 writer,
-                "uci set {}='{}'",
+                "set {}='{}'",
                 key,
                 escape_single_quotes(&interpolated)
             )
@@ -158,7 +158,7 @@ fn serialize_option_val(
                 let interpolated = interpolate_secrets(&s, secrets)?;
                 writeln!(
                     writer,
-                    "uci add_list {}='{}'",
+                    "add_list {}='{}'",
                     key,
                     escape_single_quotes(&interpolated)
                 )
@@ -181,11 +181,12 @@ fn serialize_uci(
     secrets: &HashMap<String, String>,
 ) -> Result<(), ConfigError> {
     for (config_name, sections) in configs {
+        let mut shell_cmds = String::new();
+        let mut uci_cmds = String::new();
+
         for (section_name, section) in sections {
             match section {
                 Section::List(arr) => {
-                    // 1. Resolve the real UCI section type from the first item's _type,
-                    //    falling back to the Nix key name if the array is empty.
                     let list_ty = if let Some(first) = arr.first() {
                         first
                             .get("_type")
@@ -195,9 +196,8 @@ fn serialize_uci(
                         section_name
                     };
 
-                    // 2. Delete existing sections using the real type
                     writeln!(
-                        writer,
+                        shell_cmds,
                         "while uci -q delete {}.@{}[0]; do :; done",
                         config_name, list_ty
                     )
@@ -215,40 +215,46 @@ fn serialize_uci(
                                     ))
                                 })?;
 
-                        writeln!(writer, "uci add {} {}", config_name, ty).unwrap();
+                        writeln!(uci_cmds, "add {} {}", config_name, ty).unwrap();
 
                         for (option_name, option) in list_obj {
                             if option_name == "_type" {
                                 continue;
                             }
-                            // 3. Use the real type (ty) for the key path, not section_name
                             let key = format!("{}.@{}[{}].{}", config_name, ty, idx, option_name);
-                            serialize_option_val(writer, &key, option, secrets)?;
+                            serialize_option_val(&mut uci_cmds, &key, option, secrets)?;
                         }
                     }
                 }
                 Section::Named(obj) => {
-                    writeln!(writer, "uci delete {}.{}", config_name, section_name).unwrap();
-
                     let ty = obj.get("_type").and_then(|v| v.as_str()).ok_or_else(|| {
                         ConfigError(format!("{}.{} has no type", config_name, section_name))
                     })?;
 
-                    writeln!(writer, "uci set {}.{}={}", config_name, section_name, ty).unwrap();
+                    writeln!(uci_cmds, "delete {}.{}", config_name, section_name).unwrap();
+                    writeln!(uci_cmds, "set {}.{}={}", config_name, section_name, ty).unwrap();
 
                     for (option_name, option) in obj {
                         if option_name == "_type" {
                             continue;
                         }
                         let key = format!("{}.{}.{}", config_name, section_name, option_name);
-                        serialize_option_val(writer, &key, option, secrets)?;
+                        serialize_option_val(&mut uci_cmds, &key, option, secrets)?;
                     }
                 }
             }
         }
+
+        write!(writer, "{}", shell_cmds).unwrap();
+
+        if !uci_cmds.is_empty() {
+            writeln!(writer, "uci -q batch <<'UCI_EOF'").unwrap();
+            write!(writer, "{}", uci_cmds).unwrap();
+            writeln!(writer, "commit {}", config_name).unwrap();
+            writeln!(writer, "UCI_EOF").unwrap();
+        }
     }
 
-    writeln!(writer, "uci commit").unwrap();
     Ok(())
 }
 
@@ -502,7 +508,7 @@ mod tests {
             &HashMap::new(),
         )
         .unwrap();
-        assert_eq!(w, "uci set system.hostname='test'\n");
+        assert_eq!(w, "set system.hostname='test'\n");
     }
 
     #[test]
@@ -515,14 +521,14 @@ mod tests {
             &HashMap::new(),
         )
         .unwrap();
-        assert_eq!(w, "uci set dhcp.start='100'\n");
+        assert_eq!(w, "set dhcp.start='100'\n");
     }
 
     #[test]
     fn serialize_bool_val() {
         let mut w = String::new();
         serialize_option_val(&mut w, "wifi.enabled", &Value::Bool(true), &HashMap::new()).unwrap();
-        assert_eq!(w, "uci set wifi.enabled='true'\n");
+        assert_eq!(w, "set wifi.enabled='true'\n");
     }
 
     #[test]
@@ -530,8 +536,8 @@ mod tests {
         let mut w = String::new();
         let arr = Value::Array(vec!["a".into(), "b".into()]);
         serialize_option_val(&mut w, "net.dns", &arr, &HashMap::new()).unwrap();
-        assert!(w.contains("uci add_list net.dns='a'"));
-        assert!(w.contains("uci add_list net.dns='b'"));
+        assert!(w.contains("add_list net.dns='a'"));
+        assert!(w.contains("add_list net.dns='b'"));
     }
 
     #[test]
@@ -563,7 +569,7 @@ mod tests {
         let val = Value::String("@wifi_key@".into());
         let secs = secrets(&[("wifi_key", "s3cret")]);
         serialize_option_val(&mut w, "wifi.key", &val, &secs).unwrap();
-        assert_eq!(w, "uci set wifi.key='s3cret'\n");
+        assert_eq!(w, "set wifi.key='s3cret'\n");
     }
 
     #[test]
@@ -571,7 +577,7 @@ mod tests {
         let mut w = String::new();
         let val = Value::String("it's".into());
         serialize_option_val(&mut w, "sys.name", &val, &HashMap::new()).unwrap();
-        assert_eq!(w, "uci set sys.name='it'\\''s'\n");
+        assert_eq!(w, "set sys.name='it'\\''s'\n");
     }
 
     // ── serialize_uci ──
@@ -589,10 +595,12 @@ mod tests {
         let mut w = String::new();
         serialize_uci(&mut w, &configs, &HashMap::new()).unwrap();
 
-        assert!(w.contains("uci delete network.lan"));
-        assert!(w.contains("uci set network.lan=interface"));
-        assert!(w.contains("uci set network.lan.proto='static'"));
-        assert!(w.contains("uci commit"));
+        assert!(w.contains("uci -q batch <<'UCI_EOF'"));
+        assert!(w.contains("delete network.lan"));
+        assert!(w.contains("set network.lan=interface"));
+        assert!(w.contains("set network.lan.proto='static'"));
+        assert!(w.contains("commit network"));
+        assert!(w.contains("UCI_EOF"));
         assert!(!w.contains("set -e"));
     }
 
@@ -610,9 +618,11 @@ mod tests {
         serialize_uci(&mut w, &configs, &HashMap::new()).unwrap();
 
         assert!(w.contains("while uci -q delete dropbear.@dropbear[0]; do :; done"));
-        assert!(w.contains("uci add dropbear dropbear"));
-        assert!(w.contains("uci set dropbear.@dropbear[0].Port='22'"));
-        assert!(!w.contains("uci set dropbear.@dropbear[0]=dropbear"));
+        assert!(w.contains("uci -q batch <<'UCI_EOF'"));
+        assert!(w.contains("add dropbear dropbear"));
+        assert!(w.contains("set dropbear.@dropbear[0].Port='22'"));
+        assert!(w.contains("commit dropbear"));
+        assert!(!w.contains("set dropbear.@dropbear[0]=dropbear"));
     }
 
     #[test]
@@ -659,9 +669,9 @@ mod tests {
         let mut w = String::new();
         serialize_uci(&mut w, &configs, &HashMap::new()).unwrap();
 
-        assert_eq!(w.matches("uci add dropbear dropbear").count(), 2);
-        assert!(w.contains("uci set dropbear.@dropbear[0].Port='22'"));
-        assert!(w.contains("uci set dropbear.@dropbear[1].Port='2222'"));
+        assert_eq!(w.matches("add dropbear dropbear").count(), 2);
+        assert!(w.contains("set dropbear.@dropbear[0].Port='22'"));
+        assert!(w.contains("set dropbear.@dropbear[1].Port='2222'"));
     }
 
     #[test]
@@ -682,12 +692,12 @@ mod tests {
         assert!(!w.contains("while uci -q delete network.@interfaces[0]"));
 
         // Verify add uses the real type "interface"
-        assert!(w.contains("uci add network interface"));
-        assert!(!w.contains("uci add network interfaces"));
+        assert!(w.contains("add network interface"));
+        assert!(!w.contains("add network interfaces"));
 
         // Verify set uses the real type "interface"
-        assert!(w.contains("uci set network.@interface[0].proto='static'"));
-        assert!(!w.contains("uci set network.@interfaces[0].proto"));
+        assert!(w.contains("set network.@interface[0].proto='static'"));
+        assert!(!w.contains("set network.@interfaces[0].proto"));
     }
 
     // ── load_secrets_dir ──
@@ -790,7 +800,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("top.json"), r#"{"top_key": "top_val"}"#).unwrap();
         fs::create_dir(dir.path().join("subdir")).unwrap();
-        fs::write(dir.path().join("subdir/nested.json"), r#"{"nested_key": "nested_val"}"#).unwrap();
+        fs::write(
+            dir.path().join("subdir/nested.json"),
+            r#"{"nested_key": "nested_val"}"#,
+        )
+        .unwrap();
         let result = load_secrets_dir(dir.path().to_str().unwrap()).unwrap();
         assert_eq!(result["top_key"], "top_val");
         assert!(!result.contains_key("nested_key"));
@@ -814,9 +828,9 @@ mod tests {
         )
         .unwrap();
         let output = convert_file(&json_path, None).unwrap();
-        assert!(output.starts_with("uci delete system.system"));
-        assert!(output.contains("uci set system.system.hostname='test'"));
-        assert!(output.contains("uci commit"));
+        assert!(output.contains("delete system.system"));
+        assert!(output.contains("set system.system.hostname='test'"));
+        assert!(output.contains("commit system"));
     }
 
     #[test]
@@ -838,7 +852,7 @@ mod tests {
         .unwrap();
         fs::write(secrets_path.join("s.json"), r#"{"wifi_pass": "secret123"}"#).unwrap();
         let output = convert_file(&json_path, Some(secrets_path.to_str().unwrap())).unwrap();
-        assert!(output.contains("uci set wifi.radio0.key='secret123'"));
+        assert!(output.contains("set wifi.radio0.key='secret123'"));
     }
 
     #[test]

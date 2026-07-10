@@ -85,24 +85,25 @@ check_cmd() {
   fi
 }
 
-check_cmd "uci add system system" "list section: system created via add"
+check_cmd "add system system" "list section: system created via add"
 # Verify redundant type set was removed (uci add already sets type)
-if echo "$NUCI_OUTPUT" | grep -qF "uci set system.@system[0]=system"; then
+if echo "$NUCI_OUTPUT" | grep -qF "set system.@system[0]=system"; then
   fail "Redundant type set still present for list sections"
 else
   pass "Redundant type set correctly removed"
 fi
-check_cmd "uci set system.@system[0].hostname='rauter'" "list section: hostname set"
-check_cmd "uci set system.@system[0].timezone='UTC'" "list section: timezone set"
-check_cmd "uci delete wireless.default_radio0" "named section: wireless deleted before recreate"
-check_cmd "uci set wireless.default_radio0=wifi-iface" "named section: wireless type set"
-check_cmd "uci set wireless.default_radio0.ssid='gchq-2.4'" "named section: ssid set"
-check_cmd "uci set wireless.default_radio0.key='test-wifi-plain-password'" "named section: wifi key set"
-check_cmd "uci delete network.lan" "named section: network deleted before recreate"
-check_cmd "uci set network.lan=interface" "named section: network type set"
-check_cmd "uci set network.lan.proto='static'" "named section: lan proto set"
-check_cmd "uci set network.lan.ipaddr='192.168.1.1'" "named section: lan ipaddr set"
-check_cmd "uci commit" "output: uci commit present"
+check_cmd "set system.@system[0].hostname='rauter'" "list section: hostname set"
+check_cmd "set system.@system[0].timezone='UTC'" "list section: timezone set"
+check_cmd "delete wireless.default_radio0" "named section: wireless deleted before recreate"
+check_cmd "set wireless.default_radio0=wifi-iface" "named section: wireless type set"
+check_cmd "set wireless.default_radio0.ssid='gchq-2.4'" "named section: ssid set"
+check_cmd "set wireless.default_radio0.key='test-wifi-plain-password'" "named section: wifi key set"
+check_cmd "delete network.lan" "named section: network deleted before recreate"
+check_cmd "set network.lan=interface" "named section: network type set"
+check_cmd "set network.lan.proto='static'" "named section: lan proto set"
+check_cmd "set network.lan.ipaddr='192.168.1.1'" "named section: lan ipaddr set"
+check_cmd "uci -q batch" "output: uci batch present"
+check_cmd "commit network" "output: commit present"
 check_cmd "printf '' > /etc/opkg/customfeeds.conf" "opkg: feeds file created"
 check_cmd "src/gz custom https://example.com/packages" "opkg: feed entry correct"
 check_cmd "opkg update && opkg install luci tcpdump" "opkg: packages install command"
