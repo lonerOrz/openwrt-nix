@@ -551,6 +551,13 @@ mod tests {
     }
 
     #[test]
+    fn serialize_null_val_errors() {
+        let mut w = String::new();
+        let err = serialize_option_val(&mut w, "key", &Value::Null, &HashMap::new()).unwrap_err();
+        assert!(err.0.contains("not a supported option value type"));
+    }
+
+    #[test]
     fn serialize_with_secret_interpolation() {
         let mut w = String::new();
         let val = Value::String("@wifi_key@".into());
@@ -776,6 +783,17 @@ mod tests {
         assert_eq!(result["str"], "hello");
         assert_eq!(result["num"], "42");
         assert_eq!(result["bool"], "true");
+    }
+
+    #[test]
+    fn load_secrets_skips_subdirectories() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("top.json"), r#"{"top_key": "top_val"}"#).unwrap();
+        fs::create_dir(dir.path().join("subdir")).unwrap();
+        fs::write(dir.path().join("subdir/nested.json"), r#"{"nested_key": "nested_val"}"#).unwrap();
+        let result = load_secrets_dir(dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(result["top_key"], "top_val");
+        assert!(!result.contains_key("nested_key"));
     }
 
     // ── convert_file end-to-end ──
