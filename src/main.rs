@@ -184,32 +184,45 @@ fn serialize_uci(
         for (section_name, section) in sections {
             match section {
                 Section::List(arr) => {
+                    // 1. Resolve the real UCI section type from the first item's _type,
+                    //    falling back to the Nix key name if the array is empty.
+                    let list_ty = if let Some(first) = arr.first() {
+                        first
+                            .get("_type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(section_name)
+                    } else {
+                        section_name
+                    };
+
+                    // 2. Delete existing sections using the real type
                     writeln!(
                         writer,
                         "while uci -q delete {}.@{}[0]; do :; done",
-                        config_name, section_name
+                        config_name, list_ty
                     )
                     .unwrap();
 
-                    for _ in 0..arr.len() {
-                        writeln!(writer, "uci add {} {}", config_name, section_name).unwrap();
-                    }
                     for (idx, list_obj) in arr.iter().enumerate() {
-                        list_obj.get("_type").ok_or_else(|| {
-                            ConfigError(format!(
-                                "{}.@{}[{}] has no type!",
-                                config_name, section_name, idx
-                            ))
-                        })?;
+                        let ty =
+                            list_obj
+                                .get("_type")
+                                .and_then(|v| v.as_str())
+                                .ok_or_else(|| {
+                                    ConfigError(format!(
+                                        "{}.@{}[{}] has no type!",
+                                        config_name, section_name, idx
+                                    ))
+                                })?;
+
+                        writeln!(writer, "uci add {} {}", config_name, ty).unwrap();
 
                         for (option_name, option) in list_obj {
                             if option_name == "_type" {
                                 continue;
                             }
-                            let key = format!(
-                                "{}.@{}[{}].{}",
-                                config_name, section_name, idx, option_name
-                            );
+                            // 3. Use the real type (ty) for the key path, not section_name
+                            let key = format!("{}.@{}[{}].{}", config_name, ty, idx, option_name);
                             serialize_option_val(writer, &key, option, secrets)?;
                         }
                     }
@@ -269,13 +282,14 @@ fn load_secrets_dir(dir_path: &str) -> Result<HashMap<String, String>, ConfigErr
                     };
 
                     if let Some(old_val) = secrets.insert(k.clone(), val_str)
-                        && old_val != secrets[k] {
-                            return Err(ConfigError(format!(
-                                "Secret key '{}' conflicts with different values across files. File causing conflict: '{}'",
-                                k,
-                                path.display()
-                            )));
-                        }
+                        && old_val != secrets[k]
+                    {
+                        return Err(ConfigError(format!(
+                            "Secret key '{}' conflicts with different values across files. File causing conflict: '{}'",
+                            k,
+                            path.display()
+                        )));
+                    }
                 }
             }
         }
@@ -641,6 +655,32 @@ mod tests {
         assert_eq!(w.matches("uci add dropbear dropbear").count(), 2);
         assert!(w.contains("uci set dropbear.@dropbear[0].Port='22'"));
         assert!(w.contains("uci set dropbear.@dropbear[1].Port='2222'"));
+    }
+
+    #[test]
+    fn serialize_list_section_type_mismatch() {
+        let mut configs = HashMap::new();
+        let mut sections = HashMap::new();
+        let mut item = Map::new();
+        item.insert("_type".into(), Value::String("interface".into()));
+        item.insert("proto".into(), Value::String("static".into()));
+        sections.insert("interfaces".into(), Section::List(vec![item]));
+        configs.insert("network".into(), sections);
+
+        let mut w = String::new();
+        serialize_uci(&mut w, &configs, &HashMap::new()).unwrap();
+
+        // Verify delete uses the real type "interface", not the key "interfaces"
+        assert!(w.contains("while uci -q delete network.@interface[0]; do :; done"));
+        assert!(!w.contains("while uci -q delete network.@interfaces[0]"));
+
+        // Verify add uses the real type "interface"
+        assert!(w.contains("uci add network interface"));
+        assert!(!w.contains("uci add network interfaces"));
+
+        // Verify set uses the real type "interface"
+        assert!(w.contains("uci set network.@interface[0].proto='static'"));
+        assert!(!w.contains("uci set network.@interfaces[0].proto"));
     }
 
     // ── load_secrets_dir ──
