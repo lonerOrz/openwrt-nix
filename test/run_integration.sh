@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Route container ops through CONTAINER_ENGINE (default podman; CI sets docker)
+CONTAINER_ENGINE="${CONTAINER_ENGINE:-podman}"
+podman() { command "$CONTAINER_ENGINE" "$@"; }
+
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CONTAINER_NAME="openwrt-integration-test"
 SSH_KEY_PATH="/tmp/openwrt_test_key"
@@ -98,58 +102,76 @@ nix shell nixpkgs#sops -c sops --config /dev/null --encrypt --age "$PUBKEY" \
 git add -N "$ENCRYPTED_SECRETS" 2>/dev/null || true
 ok "SOPS encrypted secrets created"
 
-# ── 7. Verify nuci command generation ──
+# ── 7. Verify nuci command generation (OPKG + APK) ──
 section "7/10 Verifying nuci command generation"
-NUCI_OUTPUT=$(SOPS_AGE_KEY_FILE="$SOPS_KEY_DIR/keys.txt" nix run "$PROJECT_ROOT#test-deploy" -- 2>/dev/null)
+NUCI_OUTPUT_OPKG=$(SOPS_AGE_KEY_FILE="$SOPS_KEY_DIR/keys.txt" nix run "$PROJECT_ROOT#test-deploy" -- 2>/dev/null)
+NUCI_OUTPUT_APK=$(SOPS_AGE_KEY_FILE="$SOPS_KEY_DIR/keys.txt" nix run "$PROJECT_ROOT#test-deploy-apk" -- 2>/dev/null)
 
-check_cmd() {
-  if echo "$NUCI_OUTPUT" | grep -qF "$1"; then
-    pass "$2"
+check_cmd_opkg() {
+  if echo "$NUCI_OUTPUT_OPKG" | grep -qF "$1"; then
+    pass "[OPKG] $2"
   else
-    fail "$2 — pattern not found: $1"
+    fail "[OPKG] $2 — pattern not found: $1"
   fi
 }
 
-check_cmd "add system system" "list section: system created via add"
-if echo "$NUCI_OUTPUT" | grep -qF "set system.@system[0]=system"; then
-  fail "Redundant type set still present for list sections"
-else
-  pass "Redundant type set correctly removed"
-fi
-check_cmd "set system.@system[0].hostname='rauter'" "list section: hostname set"
-check_cmd "set system.@system[0].timezone='UTC'" "list section: timezone set"
-check_cmd "delete wireless.default_radio0" "named section: wireless deleted before recreate"
-check_cmd "set wireless.default_radio0=wifi-iface" "named section: wireless type set"
-check_cmd "set wireless.default_radio0.ssid='gchq-2.4'" "named section: ssid set"
-check_cmd "set wireless.default_radio0.key='my-test-password'" "SOPS: wifi key decrypted correctly"
-check_cmd "delete network.lan" "named section: network deleted before recreate"
-check_cmd "set network.lan=interface" "named section: network type set"
-check_cmd "set network.lan.proto='static'" "named section: lan proto set"
-check_cmd "set network.lan.ipaddr='192.168.1.1'" "named section: lan ipaddr set"
-check_cmd "uci -q batch" "output: uci batch transaction format"
-check_cmd "commit network" "output: commit transaction present"
-check_cmd "printf '' > /etc/opkg/customfeeds.conf" "opkg: feeds file created"
-check_cmd "src/gz custom https://example.com/packages" "opkg: feed entry correct"
-check_cmd "opkg update && opkg install luci tcpdump" "opkg: packages install command"
-check_cmd "opkg install /tmp/test-package_1.0_all.ipk" "opkg: local package install"
+check_cmd_apk() {
+  if echo "$NUCI_OUTPUT_APK" | grep -qF "$1"; then
+    pass "[APK] $2"
+  else
+    fail "[APK] $2 — pattern not found: $1"
+  fi
+}
 
-# ── 8. Deploy to container and verify state ──
+# OPKG command stream
+check_cmd_opkg "add system system" "list section: system created via add"
+if echo "$NUCI_OUTPUT_OPKG" | grep -qF "set system.@system[0]=system"; then
+  fail "[OPKG] Redundant type set still present for list sections"
+else
+  pass "[OPKG] Redundant type set correctly removed"
+fi
+check_cmd_opkg "set system.@system[0].hostname='rauter'" "list section: hostname set"
+check_cmd_opkg "set system.@system[0].timezone='UTC'" "list section: timezone set"
+check_cmd_opkg "delete wireless.default_radio0" "named section: wireless deleted before recreate"
+check_cmd_opkg "set wireless.default_radio0=wifi-iface" "named section: wireless type set"
+check_cmd_opkg "set wireless.default_radio0.ssid='gchq-2.4'" "named section: ssid set"
+check_cmd_opkg "set wireless.default_radio0.key='my-test-password'" "SOPS: wifi key decrypted correctly"
+check_cmd_opkg "delete network.lan" "named section: network deleted before recreate"
+check_cmd_opkg "set network.lan=interface" "named section: network type set"
+check_cmd_opkg "set network.lan.proto='static'" "named section: lan proto set"
+check_cmd_opkg "set network.lan.ipaddr='192.168.1.1'" "named section: lan ipaddr set"
+check_cmd_opkg "uci -q batch" "output: uci batch transaction format"
+check_cmd_opkg "commit network" "output: commit transaction present"
+check_cmd_opkg "printf '' > /etc/opkg/customfeeds.conf" "opkg: feeds file created"
+check_cmd_opkg "src/gz custom https://example.com/packages" "opkg: feed entry correct"
+check_cmd_opkg "opkg update && opkg install luci tcpdump" "opkg: packages install command"
+check_cmd_opkg "opkg install /tmp/test-package_1.0_all.ipk" "opkg: local package install"
+
+# APK command stream
+check_cmd_apk "add system system" "list section: system created via add"
+if echo "$NUCI_OUTPUT_APK" | grep -qF "set system.@system[0]=system"; then
+  fail "[APK] Redundant type set still present for list sections"
+else
+  pass "[APK] Redundant type set correctly removed"
+fi
+check_cmd_apk "set system.@system[0].hostname='rauter-apk'" "list section: hostname set"
+check_cmd_apk "delete wireless.default_radio0" "named section: wireless deleted before recreate"
+check_cmd_apk "set wireless.default_radio0=wifi-iface" "named section: wireless type set"
+check_cmd_apk "set wireless.default_radio0.ssid='gchq-2.4'" "named section: ssid set"
+check_cmd_apk "set wireless.default_radio0.key='my-test-password'" "SOPS: wifi key decrypted correctly"
+check_cmd_apk "delete network.lan" "named section: network deleted before recreate"
+check_cmd_apk "set network.lan=interface" "named section: network type set"
+check_cmd_apk "set network.lan.proto='static'" "named section: lan proto set"
+check_cmd_apk "set network.lan.ipaddr='192.168.1.1'" "named section: lan ipaddr set"
+check_cmd_apk "uci -q batch" "output: uci batch transaction format"
+check_cmd_apk "commit network" "output: commit transaction present"
+check_cmd_apk "printf '' > /etc/apk/repositories.d/customfeeds.list" "apk: feeds file created"
+check_cmd_apk "https://example.com/packages" "apk: feed entry correct"
+check_cmd_apk "apk -U add luci tcpdump" "apk: packages install command"
+check_cmd_apk "apk add --allow-untrusted /tmp/test-package_1.0_all.apk" "apk: local package install"
+
+# ── 8. Deploy to container and verify state (OPKG + APK) ──
 section "8/10 Deploying to container and verifying state"
-SYNTAX_ERR=$(echo "$NUCI_OUTPUT" | podman exec -i "$CONTAINER_NAME" sh -n 2>&1)
-if [ -n "$SYNTAX_ERR" ]; then
-  fail "Syntax error in deployment script: $SYNTAX_ERR"
-else
-  ok "Full deployment script passes sh -n syntax check"
-fi
-
-DEPLOY_STDERR=$(echo "$NUCI_OUTPUT" | podman exec -i "$CONTAINER_NAME" sh -s 2>&1 >/dev/null || true)
-UNEXPECTED_ERRORS=$(echo "$DEPLOY_STDERR" | grep -v "uci: Entry not found" | grep -v "^$" || true)
-if [ -n "$UNEXPECTED_ERRORS" ]; then
-  fail "Unexpected errors during deployment:"
-  echo "$UNEXPECTED_ERRORS"
-else
-  ok "All commands executed without errors"
-fi
 
 check_value() {
   local actual
@@ -169,58 +191,121 @@ check_section() {
   fi
 }
 
+# OPKG deployment
+SYNTAX_ERR=$(echo "$NUCI_OUTPUT_OPKG" | podman exec -i "$CONTAINER_NAME" sh -n 2>&1)
+if [ -n "$SYNTAX_ERR" ]; then
+  fail "[OPKG] Syntax error in deployment script: $SYNTAX_ERR"
+else
+  ok "[OPKG] deployment script passes sh -n syntax check"
+fi
+
+DEPLOY_STDERR=$(echo "$NUCI_OUTPUT_OPKG" | podman exec -i "$CONTAINER_NAME" sh -s 2>&1 >/dev/null || true)
+UNEXPECTED_ERRORS=$(echo "$DEPLOY_STDERR" | grep -v "uci: Entry not found" | grep -v "^$" || true)
+if [ -n "$UNEXPECTED_ERRORS" ]; then
+  fail "[OPKG] Unexpected errors during deployment:"
+  echo "$UNEXPECTED_ERRORS"
+else
+  ok "[OPKG] All commands executed without errors"
+fi
+
 check_section "system.@system[0]"
 check_section "wireless.default_radio0"
 check_section "network.lan"
-
-check_value "system.@system[0].hostname" "rauter" "hostname"
-check_value "system.@system[0].timezone" "UTC" "timezone"
-check_value "wireless.default_radio0.ssid" "gchq-2.4" "ssid"
-check_value "wireless.default_radio0.key" "my-test-password" "wifi key (decrypted)"
-check_value "wireless.default_radio0.encryption" "sae-mixed" "encryption"
-check_value "network.lan.proto" "static" "lan proto"
-check_value "network.lan.ipaddr" "192.168.1.1" "lan ipaddr"
-check_value "network.lan.netmask" "255.255.255.0" "lan netmask"
-check_value "dropbear.@dropbear[0].PasswordAuth" "off" "dropbear PasswordAuth"
+check_value "system.@system[0].hostname" "rauter" "[OPKG] hostname"
+check_value "system.@system[0].timezone" "UTC" "[OPKG] timezone"
+check_value "wireless.default_radio0.ssid" "gchq-2.4" "[OPKG] ssid"
+check_value "wireless.default_radio0.key" "my-test-password" "[OPKG] wifi key (decrypted)"
+check_value "wireless.default_radio0.encryption" "sae-mixed" "[OPKG] encryption"
+check_value "network.lan.proto" "static" "[OPKG] lan proto"
+check_value "network.lan.ipaddr" "192.168.1.1" "[OPKG] lan ipaddr"
+check_value "network.lan.netmask" "255.255.255.0" "[OPKG] lan netmask"
+check_value "dropbear.@dropbear[0].PasswordAuth" "off" "[OPKG] dropbear PasswordAuth"
 
 FEEDS_CONTENT=$(podman exec "$CONTAINER_NAME" cat /etc/opkg/customfeeds.conf 2>/dev/null || true)
 if echo "$FEEDS_CONTENT" | grep -qF "src/gz custom https://example.com/packages"; then
-  pass "opkg: customfeeds.conf has correct feed"
+  pass "[OPKG] customfeeds.conf has correct feed"
 else
-  fail "opkg: customfeeds.conf missing or incorrect"
+  fail "[OPKG] customfeeds.conf missing or incorrect"
 fi
 
 OPKG_LOG=$(podman exec "$CONTAINER_NAME" cat /tmp/opkg.log 2>/dev/null || true)
 if echo "$OPKG_LOG" | grep -q "list-installed"; then
-  pass "opkg: list-installed was called"
+  pass "[OPKG] list-installed was called"
 else
-  fail "opkg: list-installed was not called"
+  fail "[OPKG] list-installed was not called"
 fi
 if echo "$OPKG_LOG" | grep -q "update"; then
-  pass "opkg: update was called"
+  pass "[OPKG] update was called"
 else
-  fail "opkg: update was not called"
+  fail "[OPKG] update was not called"
 fi
 
-# ── 9. Verify JSON artifact ──
-section "9/10 Verifying JSON artifact"
-TEST_JSON=$(nix build "$PROJECT_ROOT#test-json" --print-out-paths --no-link 2>/dev/null)
+# APK deployment (overwrites the same config sections)
+SYNTAX_ERR_APK=$(echo "$NUCI_OUTPUT_APK" | podman exec -i "$CONTAINER_NAME" sh -n 2>&1)
+if [ -n "$SYNTAX_ERR_APK" ]; then
+  fail "[APK] Syntax error in deployment script: $SYNTAX_ERR_APK"
+else
+  ok "[APK] deployment script passes sh -n syntax check"
+fi
 
-check_json() {
-  if jq -e "$1" "$TEST_JSON" >/dev/null 2>&1; then
-    pass "$2"
+DEPLOY_STDERR_APK=$(echo "$NUCI_OUTPUT_APK" | podman exec -i "$CONTAINER_NAME" sh -s 2>&1 >/dev/null || true)
+UNEXPECTED_ERRORS_APK=$(echo "$DEPLOY_STDERR_APK" | grep -v "uci: Entry not found" | grep -v "^$" || true)
+if [ -n "$UNEXPECTED_ERRORS_APK" ]; then
+  fail "[APK] Unexpected errors during deployment:"
+  echo "$UNEXPECTED_ERRORS_APK"
+else
+  ok "[APK] All commands executed without errors"
+fi
+
+check_value "system.@system[0].hostname" "rauter-apk" "[APK] hostname"
+check_section "wireless.default_radio0"
+check_section "network.lan"
+
+APK_LOG=$(podman exec "$CONTAINER_NAME" cat /tmp/apk.log 2>/dev/null || true)
+if echo "$APK_LOG" | grep -q "info -e"; then
+  pass "[APK] info -e was called"
+else
+  fail "[APK] info -e was not called"
+fi
+if echo "$APK_LOG" | grep -q "add"; then
+  pass "[APK] add was called"
+else
+  fail "[APK] add was not called"
+fi
+
+# ── 9. Verify JSON artifact (OPKG + APK) ──
+section "9/10 Verifying JSON artifact"
+TEST_JSON_OPKG=$(nix build "$PROJECT_ROOT#test-json" --print-out-paths --no-link 2>/dev/null)
+TEST_JSON_APK=$(nix build "$PROJECT_ROOT#test-json-apk" --print-out-paths --no-link 2>/dev/null)
+
+check_json_opkg() {
+  if jq -e "$1" "$TEST_JSON_OPKG" >/dev/null 2>&1; then
+    pass "[OPKG] $2"
   else
-    fail "$2 — jq expression failed: $1"
+    fail "[OPKG] $2 — jq expression failed: $1"
   fi
 }
 
-check_json '.packages | length == 2' "packages: 2 defined"
-check_json '.packages | index("luci") != null' "packages: 'luci' present"
-check_json '.packages | index("tcpdump") != null' "packages: 'tcpdump' present"
-check_json '.opkg.feeds | length == 1' "feeds: 1 defined"
-check_json '.sshKeys | length == 1' "sshKeys: 1 defined"
-check_json '.sshKeys[0] | startswith("ssh-ed25519")' "sshKeys: key type correct"
-check_json '.settings.wireless.default_radio0.ssid == "gchq-2.4"' "json: ssid in settings"
+check_json_apk() {
+  if jq -e "$1" "$TEST_JSON_APK" >/dev/null 2>&1; then
+    pass "[APK] $2"
+  else
+    fail "[APK] $2 — jq expression failed: $1"
+  fi
+}
+
+check_json_opkg '.packages | length == 2' "packages: 2 defined"
+check_json_opkg '.packages | index("luci") != null' "packages: 'luci' present"
+check_json_opkg '.packages | index("tcpdump") != null' "packages: 'tcpdump' present"
+check_json_opkg '.opkg.feeds | length == 1' "feeds: 1 defined"
+check_json_opkg '.sshKeys | length == 1' "sshKeys: 1 defined"
+check_json_opkg '.sshKeys[0] | startswith("ssh-ed25519")' "sshKeys: key type correct"
+check_json_opkg '.settings.wireless.default_radio0.ssid == "gchq-2.4"' "json: ssid in settings"
+check_json_opkg '.packageManager == "opkg"' "packageManager metadata is 'opkg'"
+
+check_json_apk '.packages | length == 2' "packages: 2 defined"
+check_json_apk '.opkg.feeds | length == 1' "feeds: 1 defined"
+check_json_apk '.packageManager == "apk"' "packageManager metadata is 'apk'"
 
 # ── 10. Test watchdog rollback ──
 section "10/10 Testing watchdog rollback"
