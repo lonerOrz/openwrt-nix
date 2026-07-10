@@ -25,6 +25,12 @@ impl From<std::io::Error> for ConfigError {
     }
 }
 
+impl From<serde_json::Error> for ConfigError {
+    fn from(e: serde_json::Error) -> Self {
+        ConfigError(format!("Failed to parse JSON: {}", e))
+    }
+}
+
 #[derive(Deserialize, Debug)]
 struct Root {
     settings: HashMap<String, HashMap<String, Section>>,
@@ -99,55 +105,97 @@ fn interpolate_secrets<'a>(
     }
 }
 
+fn resolve_value(val: &mut Value, secrets: &HashMap<String, String>) -> Result<(), ConfigError> {
+    match val {
+        Value::String(s) => {
+            let interpolated = interpolate_secrets(s, secrets)?;
+            *s = interpolated.into_owned();
+        }
+        Value::Array(arr) => {
+            for item in arr {
+                resolve_value(item, secrets)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn resolve_secrets(mut root: Root, secrets: &HashMap<String, String>) -> Result<Root, ConfigError> {
+    if secrets.is_empty() {
+        return Ok(root);
+    }
+
+    for sections in root.settings.values_mut() {
+        for section in sections.values_mut() {
+            match section {
+                Section::List(arr) => {
+                    for map in arr {
+                        for (k, v) in map.iter_mut() {
+                            if k == "_type" {
+                                continue;
+                            }
+                            resolve_value(v, secrets)?;
+                        }
+                    }
+                }
+                Section::Named(map) => {
+                    for (k, v) in map.iter_mut() {
+                        if k == "_type" {
+                            continue;
+                        }
+                        resolve_value(v, secrets)?;
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(opkg) = &mut root.opkg
+        && let Some(feeds) = &mut opkg.feeds
+    {
+        for feed in feeds {
+            let interpolated = interpolate_secrets(feed, secrets)?;
+            *feed = interpolated.into_owned();
+        }
+    }
+
+    Ok(root)
+}
+
 fn escape_single_quotes(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
 
-fn serialize_option_val(
-    writer: &mut String,
-    key: &str,
-    val: &Value,
-    secrets: &HashMap<String, String>,
-) -> Result<(), ConfigError> {
+fn serialize_option_val(writer: &mut String, key: &str, val: &Value) -> Result<(), ConfigError> {
     match val {
         Value::String(s) => {
-            let interpolated = interpolate_secrets(s, secrets)?;
-            writeln!(
-                writer,
-                "set {}='{}'",
-                key,
-                escape_single_quotes(&interpolated)
-            )
-            .unwrap();
+            writeln!(writer, "set {}='{}'", key, escape_single_quotes(s)).unwrap();
         }
         Value::Number(n) => {
-            let s = n.to_string();
-            let interpolated = interpolate_secrets(&s, secrets)?;
             writeln!(
                 writer,
                 "set {}='{}'",
                 key,
-                escape_single_quotes(&interpolated)
+                escape_single_quotes(&n.to_string())
             )
             .unwrap();
         }
         Value::Bool(b) => {
-            let s = b.to_string();
-            let interpolated = interpolate_secrets(&s, secrets)?;
             writeln!(
                 writer,
                 "set {}='{}'",
                 key,
-                escape_single_quotes(&interpolated)
+                escape_single_quotes(&b.to_string())
             )
             .unwrap();
         }
         Value::Array(arr) => {
             for item in arr {
                 let s = match item {
-                    Value::String(s) => s.clone(),
-                    Value::Number(n) => n.to_string(),
-                    Value::Bool(b) => b.to_string(),
+                    Value::String(s) => Cow::Borrowed(s.as_str()),
+                    Value::Number(n) => Cow::Owned(n.to_string()),
+                    Value::Bool(b) => Cow::Owned(b.to_string()),
                     _ => {
                         return Err(ConfigError(format!(
                             "{:?} is not a supported list value type",
@@ -155,14 +203,7 @@ fn serialize_option_val(
                         )));
                     }
                 };
-                let interpolated = interpolate_secrets(&s, secrets)?;
-                writeln!(
-                    writer,
-                    "add_list {}='{}'",
-                    key,
-                    escape_single_quotes(&interpolated)
-                )
-                .unwrap();
+                writeln!(writer, "add_list {}='{}'", key, escape_single_quotes(&s)).unwrap();
             }
         }
         _ => {
@@ -178,7 +219,6 @@ fn serialize_option_val(
 fn serialize_uci(
     writer: &mut String,
     configs: &HashMap<String, HashMap<String, Section>>,
-    secrets: &HashMap<String, String>,
 ) -> Result<(), ConfigError> {
     for (config_name, sections) in configs {
         let mut shell_cmds = String::new();
@@ -222,7 +262,7 @@ fn serialize_uci(
                                 continue;
                             }
                             let key = format!("{}.@{}[{}].{}", config_name, ty, idx, option_name);
-                            serialize_option_val(&mut uci_cmds, &key, option, secrets)?;
+                            serialize_option_val(&mut uci_cmds, &key, option)?;
                         }
                     }
                 }
@@ -239,7 +279,7 @@ fn serialize_uci(
                             continue;
                         }
                         let key = format!("{}.{}.{}", config_name, section_name, option_name);
-                        serialize_option_val(&mut uci_cmds, &key, option, secrets)?;
+                        serialize_option_val(&mut uci_cmds, &key, option)?;
                     }
                 }
             }
@@ -272,8 +312,7 @@ fn load_secrets_dir(dir_path: &str) -> Result<HashMap<String, String>, ConfigErr
         let path = entry.path();
         if path.is_file() && path.extension().is_some_and(|ext| ext == "json") {
             let sec_file = File::open(&path)?;
-            let parsed: Value = serde_json::from_reader(BufReader::new(sec_file))
-                .map_err(|e| ConfigError(format!("Failed to parse decrypted json: {}", e)))?;
+            let parsed: Value = serde_json::from_reader(BufReader::new(sec_file))?;
 
             if let Some(obj) = parsed.as_object() {
                 for (k, v) in obj {
@@ -307,22 +346,19 @@ fn convert_file(path: &Path, secrets_dir: Option<&str>) -> Result<String, Config
     let file = File::open(path)?;
     let reader = BufReader::new(file);
 
-    let root: Root = serde_json::from_reader(reader).map_err(|e| {
-        ConfigError(format!(
-            "Failed to parse JSON into Uci Root structure: {}",
-            e
-        ))
-    })?;
+    let root: Root = serde_json::from_reader(reader)?;
 
     let mut secrets = HashMap::new();
     if let Some(dir_path) = secrets_dir {
         secrets = load_secrets_dir(dir_path)?;
     }
 
-    let mut output_buffer = String::with_capacity(4096);
-    serialize_uci(&mut output_buffer, &root.settings, &secrets)?;
+    let resolved_root = resolve_secrets(root, &secrets)?;
 
-    if let Some(opkg) = &root.opkg
+    let mut output_buffer = String::with_capacity(4096);
+    serialize_uci(&mut output_buffer, &resolved_root.settings)?;
+
+    if let Some(opkg) = &resolved_root.opkg
         && let Some(feeds) = &opkg.feeds
         && !feeds.is_empty()
     {
@@ -341,7 +377,7 @@ fn convert_file(path: &Path, secrets_dir: Option<&str>) -> Result<String, Config
         }
     }
 
-    if let Some(pkgs) = &root.packages
+    if let Some(pkgs) = &resolved_root.packages
         && !pkgs.is_empty()
     {
         writeln!(&mut output_buffer, "\nNEED_INSTALL=false").unwrap();
@@ -360,7 +396,7 @@ fn convert_file(path: &Path, secrets_dir: Option<&str>) -> Result<String, Config
         .unwrap();
     }
 
-    if let Some(opkg) = &root.opkg
+    if let Some(opkg) = &resolved_root.opkg
         && let Some(local_pkgs) = &opkg.local_packages
     {
         for ipk_path_str in local_pkgs {
@@ -496,38 +532,171 @@ mod tests {
         assert_eq!(extract_package_name("luci-app_1.0"), "luci-app");
     }
 
-    // ── serialize_option_val ──
+    // ── resolve_secrets ──
+
+    #[test]
+    fn resolve_secrets_success() {
+        let mut obj = Map::new();
+        obj.insert("_type".into(), Value::String("wifi-iface".into()));
+        obj.insert("key".into(), Value::String("@wifi_pass@".into()));
+
+        let mut sections = HashMap::new();
+        sections.insert("radio0".into(), Section::Named(obj));
+
+        let mut settings = HashMap::new();
+        settings.insert("wireless".into(), sections);
+
+        let root = Root {
+            settings,
+            packages: None,
+            opkg: None,
+        };
+
+        let secs = secrets(&[("wifi_pass", "secret123")]);
+        let resolved = resolve_secrets(root, &secs).unwrap();
+
+        if let Section::Named(map) = &resolved.settings["wireless"]["radio0"] {
+            assert_eq!(map["key"], "secret123");
+        } else {
+            panic!("Expected Section::Named");
+        }
+    }
+
+    #[test]
+    fn resolve_secrets_missing_secret_errors() {
+        let mut obj = Map::new();
+        obj.insert("_type".into(), Value::String("wifi-iface".into()));
+        obj.insert("key".into(), Value::String("@missing_secret@".into()));
+
+        let mut sections = HashMap::new();
+        sections.insert("radio0".into(), Section::Named(obj));
+
+        let mut settings = HashMap::new();
+        settings.insert("wireless".into(), sections);
+
+        let root = Root {
+            settings,
+            packages: None,
+            opkg: None,
+        };
+
+        let err = resolve_secrets(root, &secrets(&[("other", "v")])).unwrap_err();
+        assert!(err.0.contains("missing_secret"));
+    }
+
+    #[test]
+    fn resolve_secrets_skips_type_field() {
+        let mut obj = Map::new();
+        obj.insert("_type".into(), Value::String("@not_a_secret@".into()));
+        obj.insert("key".into(), Value::String("plain".into()));
+
+        let mut sections = HashMap::new();
+        sections.insert("test".into(), Section::Named(obj));
+
+        let mut settings = HashMap::new();
+        settings.insert("config".into(), sections);
+
+        let root = Root {
+            settings,
+            packages: None,
+            opkg: None,
+        };
+
+        let resolved = resolve_secrets(root, &HashMap::new()).unwrap();
+        if let Section::Named(map) = &resolved.settings["config"]["test"] {
+            // _type is NOT interpolated even if it contains @
+            assert_eq!(map["_type"], "@not_a_secret@");
+            assert_eq!(map["key"], "plain");
+        } else {
+            panic!("Expected Section::Named");
+        }
+    }
+
+    #[test]
+    fn resolve_secrets_empty_map_shortcircuits() {
+        let mut obj = Map::new();
+        obj.insert("key".into(), Value::String("@secret@".into()));
+        let mut sections = HashMap::new();
+        sections.insert("s".into(), Section::Named(obj));
+        let mut settings = HashMap::new();
+        settings.insert("c".into(), sections);
+        let root = Root {
+            settings,
+            packages: None,
+            opkg: None,
+        };
+
+        // Empty secrets → shortcircuit, no error even though @secret@ is present
+        let resolved = resolve_secrets(root, &HashMap::new()).unwrap();
+        if let Section::Named(map) = &resolved.settings["c"]["s"] {
+            assert_eq!(map["key"], "@secret@");
+        } else {
+            panic!("Expected Section::Named");
+        }
+    }
+
+    #[test]
+    fn resolve_secrets_list_section() {
+        let mut item = Map::new();
+        item.insert("_type".into(), Value::String("dropbear".into()));
+        item.insert("Port".into(), Value::String("@port@".into()));
+        let mut sections = HashMap::new();
+        sections.insert("dropbear".into(), Section::List(vec![item]));
+        let mut settings = HashMap::new();
+        settings.insert("dropbear".into(), sections);
+        let root = Root {
+            settings,
+            packages: None,
+            opkg: None,
+        };
+
+        let secs = secrets(&[("port", "22")]);
+        let resolved = resolve_secrets(root, &secs).unwrap();
+        if let Section::List(arr) = &resolved.settings["dropbear"]["dropbear"] {
+            assert_eq!(arr[0]["Port"], "22");
+            assert_eq!(arr[0]["_type"], "dropbear");
+        } else {
+            panic!("Expected Section::List");
+        }
+    }
+
+    #[test]
+    fn resolve_secrets_feeds() {
+        let root = Root {
+            settings: HashMap::new(),
+            packages: None,
+            opkg: Some(Opkg {
+                feeds: Some(vec!["src/gz @repo_name@ https://example.com".into()]),
+                local_packages: None,
+            }),
+        };
+
+        let secs = secrets(&[("repo_name", "custom")]);
+        let resolved = resolve_secrets(root, &secs).unwrap();
+        let feeds = resolved.opkg.unwrap().feeds.unwrap();
+        assert_eq!(feeds[0], "src/gz custom https://example.com");
+    }
+
+    // ── serialize_option_val (no secrets param) ──
 
     #[test]
     fn serialize_string_val() {
         let mut w = String::new();
-        serialize_option_val(
-            &mut w,
-            "system.hostname",
-            &Value::String("test".into()),
-            &HashMap::new(),
-        )
-        .unwrap();
+        serialize_option_val(&mut w, "system.hostname", &Value::String("test".into())).unwrap();
         assert_eq!(w, "set system.hostname='test'\n");
     }
 
     #[test]
     fn serialize_number_val() {
         let mut w = String::new();
-        serialize_option_val(
-            &mut w,
-            "dhcp.start",
-            &Value::Number(100.into()),
-            &HashMap::new(),
-        )
-        .unwrap();
+        serialize_option_val(&mut w, "dhcp.start", &Value::Number(100.into())).unwrap();
         assert_eq!(w, "set dhcp.start='100'\n");
     }
 
     #[test]
     fn serialize_bool_val() {
         let mut w = String::new();
-        serialize_option_val(&mut w, "wifi.enabled", &Value::Bool(true), &HashMap::new()).unwrap();
+        serialize_option_val(&mut w, "wifi.enabled", &Value::Bool(true)).unwrap();
         assert_eq!(w, "set wifi.enabled='true'\n");
     }
 
@@ -535,7 +704,7 @@ mod tests {
     fn serialize_array_val() {
         let mut w = String::new();
         let arr = Value::Array(vec!["a".into(), "b".into()]);
-        serialize_option_val(&mut w, "net.dns", &arr, &HashMap::new()).unwrap();
+        serialize_option_val(&mut w, "net.dns", &arr).unwrap();
         assert!(w.contains("add_list net.dns='a'"));
         assert!(w.contains("add_list net.dns='b'"));
     }
@@ -544,7 +713,7 @@ mod tests {
     fn serialize_nested_object_errors() {
         let mut w = String::new();
         let obj = serde_json::json!({"nested": "value"});
-        let err = serialize_option_val(&mut w, "key", &obj, &HashMap::new()).unwrap_err();
+        let err = serialize_option_val(&mut w, "key", &obj).unwrap_err();
         assert!(err.0.contains("not a supported option value type"));
     }
 
@@ -552,35 +721,26 @@ mod tests {
     fn serialize_array_with_nested_object_errors() {
         let mut w = String::new();
         let arr = Value::Array(vec![serde_json::json!({"bad": true})]);
-        let err = serialize_option_val(&mut w, "key", &arr, &HashMap::new()).unwrap_err();
+        let err = serialize_option_val(&mut w, "key", &arr).unwrap_err();
         assert!(err.0.contains("not a supported list value type"));
     }
 
     #[test]
     fn serialize_null_val_errors() {
         let mut w = String::new();
-        let err = serialize_option_val(&mut w, "key", &Value::Null, &HashMap::new()).unwrap_err();
+        let err = serialize_option_val(&mut w, "key", &Value::Null).unwrap_err();
         assert!(err.0.contains("not a supported option value type"));
-    }
-
-    #[test]
-    fn serialize_with_secret_interpolation() {
-        let mut w = String::new();
-        let val = Value::String("@wifi_key@".into());
-        let secs = secrets(&[("wifi_key", "s3cret")]);
-        serialize_option_val(&mut w, "wifi.key", &val, &secs).unwrap();
-        assert_eq!(w, "set wifi.key='s3cret'\n");
     }
 
     #[test]
     fn serialize_with_quote_escaping() {
         let mut w = String::new();
         let val = Value::String("it's".into());
-        serialize_option_val(&mut w, "sys.name", &val, &HashMap::new()).unwrap();
+        serialize_option_val(&mut w, "sys.name", &val).unwrap();
         assert_eq!(w, "set sys.name='it'\\''s'\n");
     }
 
-    // ── serialize_uci ──
+    // ── serialize_uci (no secrets param) ──
 
     #[test]
     fn serialize_named_section() {
@@ -593,7 +753,7 @@ mod tests {
         configs.insert("network".into(), sections);
 
         let mut w = String::new();
-        serialize_uci(&mut w, &configs, &HashMap::new()).unwrap();
+        serialize_uci(&mut w, &configs).unwrap();
 
         assert!(w.contains("uci -q batch <<'UCI_EOF'"));
         assert!(w.contains("delete network.lan"));
@@ -615,7 +775,7 @@ mod tests {
         configs.insert("dropbear".into(), sections);
 
         let mut w = String::new();
-        serialize_uci(&mut w, &configs, &HashMap::new()).unwrap();
+        serialize_uci(&mut w, &configs).unwrap();
 
         assert!(w.contains("while uci -q delete dropbear.@dropbear[0]; do :; done"));
         assert!(w.contains("uci -q batch <<'UCI_EOF'"));
@@ -635,7 +795,7 @@ mod tests {
         configs.insert("network".into(), sections);
 
         let mut w = String::new();
-        let err = serialize_uci(&mut w, &configs, &HashMap::new()).unwrap_err();
+        let err = serialize_uci(&mut w, &configs).unwrap_err();
         assert!(err.0.contains("has no type"));
     }
 
@@ -649,7 +809,7 @@ mod tests {
         configs.insert("dropbear".into(), sections);
 
         let mut w = String::new();
-        let err = serialize_uci(&mut w, &configs, &HashMap::new()).unwrap_err();
+        let err = serialize_uci(&mut w, &configs).unwrap_err();
         assert!(err.0.contains("has no type"));
     }
 
@@ -667,7 +827,7 @@ mod tests {
         configs.insert("dropbear".into(), sections);
 
         let mut w = String::new();
-        serialize_uci(&mut w, &configs, &HashMap::new()).unwrap();
+        serialize_uci(&mut w, &configs).unwrap();
 
         assert_eq!(w.matches("add dropbear dropbear").count(), 2);
         assert!(w.contains("set dropbear.@dropbear[0].Port='22'"));
@@ -685,17 +845,12 @@ mod tests {
         configs.insert("network".into(), sections);
 
         let mut w = String::new();
-        serialize_uci(&mut w, &configs, &HashMap::new()).unwrap();
+        serialize_uci(&mut w, &configs).unwrap();
 
-        // Verify delete uses the real type "interface", not the key "interfaces"
         assert!(w.contains("while uci -q delete network.@interface[0]; do :; done"));
         assert!(!w.contains("while uci -q delete network.@interfaces[0]"));
-
-        // Verify add uses the real type "interface"
         assert!(w.contains("add network interface"));
         assert!(!w.contains("add network interfaces"));
-
-        // Verify set uses the real type "interface"
         assert!(w.contains("set network.@interface[0].proto='static'"));
         assert!(!w.contains("set network.@interfaces[0].proto"));
     }
