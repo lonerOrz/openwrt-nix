@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fmt::Write as FmtWrite;
 use std::fs::File;
@@ -33,7 +33,7 @@ impl From<serde_json::Error> for ConfigError {
 
 #[derive(Deserialize, Debug)]
 struct Root {
-    settings: HashMap<String, HashMap<String, Section>>,
+    settings: BTreeMap<String, BTreeMap<String, Section>>,
     packages: Option<Vec<String>>,
     opkg: Option<Opkg>,
 }
@@ -327,7 +327,7 @@ fn serialize_option_val(writer: &mut String, key: &str, val: &Value) -> Result<(
 
 fn serialize_uci(
     writer: &mut String,
-    configs: &HashMap<String, HashMap<String, Section>>,
+    configs: &BTreeMap<String, BTreeMap<String, Section>>,
 ) -> Result<(), ConfigError> {
     for (config_name, sections) in configs {
         let mut shell_cmds = String::new();
@@ -659,10 +659,10 @@ mod tests {
         obj.insert("_type".into(), Value::String("wifi-iface".into()));
         obj.insert("key".into(), Value::String("@wifi_pass@".into()));
 
-        let mut sections = HashMap::new();
+        let mut sections = BTreeMap::new();
         sections.insert("radio0".into(), Section::Named(obj));
 
-        let mut settings = HashMap::new();
+        let mut settings = BTreeMap::new();
         settings.insert("wireless".into(), sections);
 
         let root = Root {
@@ -687,10 +687,10 @@ mod tests {
         obj.insert("_type".into(), Value::String("wifi-iface".into()));
         obj.insert("key".into(), Value::String("@missing_secret@".into()));
 
-        let mut sections = HashMap::new();
+        let mut sections = BTreeMap::new();
         sections.insert("radio0".into(), Section::Named(obj));
 
-        let mut settings = HashMap::new();
+        let mut settings = BTreeMap::new();
         settings.insert("wireless".into(), sections);
 
         let root = Root {
@@ -709,10 +709,10 @@ mod tests {
         obj.insert("_type".into(), Value::String("@not_a_secret@".into()));
         obj.insert("key".into(), Value::String("plain".into()));
 
-        let mut sections = HashMap::new();
+        let mut sections = BTreeMap::new();
         sections.insert("test".into(), Section::Named(obj));
 
-        let mut settings = HashMap::new();
+        let mut settings = BTreeMap::new();
         settings.insert("config".into(), sections);
 
         let root = Root {
@@ -735,9 +735,9 @@ mod tests {
     fn resolve_secrets_empty_map_shortcircuits() {
         let mut obj = Map::new();
         obj.insert("key".into(), Value::String("@secret@".into()));
-        let mut sections = HashMap::new();
+        let mut sections = BTreeMap::new();
         sections.insert("s".into(), Section::Named(obj));
-        let mut settings = HashMap::new();
+        let mut settings = BTreeMap::new();
         settings.insert("c".into(), sections);
         let root = Root {
             settings,
@@ -759,9 +759,9 @@ mod tests {
         let mut item = Map::new();
         item.insert("_type".into(), Value::String("dropbear".into()));
         item.insert("Port".into(), Value::String("@port@".into()));
-        let mut sections = HashMap::new();
+        let mut sections = BTreeMap::new();
         sections.insert("dropbear".into(), Section::List(vec![item]));
-        let mut settings = HashMap::new();
+        let mut settings = BTreeMap::new();
         settings.insert("dropbear".into(), sections);
         let root = Root {
             settings,
@@ -782,7 +782,7 @@ mod tests {
     #[test]
     fn resolve_secrets_feeds() {
         let root = Root {
-            settings: HashMap::new(),
+            settings: BTreeMap::new(),
             packages: None,
             opkg: Some(Opkg {
                 feeds: Some(vec!["src/gz @repo_name@ https://example.com".into()]),
@@ -801,7 +801,7 @@ mod tests {
     #[test]
     fn validate_rejects_hyphen_in_config_name() {
         let root = Root {
-            settings: HashMap::from([("network-config".into(), HashMap::new())]),
+            settings: BTreeMap::from([("network-config".into(), BTreeMap::new())]),
             packages: None,
             opkg: None,
         };
@@ -814,9 +814,9 @@ mod tests {
         let mut obj = Map::new();
         obj.insert("_type".into(), Value::String("wifi-iface".into()));
         let root = Root {
-            settings: HashMap::from([(
+            settings: BTreeMap::from([(
                 "wireless".into(),
-                HashMap::from([("radio0".into(), Section::Named(obj))]),
+                BTreeMap::from([("radio0".into(), Section::Named(obj))]),
             )]),
             packages: None,
             opkg: None,
@@ -830,9 +830,9 @@ mod tests {
         obj.insert("_type".into(), Value::String("interface".into()));
         obj.insert("ip-address".into(), Value::String("192.168.1.1".into()));
         let root = Root {
-            settings: HashMap::from([(
+            settings: BTreeMap::from([(
                 "network".into(),
-                HashMap::from([("lan".into(), Section::Named(obj))]),
+                BTreeMap::from([("lan".into(), Section::Named(obj))]),
             )]),
             packages: None,
             opkg: None,
@@ -846,9 +846,9 @@ mod tests {
         let mut obj = Map::new();
         obj.insert("_type".into(), Value::String("interface".into()));
         let root = Root {
-            settings: HashMap::from([(
+            settings: BTreeMap::from([(
                 "network".into(),
-                HashMap::from([("my-section".into(), Section::Named(obj))]),
+                BTreeMap::from([("my-section".into(), Section::Named(obj))]),
             )]),
             packages: None,
             opkg: None,
@@ -863,9 +863,9 @@ mod tests {
         obj.insert("_type".into(), Value::String("interface".into()));
         obj.insert("proto".into(), Value::Null);
         let root = Root {
-            settings: HashMap::from([(
+            settings: BTreeMap::from([(
                 "network".into(),
-                HashMap::from([("lan".into(), Section::Named(obj))]),
+                BTreeMap::from([("lan".into(), Section::Named(obj))]),
             )]),
             packages: None,
             opkg: None,
@@ -879,9 +879,9 @@ mod tests {
         let mut obj = Map::new();
         obj.insert("proto".into(), Value::String("static".into()));
         let root = Root {
-            settings: HashMap::from([(
+            settings: BTreeMap::from([(
                 "network".into(),
-                HashMap::from([("lan".into(), Section::Named(obj))]),
+                BTreeMap::from([("lan".into(), Section::Named(obj))]),
             )]),
             packages: None,
             opkg: None,
@@ -895,9 +895,9 @@ mod tests {
         let mut item = Map::new();
         item.insert("Port".into(), Value::String("22".into()));
         let root = Root {
-            settings: HashMap::from([(
+            settings: BTreeMap::from([(
                 "dropbear".into(),
-                HashMap::from([("dropbear".into(), Section::List(vec![item]))]),
+                BTreeMap::from([("dropbear".into(), Section::List(vec![item]))]),
             )]),
             packages: None,
             opkg: None,
@@ -912,9 +912,9 @@ mod tests {
         item.insert("_type".into(), Value::String("dropbear".into()));
         item.insert("listen-port".into(), Value::String("22".into()));
         let root = Root {
-            settings: HashMap::from([(
+            settings: BTreeMap::from([(
                 "dropbear".into(),
-                HashMap::from([("dropbear".into(), Section::List(vec![item]))]),
+                BTreeMap::from([("dropbear".into(), Section::List(vec![item]))]),
             )]),
             packages: None,
             opkg: None,
@@ -926,7 +926,7 @@ mod tests {
     #[test]
     fn validate_empty_settings_ok() {
         let root = Root {
-            settings: HashMap::new(),
+            settings: BTreeMap::new(),
             packages: None,
             opkg: None,
         };
@@ -1000,8 +1000,8 @@ mod tests {
 
     #[test]
     fn serialize_named_section() {
-        let mut configs = HashMap::new();
-        let mut sections = HashMap::new();
+        let mut configs = BTreeMap::new();
+        let mut sections = BTreeMap::new();
         let mut obj = Map::new();
         obj.insert("_type".into(), Value::String("interface".into()));
         obj.insert("proto".into(), Value::String("static".into()));
@@ -1022,8 +1022,8 @@ mod tests {
 
     #[test]
     fn serialize_list_section() {
-        let mut configs = HashMap::new();
-        let mut sections = HashMap::new();
+        let mut configs = BTreeMap::new();
+        let mut sections = BTreeMap::new();
         let mut item = Map::new();
         item.insert("_type".into(), Value::String("dropbear".into()));
         item.insert("Port".into(), Value::String("22".into()));
@@ -1043,8 +1043,8 @@ mod tests {
 
     #[test]
     fn serialize_named_section_missing_type_errors() {
-        let mut configs = HashMap::new();
-        let mut sections = HashMap::new();
+        let mut configs = BTreeMap::new();
+        let mut sections = BTreeMap::new();
         let mut obj = Map::new();
         obj.insert("proto".into(), Value::String("static".into()));
         sections.insert("lan".into(), Section::Named(obj));
@@ -1057,8 +1057,8 @@ mod tests {
 
     #[test]
     fn serialize_list_section_missing_type_errors() {
-        let mut configs = HashMap::new();
-        let mut sections = HashMap::new();
+        let mut configs = BTreeMap::new();
+        let mut sections = BTreeMap::new();
         let mut item = Map::new();
         item.insert("Port".into(), Value::String("22".into()));
         sections.insert("dropbear".into(), Section::List(vec![item]));
@@ -1071,8 +1071,8 @@ mod tests {
 
     #[test]
     fn serialize_multiple_list_items() {
-        let mut configs = HashMap::new();
-        let mut sections = HashMap::new();
+        let mut configs = BTreeMap::new();
+        let mut sections = BTreeMap::new();
         let mut item1 = Map::new();
         item1.insert("_type".into(), Value::String("dropbear".into()));
         item1.insert("Port".into(), Value::String("22".into()));
@@ -1092,8 +1092,8 @@ mod tests {
 
     #[test]
     fn serialize_list_section_type_mismatch() {
-        let mut configs = HashMap::new();
-        let mut sections = HashMap::new();
+        let mut configs = BTreeMap::new();
+        let mut sections = BTreeMap::new();
         let mut item = Map::new();
         item.insert("_type".into(), Value::String("interface".into()));
         item.insert("proto".into(), Value::String("static".into()));
