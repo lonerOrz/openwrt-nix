@@ -1,12 +1,12 @@
+use crate::error::ConfigError;
+use crate::helpers::iter_options_mut;
+use crate::models::{Root, Section};
+use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
-use serde_json::Value;
-use crate::error::ConfigError;
-use crate::models::{Root, Section};
-use crate::helpers::iter_options_mut;
 
 pub(crate) fn interpolate_secrets<'a>(
     option_val: &'a str,
@@ -163,11 +163,11 @@ pub(crate) fn load_secrets_dir(dir_path: &str) -> Result<HashMap<String, String>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
-    use serde_json::Map;
-    use tempfile::TempDir;
-    use std::fs;
     use crate::models::Opkg;
+    use serde_json::Map;
+    use std::collections::BTreeMap;
+    use std::fs;
+    use tempfile::TempDir;
 
     fn secrets(map: &[(&str, &str)]) -> HashMap<String, String> {
         map.iter()

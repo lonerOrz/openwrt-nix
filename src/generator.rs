@@ -1,11 +1,11 @@
+use crate::error::ConfigError;
+use crate::helpers::{escape_single_quotes, extract_package_name, iter_options};
+use crate::models::{Opkg, PkgBackend, Section};
+use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt::Write as FmtWrite;
 use std::path::Path;
-use serde_json::Value;
-use crate::error::ConfigError;
-use crate::models::{Section, PkgBackend, Opkg};
-use crate::helpers::{escape_single_quotes, iter_options, extract_package_name};
 
 fn serialize_option_val(writer: &mut String, key: &str, val: &Value) -> Result<(), ConfigError> {
     match val {

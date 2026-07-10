@@ -19,7 +19,10 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 pass() { echo -e "  ${GREEN}[PASS]${NC} $1"; }
-fail() { echo -e "  ${RED}[FAIL]${NC} $1"; FAILURES=$((FAILURES + 1)); }
+fail() {
+  echo -e "  ${RED}[FAIL]${NC} $1"
+  FAILURES=$((FAILURES + 1))
+}
 info() { echo -e "  ${YELLOW}[..]${NC} $1"; }
 ok() { echo -e "  ${GREEN}[OK]${NC} $1"; }
 section() { echo -e "\n${CYAN}$1${NC}"; }
@@ -54,7 +57,7 @@ podman run -d --name "$CONTAINER_NAME" -p 2222:22 openwrt-test-env >/dev/null
 # ── 3. Wait for dropbear ──
 section "3/10 Waiting for dropbear"
 for i in {1..15}; do
-  if (echo > /dev/tcp/127.0.0.1/2222) >/dev/null 2>&1; then
+  if (echo >/dev/tcp/127.0.0.1/2222) >/dev/null 2>&1; then
     ok "dropbear ready on port 2222"
     break
   fi
@@ -69,14 +72,14 @@ done
 # ── 4. Inject SSH key ──
 section "4/10 Injecting SSH key"
 ssh-keygen -t ed25519 -N "" -f "$SSH_KEY_PATH" -C "openwrt-test" -q
-podman exec -i "$CONTAINER_NAME" sh -c "mkdir -p /etc/dropbear && cat > /etc/dropbear/authorized_keys" < "$SSH_KEY_PATH.pub"
+podman exec -i "$CONTAINER_NAME" sh -c "mkdir -p /etc/dropbear && cat > /etc/dropbear/authorized_keys" <"$SSH_KEY_PATH.pub"
 podman exec "$CONTAINER_NAME" chmod 700 /etc/dropbear
 podman exec "$CONTAINER_NAME" chmod 600 /etc/dropbear/authorized_keys
 ok "SSH key installed"
 
 # ── 5. Create SSH config ──
 section "5/10 Creating SSH config"
-cat <<EOF > "$SSH_CONFIG_PATH"
+cat <<EOF >"$SSH_CONFIG_PATH"
 Host openwrt-test
     HostName localhost
     Port 2222
@@ -91,7 +94,7 @@ section "6/10 Setting up SOPS test environment"
 mkdir -p "$SOPS_KEY_DIR"
 export SOPS_AGE_KEY_FILE="$SOPS_KEY_DIR/keys.txt"
 
-nix shell nixpkgs#age -c age-keygen > "$SOPS_KEY_DIR/keys.txt"
+nix shell nixpkgs#age -c age-keygen >"$SOPS_KEY_DIR/keys.txt"
 PUBKEY=$(grep -o 'age1[a-z0-9]*' "$SOPS_KEY_DIR/keys.txt")
 
 nix shell nixpkgs#sops -c sops --config /dev/null --encrypt --age "$PUBKEY" \

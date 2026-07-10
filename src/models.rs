@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
 use serde::Deserialize;
 use serde_json::Map;
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 #[derive(Deserialize, Debug)]
 pub(crate) struct Root {

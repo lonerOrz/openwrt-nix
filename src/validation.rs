@@ -1,7 +1,7 @@
-use serde_json::Value;
 use crate::error::ConfigError;
-use crate::models::{Root, Section};
 use crate::helpers::iter_options;
+use crate::models::{Root, Section};
+use serde_json::Value;
 
 fn is_valid_uci_identifier(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
@@ -115,8 +115,8 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
     use serde_json::Map;
+    use std::collections::BTreeMap;
 
     #[test]
     fn validate_rejects_hyphen_in_config_name() {

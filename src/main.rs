@@ -12,10 +12,10 @@ use std::io::BufReader;
 use std::path::Path;
 
 use error::ConfigError;
-use models::{PkgBackend, Root};
-use validation::validate_root;
-use secrets::{load_secrets_dir, resolve_secrets};
 use generator::{serialize_opkg, serialize_uci};
+use models::{PkgBackend, Root};
+use secrets::{load_secrets_dir, resolve_secrets};
+use validation::validate_root;
 
 fn convert_file(path: &Path, secrets_dir: Option<&str>) -> Result<String, ConfigError> {
     let file = File::open(path)?;
@@ -66,8 +66,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn convert_file_full() {
