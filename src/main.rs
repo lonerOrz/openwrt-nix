@@ -1,63 +1,160 @@
+mod deploy;
+mod diff;
 mod error;
 mod generator;
 mod helpers;
 mod models;
+mod pipeline;
 mod secrets;
 mod validation;
 
-use std::collections::HashMap;
-use std::env;
-use std::fs::File;
-use std::io::BufReader;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use clap::{Parser, Subcommand};
 use error::ConfigError;
-use generator::{serialize_opkg, serialize_uci};
-use models::{PkgBackend, Root};
-use secrets::{load_secrets_dir, resolve_secrets};
-use validation::validate_root;
+use pipeline::compile_config;
 
-fn convert_file(path: &Path, secrets_dir: Option<&str>) -> Result<String, ConfigError> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
+#[derive(Parser)]
+#[command(
+    name = "nuci",
+    about = "Declarative OpenWrt UCI configuration compiler and deployer"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
 
-    let root: Root = serde_json::from_reader(reader)?;
-    validate_root(&root)?;
+#[derive(Subcommand)]
+enum Command {
+    /// Compile Nix JSON config into UCI batch commands
+    Compile {
+        /// Path to the JSON config file
+        json: PathBuf,
 
-    let mut secrets = HashMap::new();
-    if let Some(dir_path) = secrets_dir {
-        secrets = load_secrets_dir(dir_path)?;
-    }
+        /// Optional directory containing secrets files
+        secrets_dir: Option<PathBuf>,
 
-    let resolved_root = resolve_secrets(root, &secrets)?;
+        /// Skip SOPS decryption (secrets must be in secrets_dir as plain JSON)
+        #[arg(long)]
+        no_sops: bool,
+    },
 
-    let mut output_buffer = String::with_capacity(4096);
-    serialize_uci(&mut output_buffer, &resolved_root.settings)?;
+    /// Deploy configuration to a remote OpenWrt device via SSH
+    Deploy {
+        /// Path to the JSON config file
+        json: PathBuf,
 
-    let backend = PkgBackend::from_str(&resolved_root.package_manager);
-    serialize_opkg(
-        &mut output_buffer,
-        backend,
-        resolved_root.opkg.as_ref(),
-        resolved_root.packages.as_deref(),
-    )?;
+        /// SSH target host (user@host)
+        #[arg(short, long)]
+        target: String,
 
-    Ok(output_buffer)
+        /// SSH port
+        #[arg(short, long, default_value_t = 22)]
+        port: u16,
+
+        /// Path to SSH identity file
+        #[arg(short, long)]
+        identity: Option<PathBuf>,
+
+        /// Optional directory containing secrets files
+        secrets_dir: Option<PathBuf>,
+
+        /// Force deployment even if configuration is already up-to-date
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// Preview differences between target and compiled config (read-only)
+    Diff {
+        /// Path to the JSON config file
+        json: PathBuf,
+
+        /// SSH target host (user@host)
+        #[arg(short, long)]
+        target: String,
+
+        /// SSH port
+        #[arg(short, long, default_value_t = 22)]
+        port: u16,
+
+        /// Path to SSH identity file
+        #[arg(short, long)]
+        identity: Option<PathBuf>,
+
+        /// Optional directory containing secrets files
+        secrets_dir: Option<PathBuf>,
+    },
+}
+
+fn compile(
+    path: &Path,
+    secrets_dir: Option<&Path>,
+    skip_sops: bool,
+) -> Result<String, ConfigError> {
+    let config = compile_config(path, secrets_dir, skip_sops)?;
+    Ok(config.uci_batch)
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 2 {
-        eprintln!("USAGE: {} JSON_FILE [SECRETS_DIR]", args[0]);
-        std::process::exit(1);
+    let cli = Cli::parse();
+
+    match cli.command {
+        Some(Command::Compile {
+            json,
+            secrets_dir,
+            no_sops,
+        }) => {
+            run_compile(&json, secrets_dir.as_deref(), no_sops);
+        }
+        Some(Command::Deploy {
+            json,
+            target,
+            port,
+            identity,
+            secrets_dir,
+            force,
+        }) => {
+            let config = deploy::DeployConfig {
+                port,
+                identity_file: identity.map(|p| p.to_string_lossy().into_owned()),
+                force,
+            };
+            if let Err(e) = deploy::run(&json, &target, &config, secrets_dir.as_deref()) {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        Some(Command::Diff {
+            json,
+            target,
+            port,
+            identity,
+            secrets_dir,
+        }) => {
+            let config = deploy::DeployConfig {
+                port,
+                identity_file: identity.map(|p| p.to_string_lossy().into_owned()),
+                force: false,
+            };
+            if let Err(e) = diff::run(&json, &target, &config, secrets_dir.as_deref()) {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        None => {
+            eprintln!(
+                "USAGE:\n  nuci compile <JSON_FILE> [SECRETS_DIR]\n  nuci diff <JSON_FILE> --target <HOST> [--port PORT] [--identity FILE]\n  nuci deploy <JSON_FILE> --target <HOST> [--port PORT] [--identity FILE]"
+            );
+            std::process::exit(1);
+        }
     }
+}
 
-    let secrets_dir = args.get(2).map(|s| s.as_str());
-
-    match convert_file(Path::new(&args[1]), secrets_dir) {
-        Ok(output) => print!("{}", output),
+fn run_compile(json_path: &Path, secrets_dir: Option<&Path>, skip_sops: bool) {
+    match compile(json_path, secrets_dir, skip_sops) {
+        Ok(output) => print!("{output}"),
         Err(e) => {
-            eprintln!("{}", e);
+            eprintln!("{e}");
             std::process::exit(1);
         }
     }
@@ -85,7 +182,7 @@ mod tests {
         }"#,
         )
         .unwrap();
-        let output = convert_file(&json_path, None).unwrap();
+        let output = compile(&json_path, None, false).unwrap();
         assert!(output.contains("delete system.system"));
         assert!(output.contains("set system.system.hostname='test'"));
         assert!(output.contains("commit system"));
@@ -110,14 +207,14 @@ mod tests {
         )
         .unwrap();
         fs::write(secrets_path.join("s.json"), r#"{"wifi_pass": "secret123"}"#).unwrap();
-        let output = convert_file(&json_path, Some(secrets_path.to_str().unwrap())).unwrap();
+        let output = compile(&json_path, Some(&secrets_path), false).unwrap();
         assert!(output.contains("set wifi.radio0.key='secret123'"));
     }
 
     #[test]
     fn convert_file_missing_file() {
-        let err = convert_file(Path::new("/tmp/nonexistent_xyz.json"), None).unwrap_err();
-        assert!(err.0.contains("No such file"));
+        let err = compile(&PathBuf::from("/tmp/nonexistent_xyz.json"), None, false).unwrap_err();
+        assert!(format!("{err}").contains("No such file"));
     }
 
     #[test]
@@ -125,8 +222,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let json_path = dir.path().join("bad.json");
         fs::write(&json_path, "not json").unwrap();
-        let err = convert_file(&json_path, None).unwrap_err();
-        assert!(err.0.contains("Failed to parse JSON"));
+        let err = compile(&json_path, None, false).unwrap_err();
+        assert!(format!("{err}").contains("Failed to parse JSON"));
     }
 
     #[test]
@@ -138,11 +235,11 @@ mod tests {
             r#"{
             "packageManager": "opkg",
             "settings": {},
-            "opkg": { "feeds": ["src/gz custom https://example.com/repo"] }
+            "packageSources": { "feeds": ["src/gz custom https://example.com/repo"] }
         }"#,
         )
         .unwrap();
-        let output = convert_file(&json_path, None).unwrap();
+        let output = compile(&json_path, None, false).unwrap();
         assert!(output.contains("printf '' > /etc/opkg/customfeeds.conf"));
         assert!(output.contains("src/gz custom https://example.com/repo"));
     }
@@ -160,7 +257,7 @@ mod tests {
         }"#,
         )
         .unwrap();
-        let output = convert_file(&json_path, None).unwrap();
+        let output = compile(&json_path, None, false).unwrap();
         assert!(output.contains("for pkg in luci tcpdump"));
         assert!(output.contains("opkg update && opkg install luci tcpdump"));
     }
@@ -174,11 +271,11 @@ mod tests {
             r#"{
             "packageManager": "opkg",
             "settings": {},
-            "opkg": { "localPackages": ["./pkg/foo_1.0.ipk"] }
+            "packageSources": { "localPackages": ["./pkg/foo_1.0.ipk"] }
         }"#,
         )
         .unwrap();
-        let output = convert_file(&json_path, None).unwrap();
+        let output = compile(&json_path, None, false).unwrap();
         assert!(output.contains("opkg list-installed \"foo\""));
         assert!(output.contains("opkg install /tmp/foo_1.0.ipk"));
     }
@@ -192,11 +289,11 @@ mod tests {
             r#"{
             "packageManager": "opkg",
             "settings": {},
-            "opkg": { "feeds": ["src/gz test it's a feed"] }
+            "packageSources": { "feeds": ["src/gz test it's a feed"] }
         }"#,
         )
         .unwrap();
-        let output = convert_file(&json_path, None).unwrap();
+        let output = compile(&json_path, None, false).unwrap();
         assert!(output.contains("'\\''"));
     }
 
@@ -210,14 +307,14 @@ mod tests {
             "packageManager": "apk",
             "settings": {},
             "packages": ["luci"],
-            "opkg": {
+            "packageSources": {
                 "feeds": ["https://example.com/packages"],
                 "localPackages": ["./pkg/foo_1.0_all.apk"]
             }
         }"#,
         )
         .unwrap();
-        let output = convert_file(&json_path, None).unwrap();
+        let output = compile(&json_path, None, false).unwrap();
         assert!(output.contains("/etc/apk/repositories.d/customfeeds.list"));
         assert!(output.contains("apk -U add"));
         assert!(output.contains("apk add --allow-untrusted /tmp/foo_1.0_all.apk"));

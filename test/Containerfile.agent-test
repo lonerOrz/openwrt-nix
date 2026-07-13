@@ -1,0 +1,39 @@
+# Containerfile for ssh-agent lockout prevention testing
+# Has password auth enabled and NO pre-configured SSH keys
+# Used to verify that nuci deploy correctly deploys ssh-agent keys
+
+ARG OPENWRT_VERSION=latest
+FROM docker.io/openwrt/rootfs:${OPENWRT_VERSION}
+
+RUN mkdir -p /var/lock /var/run /etc/dropbear /etc/opkg /etc/apk/repositories.d
+RUN touch /etc/config/system /etc/config/wireless /etc/config/network
+
+# Mock opkg/apk if not present
+RUN if ! command -v opkg >/dev/null 2>&1; then \
+      printf '#!/bin/sh\necho "opkg $*" >> /tmp/opkg.log\nif [ "$1" = "list-installed" ]; then exit 1; fi\nexit 0\n' \
+        > /usr/bin/opkg && chmod +x /usr/bin/opkg; \
+    fi
+RUN if ! command -v apk >/dev/null 2>&1; then \
+      printf '#!/bin/sh\necho "apk $*" >> /tmp/apk.log\nif [ "$1" = "info" ] && [ "$2" = "-e" ]; then exit 1; fi\nexit 0\n' \
+        > /usr/bin/apk && chmod +x /usr/bin/apk; \
+    fi
+
+# Mock chpasswd — minimal rootfs doesn't have it
+RUN printf '#!/bin/sh\nread line; user=$(echo "$line" | cut -d: -f1); pass=$(echo "$line" | cut -d: -f2-); sha=$(openssl passwd -6 "$pass" 2>/dev/null || echo "$pass"); sed -i "s|^${user}:.*|${user}:${sha}:0:0:99999:7:::|" /etc/shadow\n' \
+    > /usr/sbin/chpasswd && chmod +x /usr/sbin/chpasswd
+
+# Set root password
+RUN printf 'root\nroot\n' | passwd root
+
+# Password auth ENABLED, no SSH keys pre-installed
+# This simulates a fresh device that needs SSH key deployment
+
+EXPOSE 22
+
+# Mock reload_config — no-op in test container
+RUN printf '#!/bin/sh\nexit 0\n' \
+    > /sbin/reload_config && chmod +x /sbin/reload_config
+
+RUN printf '#!/bin/sh\n/usr/sbin/dropbear -F -E -p 22 -R\nexec sleep infinity\n' \
+    > /start.sh && chmod +x /start.sh
+CMD ["/start.sh"]

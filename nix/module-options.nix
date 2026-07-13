@@ -21,17 +21,17 @@
     packages = lib.mkOption {
       default = [ ];
       type = lib.types.listOf lib.types.str;
-      description = "List of packages to install via opkg";
+      description = "List of packages to install";
     };
-    opkg.feeds = lib.mkOption {
+    packageSources.feeds = lib.mkOption {
       default = [ ];
       type = lib.types.listOf lib.types.str;
-      description = "List of custom opkg feeds to write to /etc/opkg/customfeeds.conf";
+      description = "List of custom package feeds/repositories";
     };
-    opkg.localPackages = lib.mkOption {
+    packageSources.localPackages = lib.mkOption {
       default = [ ];
       type = lib.types.listOf (lib.types.either lib.types.str lib.types.path);
-      description = "List of local .ipk file paths or fetched packages from Nix store to install";
+      description = "List of local .ipk/.apk file paths to install";
     };
     sshKeys = lib.mkOption {
       default = [ ];

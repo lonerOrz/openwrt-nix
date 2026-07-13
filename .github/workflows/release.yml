@@ -1,0 +1,137 @@
+name: Release
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "Cargo.toml"
+  workflow_dispatch:
+    inputs:
+      force_release:
+        description: "Force release even if tag exists"
+        required: false
+        type: boolean
+        default: false
+      verbose:
+        description: "Enable verbose logging"
+        required: false
+        type: boolean
+        default: false
+permissions:
+  contents: write
+jobs:
+  check-and-tag:
+    name: Check and Tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.VERSION }}
+      exists: ${{ steps.check_tag.outputs.exists }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Get version from Cargo.toml
+        id: get_version
+        run: |
+          VERSION=$(grep "^version =" Cargo.toml | head -n 1 | cut -d '"' -f 2)
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Detected version: $VERSION"
+      - name: Check if tag exists
+        id: check_tag
+        run: |
+          if git rev-parse "v${{ env.VERSION }}" >/dev/null 2>&1; then
+            echo "Tag v${{ env.VERSION }} already exists."
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "Tag v${{ env.VERSION }} does not exist."
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+      - name: Create and Push Tag
+        if: steps.check_tag.outputs.exists == 'false' || inputs.force_release == true
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if [ "${{ inputs.force_release }}" = "true" ] && [ "${{ steps.check_tag.outputs.exists }}" = "true" ]; then
+            echo "Forcing tag update..."
+            git tag -fa "v${{ env.VERSION }}" -m "Release v${{ env.VERSION }}"
+            git push --force origin "v${{ env.VERSION }}"
+          elif [ "${{ steps.check_tag.outputs.exists }}" = "false" ]; then
+            git tag -a "v${{ env.VERSION }}" -m "Release v${{ env.VERSION }}"
+            git push origin "v${{ env.VERSION }}"
+          fi
+  build:
+    name: Build (${{ matrix.target }})
+    needs: check-and-tag
+    if: needs.check-and-tag.outputs.exists == 'false' || inputs.force_release == true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            bin: nuci
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            bin: nuci
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            bin: nuci
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.check-and-tag.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Install MUSL tools (Linux only)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build Release Binary
+        run: |
+          VERBOSE_FLAG=""
+          if [ "${{ inputs.verbose }}" = "true" ]; then
+            VERBOSE_FLAG="--verbose"
+          fi
+
+          cargo build --release --target ${{ matrix.target }} $VERBOSE_FLAG
+
+          mkdir -p staging
+          cp target/${{ matrix.target }}/release/${{ matrix.bin }} staging/${{ matrix.bin }}-${{ matrix.target }}
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: staging/${{ matrix.bin }}-${{ matrix.target }}
+  publish:
+    name: Publish Release
+    needs: [check-and-tag, build]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.check-and-tag.outputs.version }}
+    steps:
+      - name: Create staging directory
+        run: mkdir -p dist
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: List downloaded assets
+        run: ls -la dist/
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: v${{ env.VERSION }}
+          generate_release_notes: true
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

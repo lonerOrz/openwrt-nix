@@ -1,9 +1,9 @@
 use crate::error::ConfigError;
 use crate::helpers::{escape_single_quotes, extract_package_name, iter_options};
-use crate::models::{Opkg, PkgBackend, Section};
+use crate::models::{PackageSources, PkgBackend, Section};
+use indexmap::IndexMap;
 use serde_json::Value;
 use std::borrow::Cow;
-use std::collections::BTreeMap;
 use std::fmt::Write as FmtWrite;
 use std::path::Path;
 
@@ -22,13 +22,8 @@ fn serialize_option_val(writer: &mut String, key: &str, val: &Value) -> Result<(
             .unwrap();
         }
         Value::Bool(b) => {
-            writeln!(
-                writer,
-                "set {}='{}'",
-                key,
-                escape_single_quotes(&b.to_string())
-            )
-            .unwrap();
+            let bool_str = if *b { "1" } else { "0" };
+            writeln!(writer, "set {}='{}'", key, escape_single_quotes(bool_str)).unwrap();
         }
         Value::Array(arr) => {
             for item in arr {
@@ -37,7 +32,7 @@ fn serialize_option_val(writer: &mut String, key: &str, val: &Value) -> Result<(
                     Value::Number(n) => Cow::Owned(n.to_string()),
                     Value::Bool(b) => Cow::Owned(b.to_string()),
                     _ => {
-                        return Err(ConfigError(format!(
+                        return Err(ConfigError::Validation(format!(
                             "{:?} is not a supported list value type",
                             item
                         )));
@@ -47,7 +42,7 @@ fn serialize_option_val(writer: &mut String, key: &str, val: &Value) -> Result<(
             }
         }
         _ => {
-            return Err(ConfigError(format!(
+            return Err(ConfigError::Validation(format!(
                 "{:?} is not a supported option value type",
                 val
             )));
@@ -58,7 +53,7 @@ fn serialize_option_val(writer: &mut String, key: &str, val: &Value) -> Result<(
 
 pub(crate) fn serialize_uci(
     writer: &mut String,
-    configs: &BTreeMap<String, BTreeMap<String, Section>>,
+    configs: &IndexMap<String, IndexMap<String, Section>>,
 ) -> Result<(), ConfigError> {
     for (config_name, sections) in configs {
         let mut shell_cmds = String::new();
@@ -89,7 +84,7 @@ pub(crate) fn serialize_uci(
                                 .get("_type")
                                 .and_then(|v| v.as_str())
                                 .ok_or_else(|| {
-                                    ConfigError(format!(
+                                    ConfigError::Validation(format!(
                                         "{}.@{}[{}] has no type!",
                                         config_name, section_name, idx
                                     ))
@@ -105,7 +100,10 @@ pub(crate) fn serialize_uci(
                 }
                 Section::Named(obj) => {
                     let ty = obj.get("_type").and_then(|v| v.as_str()).ok_or_else(|| {
-                        ConfigError(format!("{}.{} has no type", config_name, section_name))
+                        ConfigError::Validation(format!(
+                            "{}.{} has no type",
+                            config_name, section_name
+                        ))
                     })?;
 
                     writeln!(uci_cmds, "delete {}.{}", config_name, section_name).unwrap();
@@ -132,14 +130,14 @@ pub(crate) fn serialize_uci(
     Ok(())
 }
 
-pub(crate) fn serialize_opkg(
+pub(crate) fn serialize_package_management(
     writer: &mut String,
     backend: PkgBackend,
-    opkg: Option<&Opkg>,
+    sources: Option<&PackageSources>,
     packages: Option<&[String]>,
 ) -> Result<(), ConfigError> {
-    if let Some(opkg_val) = opkg
-        && let Some(feeds) = &opkg_val.feeds
+    if let Some(src_val) = sources
+        && let Some(feeds) = &src_val.feeds
         && !feeds.is_empty()
     {
         match backend {
@@ -216,8 +214,8 @@ pub(crate) fn serialize_opkg(
         }
     }
 
-    if let Some(opkg_val) = opkg
-        && let Some(local_pkgs) = &opkg_val.local_packages
+    if let Some(src_val) = sources
+        && let Some(local_pkgs) = &src_val.local_packages
     {
         for ipk_path_str in local_pkgs {
             let ipk_path = Path::new(ipk_path_str);
@@ -276,7 +274,14 @@ mod tests {
     fn serialize_bool_val() {
         let mut w = String::new();
         serialize_option_val(&mut w, "wifi.enabled", &Value::Bool(true)).unwrap();
-        assert_eq!(w, "set wifi.enabled='true'\n");
+        assert_eq!(w, "set wifi.enabled='1'\n");
+    }
+
+    #[test]
+    fn serialize_bool_false_val() {
+        let mut w = String::new();
+        serialize_option_val(&mut w, "wifi.enabled", &Value::Bool(false)).unwrap();
+        assert_eq!(w, "set wifi.enabled='0'\n");
     }
 
     #[test]
@@ -293,7 +298,7 @@ mod tests {
         let mut w = String::new();
         let obj = serde_json::json!({"nested": "value"});
         let err = serialize_option_val(&mut w, "key", &obj).unwrap_err();
-        assert!(err.0.contains("not a supported option value type"));
+        assert!(format!("{err}").contains("not a supported option value type"));
     }
 
     #[test]
@@ -301,14 +306,14 @@ mod tests {
         let mut w = String::new();
         let arr = Value::Array(vec![serde_json::json!({"bad": true})]);
         let err = serialize_option_val(&mut w, "key", &arr).unwrap_err();
-        assert!(err.0.contains("not a supported list value type"));
+        assert!(format!("{err}").contains("not a supported list value type"));
     }
 
     #[test]
     fn serialize_null_val_errors() {
         let mut w = String::new();
         let err = serialize_option_val(&mut w, "key", &Value::Null).unwrap_err();
-        assert!(err.0.contains("not a supported option value type"));
+        assert!(format!("{err}").contains("not a supported option value type"));
     }
 
     #[test]
@@ -321,8 +326,8 @@ mod tests {
 
     #[test]
     fn serialize_named_section() {
-        let mut configs = BTreeMap::new();
-        let mut sections = BTreeMap::new();
+        let mut configs = IndexMap::new();
+        let mut sections = IndexMap::new();
         let mut obj = Map::new();
         obj.insert("_type".into(), Value::String("interface".into()));
         obj.insert("proto".into(), Value::String("static".into()));
@@ -342,8 +347,8 @@ mod tests {
 
     #[test]
     fn serialize_list_section() {
-        let mut configs = BTreeMap::new();
-        let mut sections = BTreeMap::new();
+        let mut configs = IndexMap::new();
+        let mut sections = IndexMap::new();
         let mut item = Map::new();
         item.insert("_type".into(), Value::String("dropbear".into()));
         item.insert("Port".into(), Value::String("22".into()));
@@ -362,8 +367,8 @@ mod tests {
 
     #[test]
     fn serialize_named_section_missing_type_errors() {
-        let mut configs = BTreeMap::new();
-        let mut sections = BTreeMap::new();
+        let mut configs = IndexMap::new();
+        let mut sections = IndexMap::new();
         let mut obj = Map::new();
         obj.insert("proto".into(), Value::String("static".into()));
         sections.insert("lan".into(), Section::Named(obj));
@@ -371,13 +376,13 @@ mod tests {
 
         let mut w = String::new();
         let err = serialize_uci(&mut w, &configs).unwrap_err();
-        assert!(err.0.contains("has no type"));
+        assert!(format!("{err}").contains("has no type"));
     }
 
     #[test]
     fn serialize_list_section_missing_type_errors() {
-        let mut configs = BTreeMap::new();
-        let mut sections = BTreeMap::new();
+        let mut configs = IndexMap::new();
+        let mut sections = IndexMap::new();
         let mut item = Map::new();
         item.insert("Port".into(), Value::String("22".into()));
         sections.insert("dropbear".into(), Section::List(vec![item]));
@@ -385,13 +390,13 @@ mod tests {
 
         let mut w = String::new();
         let err = serialize_uci(&mut w, &configs).unwrap_err();
-        assert!(err.0.contains("has no type"));
+        assert!(format!("{err}").contains("has no type"));
     }
 
     #[test]
     fn serialize_multiple_list_items() {
-        let mut configs = BTreeMap::new();
-        let mut sections = BTreeMap::new();
+        let mut configs = IndexMap::new();
+        let mut sections = IndexMap::new();
         let mut item1 = Map::new();
         item1.insert("_type".into(), Value::String("dropbear".into()));
         item1.insert("Port".into(), Value::String("22".into()));
@@ -411,8 +416,8 @@ mod tests {
 
     #[test]
     fn serialize_list_section_type_mismatch() {
-        let mut configs = BTreeMap::new();
-        let mut sections = BTreeMap::new();
+        let mut configs = IndexMap::new();
+        let mut sections = IndexMap::new();
         let mut item = Map::new();
         item.insert("_type".into(), Value::String("interface".into()));
         item.insert("proto".into(), Value::String("static".into()));
@@ -430,18 +435,18 @@ mod tests {
     #[test]
     fn test_serialize_opkg_empty() {
         let mut w = String::new();
-        serialize_opkg(&mut w, PkgBackend::Opkg, None, None).unwrap();
+        serialize_package_management(&mut w, PkgBackend::Opkg, None, None).unwrap();
         assert!(w.is_empty());
     }
 
     #[test]
     fn test_serialize_opkg_feeds_opkg() {
         let mut w = String::new();
-        let opkg = Opkg {
+        let sources = PackageSources {
             feeds: Some(vec!["src/gz custom 'test' https://example.com".into()]),
             local_packages: None,
         };
-        serialize_opkg(&mut w, PkgBackend::Opkg, Some(&opkg), None).unwrap();
+        serialize_package_management(&mut w, PkgBackend::Opkg, Some(&sources), None).unwrap();
         assert!(w.contains("/etc/opkg/customfeeds.conf"));
         assert!(w.contains("printf '%s\\n' 'src/gz custom '\\''test'\\'' https://example.com'"));
     }
@@ -449,11 +454,11 @@ mod tests {
     #[test]
     fn test_serialize_opkg_feeds_apk() {
         let mut w = String::new();
-        let opkg = Opkg {
+        let sources = PackageSources {
             feeds: Some(vec!["https://example.com/packages".into()]),
             local_packages: None,
         };
-        serialize_opkg(&mut w, PkgBackend::Apk, Some(&opkg), None).unwrap();
+        serialize_package_management(&mut w, PkgBackend::Apk, Some(&sources), None).unwrap();
         assert!(w.contains("/etc/apk/repositories.d/customfeeds.list"));
         assert!(w.contains("printf '%s\\n' 'https://example.com/packages'"));
     }
@@ -462,7 +467,7 @@ mod tests {
     fn test_serialize_opkg_packages_opkg() {
         let mut w = String::new();
         let pkgs = vec!["luci".into(), "tcpdump".into()];
-        serialize_opkg(&mut w, PkgBackend::Opkg, None, Some(&pkgs)).unwrap();
+        serialize_package_management(&mut w, PkgBackend::Opkg, None, Some(&pkgs)).unwrap();
         assert!(w.contains("NEED_INSTALL=false"));
         assert!(w.contains("opkg list-installed"));
         assert!(w.contains("opkg update && opkg install luci tcpdump"));
@@ -472,7 +477,7 @@ mod tests {
     fn test_serialize_opkg_packages_apk() {
         let mut w = String::new();
         let pkgs = vec!["luci".into(), "tcpdump".into()];
-        serialize_opkg(&mut w, PkgBackend::Apk, None, Some(&pkgs)).unwrap();
+        serialize_package_management(&mut w, PkgBackend::Apk, None, Some(&pkgs)).unwrap();
         assert!(w.contains("NEED_INSTALL=false"));
         assert!(w.contains("apk info -e"));
         assert!(w.contains("apk -U add luci tcpdump"));
@@ -481,11 +486,11 @@ mod tests {
     #[test]
     fn test_serialize_opkg_local_packages_opkg() {
         let mut w = String::new();
-        let opkg = Opkg {
+        let sources = PackageSources {
             feeds: None,
             local_packages: Some(vec!["./packages/test_1.0_all.ipk".into()]),
         };
-        serialize_opkg(&mut w, PkgBackend::Opkg, Some(&opkg), None).unwrap();
+        serialize_package_management(&mut w, PkgBackend::Opkg, Some(&sources), None).unwrap();
         assert!(w.contains("opkg list-installed \"test\""));
         assert!(w.contains("opkg install /tmp/test_1.0_all.ipk"));
     }
@@ -493,11 +498,11 @@ mod tests {
     #[test]
     fn test_serialize_opkg_local_packages_apk() {
         let mut w = String::new();
-        let opkg = Opkg {
+        let sources = PackageSources {
             feeds: None,
             local_packages: Some(vec!["./packages/test_1.0_all.apk".into()]),
         };
-        serialize_opkg(&mut w, PkgBackend::Apk, Some(&opkg), None).unwrap();
+        serialize_package_management(&mut w, PkgBackend::Apk, Some(&sources), None).unwrap();
         assert!(w.contains("apk info -e \"test\""));
         assert!(w.contains("apk add --allow-untrusted /tmp/test_1.0_all.apk"));
     }

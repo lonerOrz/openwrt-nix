@@ -8,6 +8,10 @@
       url = "github:numtide/treefmt-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    openwrt-imagebuilder = {
+      url = "github:astro/nix-openwrt-imagebuilder";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -16,6 +20,7 @@
       nixpkgs,
       flake-parts,
       treefmt-nix,
+      openwrt-imagebuilder,
       ...
     }:
     flake-parts.lib.mkFlake { inherit inputs; } {
@@ -31,17 +36,18 @@
       perSystem =
         {
           config,
-          self',
-          inputs',
           pkgs,
-          system,
           ...
         }:
         let
-          uci = pkgs.callPackage ./nix { };
+          uci = pkgs.callPackage ./nix { inherit openwrt-imagebuilder; };
           uciConfig = uci.writeUci ./example.nix;
           testConfig = uci.writeUci ./test/test_config.nix;
           testConfigApk = uci.writeUci ./test/test_config_apk.nix;
+          exampleFirmware = uci.buildFirmware {
+            configuration = ./example.nix;
+            profile = "linksys_e8450-ubi";
+          };
         in
         {
           treefmt = {
@@ -52,6 +58,8 @@
               shfmt.enable = true;
               yamlfmt.enable = true;
               prettier.enable = true;
+              ruff-check.enable = true;
+              ruff-format.enable = true;
             };
             # 约束 prettier 的工作范围为 Markdown 和 JSON
             settings.formatter.prettier.includes = [
@@ -71,9 +79,10 @@
             example-json = uciConfig.json;
             test-json = testConfig.json;
             test-json-apk = testConfigApk.json;
+            firmware = exampleFirmware;
           };
 
-          apps = rec {
+          apps = {
             example = {
               type = "app";
               program = toString uciConfig.command;
@@ -86,16 +95,23 @@
               type = "app";
               program = toString testConfigApk.command;
             };
-            default = example;
+            default = {
+              type = "app";
+              program = toString uciConfig.command;
+            };
           };
 
           devShells.default = pkgs.mkShell {
             buildInputs = with pkgs; [
               just
               sops
+              openssh
+              sshpass
               cargo
               rustc
-              config.treefmt.build.wrapper # 自动绑定编译好的 treefmt 封装工具
+              python3
+              python3Packages.pytest
+              config.treefmt.build.wrapper
             ];
           };
         };

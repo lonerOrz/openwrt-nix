@@ -1,3 +1,11 @@
+{ config, ... }:
+let
+  # Bootstrap mode: no SOPS files → plain passwords (for firmware build)
+  # Deploy mode: SOPS files present → @placeholder@ (for nuci deploy)
+  isBootstrap = config.uci.secrets.sops.files == [ ];
+  wifi_key = if isBootstrap then "CHANGE_ME_ON_DEPLOY" else "@wifi_password@";
+  tsig_key = if isBootstrap then "CHANGE_ME_ON_DEPLOY" else "@tsig_key@";
+in
 {
   uci.settings = {
     # The block below will translate to the following uci settings:
@@ -95,7 +103,7 @@
         mode = "ap";
         ssid = "gchq-2.4";
         encryption = "sae-mixed";
-        key = "@wifi_password@";
+        key = wifi_key;
       };
       default_radio1 = {
         _type = "wifi-iface";
@@ -104,7 +112,7 @@
         mode = "ap";
         ssid = "gchq-5";
         encryption = "sae-mixed";
-        key = "@wifi_password@";
+        key = wifi_key;
       };
     };
     tinc.retiolum = {
@@ -132,7 +140,7 @@
           dns_server = "ns1.thalheim.io";
           use_syslog = "2";
           username = "hmac-sha256:rauter";
-          password = "@tsig_key@";
+          password = tsig_key;
           check_unit = "minutes";
           force_unit = "minutes";
           retry_unit = "seconds";
@@ -181,7 +189,7 @@
     "rsync"
     "htop"
   ];
-  uci.opkg = {
+  uci.packageSources = {
     feeds = [
       "src/gz kiddin9 https://dl.openwrt.ai/packages/aarch64_cortex-a53/kiddin9"
     ];

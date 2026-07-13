@@ -6,7 +6,7 @@
 host := env_var_or_default("ROUTER_HOST", "192.168.188.2")
 
 # SSH connection reuse
-ssh_opts := "-o ControlMaster=auto -o ControlPath=/tmp/ssh-%r@%h:%p -o ControlPersist=5m"
+ssh_opts := "-o ControlMaster=auto -o ControlPath=/tmp/ssh-%C -o ControlPersist=5m"
 
 # ==============================================================================
 # Development & Testing Recipes
@@ -19,16 +19,13 @@ eval-config:
 # Run local Rust binary against mock configuration files
 test-unit:
 	cargo test
-	cargo run -- test/test_uci.json > /dev/null
-	cargo run -- test/test_interpolate.json test/mock_secrets > /dev/null
-	cargo run -- test/test_interp2.json test/mock_secrets > /dev/null
-	cargo run -- test/test_unclosed.json > /dev/null
-	cargo run -- test/test_edge_cases.json > /dev/null
+	cargo run -- compile test/test_uci.json > /dev/null
+	cargo run -- compile test/test_edge_cases.json test/test_secrets > /dev/null
 	@echo "All local mock configuration tests passed!"
 
 # Run Podman-based end-to-end integration tests against a real OpenWrt container
 test-integration:
-	@test/run_integration.sh
+	@nix develop --command python3 -m pytest test/integration_test.py -v --tb=short
 
 # Run all test suites
 test-all: test-unit test-integration
@@ -56,8 +53,7 @@ ssh +command:
 
 # Dry-run: Preview UCI changes on the router without applying them
 dry-run:
-	@echo "🔍 Simulating configuration changes on root@{{host}}..."
-	@(just eval-config | sed 's/uci commit/uci changes/' && echo "uci revert") | just ssh 'sh -s'
+	cargo run -- diff example.nix --target "root@{{host}}"
 
 # Apply configuration to router (SSH keys, password, packages, UCI, tinc — all hermetic)
 apply:

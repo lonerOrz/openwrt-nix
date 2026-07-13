@@ -7,12 +7,13 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
+use std::process::Command;
 
 pub(crate) fn interpolate_secrets<'a>(
     option_val: &'a str,
     secrets: &HashMap<String, String>,
 ) -> Result<Cow<'a, str>, ConfigError> {
-    if !option_val.contains('@') || secrets.is_empty() {
+    if !option_val.contains('@') {
         return Ok(Cow::Borrowed(option_val));
     }
 
@@ -40,7 +41,7 @@ pub(crate) fn interpolate_secrets<'a>(
                         .all(|c| c.is_ascii_alphanumeric() || c == '_');
 
                 if is_valid_identifier {
-                    return Err(ConfigError(format!(
+                    return Err(ConfigError::Validation(format!(
                         "Tried to use secret {}, but no secret with this name specified.",
                         secret_name
                     )));
@@ -81,10 +82,6 @@ pub(crate) fn resolve_secrets(
     mut root: Root,
     secrets: &HashMap<String, String>,
 ) -> Result<Root, ConfigError> {
-    if secrets.is_empty() {
-        return Ok(root);
-    }
-
     for sections in root.settings.values_mut() {
         for section in sections.values_mut() {
             match section {
@@ -104,8 +101,8 @@ pub(crate) fn resolve_secrets(
         }
     }
 
-    if let Some(opkg) = &mut root.opkg
-        && let Some(feeds) = &mut opkg.feeds
+    if let Some(sources) = &mut root.package_sources
+        && let Some(feeds) = &mut sources.feeds
     {
         for feed in feeds {
             let interpolated = interpolate_secrets(feed, secrets)?;
@@ -147,7 +144,7 @@ pub(crate) fn load_secrets_dir(dir_path: &str) -> Result<HashMap<String, String>
                     if let Some(old_val) = secrets.insert(k.clone(), val_str)
                         && old_val != secrets[k]
                     {
-                        return Err(ConfigError(format!(
+                        return Err(ConfigError::Validation(format!(
                             "Secret key '{}' conflicts with different values across files. File causing conflict: '{}'",
                             k,
                             path.display()
@@ -160,12 +157,58 @@ pub(crate) fn load_secrets_dir(dir_path: &str) -> Result<HashMap<String, String>
     Ok(secrets)
 }
 
+pub(crate) fn decrypt_sops_mem(root: &Root) -> Result<HashMap<String, String>, ConfigError> {
+    let mut secrets = HashMap::new();
+    let sops_files = match root.secrets.as_ref().and_then(|s| s.sops.as_ref()) {
+        Some(sops) => &sops.files,
+        None => return Ok(secrets),
+    };
+
+    for file in sops_files {
+        if !Path::new(file).exists() {
+            return Err(ConfigError::Sops(format!(
+                "Configured SOPS file not found: {file}"
+            )));
+        }
+
+        let output = Command::new("sops")
+            .args(["-d", "--output-type", "json", file])
+            .output()
+            .map_err(|e| ConfigError::Sops(format!("Failed to run sops: {e}")))?;
+
+        if !output.status.success() {
+            return Err(ConfigError::Sops(format!(
+                "Failed to decrypt sops file: {file}"
+            )));
+        }
+
+        let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .map_err(|e| ConfigError::Sops(format!("Failed to parse decrypted JSON: {e}")))?;
+
+        if let Some(obj) = parsed.as_object() {
+            for (k, v) in obj {
+                if k == "sops" {
+                    continue;
+                }
+                let val = match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::Bool(b) => b.to_string(),
+                    _ => v.to_string(),
+                };
+                secrets.insert(k.clone(), val);
+            }
+        }
+    }
+    Ok(secrets)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::Opkg;
+    use crate::models::PackageSources;
+    use indexmap::IndexMap;
     use serde_json::Map;
-    use std::collections::BTreeMap;
     use std::fs;
     use tempfile::TempDir;
 
@@ -182,9 +225,9 @@ mod tests {
     }
 
     #[test]
-    fn interpolate_empty_secrets() {
-        let s = interpolate_secrets("@secret@", &HashMap::new()).unwrap();
-        assert_eq!(s.as_ref(), "@secret@");
+    fn interpolate_empty_secrets_errors_on_valid_placeholder() {
+        let err = interpolate_secrets("@secret@", &HashMap::new()).unwrap_err();
+        assert!(format!("{err}").contains("secret"));
     }
 
     #[test]
@@ -203,7 +246,7 @@ mod tests {
     #[test]
     fn interpolate_missing_secret_errors() {
         let err = interpolate_secrets("@missing@", &secrets(&[("other", "v")])).unwrap_err();
-        assert!(err.0.contains("missing"));
+        assert!(format!("{err}").contains("missing"));
     }
 
     #[test]
@@ -224,17 +267,19 @@ mod tests {
         obj.insert("_type".into(), Value::String("wifi-iface".into()));
         obj.insert("key".into(), Value::String("@wifi_pass@".into()));
 
-        let mut sections = BTreeMap::new();
+        let mut sections = IndexMap::new();
         sections.insert("radio0".into(), Section::Named(obj));
 
-        let mut settings = BTreeMap::new();
+        let mut settings = IndexMap::new();
         settings.insert("wireless".into(), sections);
 
         let root = Root {
             package_manager: "opkg".into(),
             settings,
             packages: None,
-            opkg: None,
+            package_sources: None,
+            ssh_keys: vec![],
+            secrets: None,
         };
 
         let secs = secrets(&[("wifi_pass", "secret123")]);
@@ -253,21 +298,23 @@ mod tests {
         obj.insert("_type".into(), Value::String("wifi-iface".into()));
         obj.insert("key".into(), Value::String("@missing_secret@".into()));
 
-        let mut sections = BTreeMap::new();
+        let mut sections = IndexMap::new();
         sections.insert("radio0".into(), Section::Named(obj));
 
-        let mut settings = BTreeMap::new();
+        let mut settings = IndexMap::new();
         settings.insert("wireless".into(), sections);
 
         let root = Root {
             package_manager: "opkg".into(),
             settings,
             packages: None,
-            opkg: None,
+            package_sources: None,
+            ssh_keys: vec![],
+            secrets: None,
         };
 
         let err = resolve_secrets(root, &secrets(&[("other", "v")])).unwrap_err();
-        assert!(err.0.contains("missing_secret"));
+        assert!(format!("{err}").contains("missing_secret"));
     }
 
     #[test]
@@ -276,17 +323,19 @@ mod tests {
         obj.insert("_type".into(), Value::String("@not_a_secret@".into()));
         obj.insert("key".into(), Value::String("plain".into()));
 
-        let mut sections = BTreeMap::new();
+        let mut sections = IndexMap::new();
         sections.insert("test".into(), Section::Named(obj));
 
-        let mut settings = BTreeMap::new();
+        let mut settings = IndexMap::new();
         settings.insert("config".into(), sections);
 
         let root = Root {
             package_manager: "opkg".into(),
             settings,
             packages: None,
-            opkg: None,
+            package_sources: None,
+            ssh_keys: vec![],
+            secrets: None,
         };
 
         let resolved = resolve_secrets(root, &HashMap::new()).unwrap();
@@ -299,26 +348,24 @@ mod tests {
     }
 
     #[test]
-    fn resolve_secrets_empty_map_shortcircuits() {
+    fn resolve_secrets_empty_map_errors_on_placeholder() {
         let mut obj = Map::new();
         obj.insert("key".into(), Value::String("@secret@".into()));
-        let mut sections = BTreeMap::new();
+        let mut sections = IndexMap::new();
         sections.insert("s".into(), Section::Named(obj));
-        let mut settings = BTreeMap::new();
+        let mut settings = IndexMap::new();
         settings.insert("c".into(), sections);
         let root = Root {
             package_manager: "opkg".into(),
             settings,
             packages: None,
-            opkg: None,
+            package_sources: None,
+            ssh_keys: vec![],
+            secrets: None,
         };
 
-        let resolved = resolve_secrets(root, &HashMap::new()).unwrap();
-        if let Section::Named(map) = &resolved.settings["c"]["s"] {
-            assert_eq!(map["key"], "@secret@");
-        } else {
-            panic!("Expected Section::Named");
-        }
+        let err = resolve_secrets(root, &HashMap::new()).unwrap_err();
+        assert!(format!("{err}").contains("secret"));
     }
 
     #[test]
@@ -326,15 +373,17 @@ mod tests {
         let mut item = Map::new();
         item.insert("_type".into(), Value::String("dropbear".into()));
         item.insert("Port".into(), Value::String("@port@".into()));
-        let mut sections = BTreeMap::new();
+        let mut sections = IndexMap::new();
         sections.insert("dropbear".into(), Section::List(vec![item]));
-        let mut settings = BTreeMap::new();
+        let mut settings = IndexMap::new();
         settings.insert("dropbear".into(), sections);
         let root = Root {
             package_manager: "opkg".into(),
             settings,
             packages: None,
-            opkg: None,
+            package_sources: None,
+            ssh_keys: vec![],
+            secrets: None,
         };
 
         let secs = secrets(&[("port", "22")]);
@@ -351,17 +400,19 @@ mod tests {
     fn resolve_secrets_feeds() {
         let root = Root {
             package_manager: "opkg".into(),
-            settings: BTreeMap::new(),
+            settings: IndexMap::new(),
             packages: None,
-            opkg: Some(Opkg {
+            package_sources: Some(PackageSources {
                 feeds: Some(vec!["src/gz @repo_name@ https://example.com".into()]),
                 local_packages: None,
             }),
+            ssh_keys: vec![],
+            secrets: None,
         };
 
         let secs = secrets(&[("repo_name", "custom")]);
         let resolved = resolve_secrets(root, &secs).unwrap();
-        let feeds = resolved.opkg.unwrap().feeds.unwrap();
+        let feeds = resolved.package_sources.unwrap().feeds.unwrap();
         assert_eq!(feeds[0], "src/gz custom https://example.com");
     }
 
@@ -422,8 +473,8 @@ mod tests {
         fs::write(dir.path().join("a.json"), r#"{"key": "val_a"}"#).unwrap();
         fs::write(dir.path().join("b.json"), r#"{"key": "val_b"}"#).unwrap();
         let err = load_secrets_dir(dir.path().to_str().unwrap()).unwrap_err();
-        assert!(err.0.contains("conflicts"));
-        assert!(err.0.contains("key"));
+        assert!(format!("{err}").contains("conflicts"));
+        assert!(format!("{err}").contains("key"));
     }
 
     #[test]
@@ -440,7 +491,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("bad.json"), "not valid json {{{").unwrap();
         let err = load_secrets_dir(dir.path().to_str().unwrap()).unwrap_err();
-        assert!(err.0.contains("Failed to parse"));
+        assert!(format!("{err}").contains("Failed to parse"));
     }
 
     #[test]
@@ -470,5 +521,16 @@ mod tests {
         let result = load_secrets_dir(dir.path().to_str().unwrap()).unwrap();
         assert_eq!(result["top_key"], "top_val");
         assert!(!result.contains_key("nested_key"));
+    }
+
+    #[test]
+    fn unclosed_marker_passthrough() {
+        // @ in middle of string without matching closing @ → treated as plain text
+        let s = interpolate_secrets("my@unclosed", &HashMap::new()).unwrap();
+        assert_eq!(s.as_ref(), "my@unclosed");
+
+        // Odd number of @ but @in@ is a valid placeholder → errors on missing secret
+        let err = interpolate_secrets("has@in@middle@here", &HashMap::new()).unwrap_err();
+        assert!(format!("{err}").contains("in"));
     }
 }

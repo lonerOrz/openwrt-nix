@@ -79,7 +79,7 @@
     }
   },
   "packages": ["luci", "tcpdump", "tinc", "rsync", "htop"],
-  "opkg": {
+  "packageSources": {
     "feeds": [
       "src/gz kiddin9 https://dl.openwrt.ai/packages/aarch64_cortex-a53/kiddin9"
     ],
