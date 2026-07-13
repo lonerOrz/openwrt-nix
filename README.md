@@ -1,155 +1,100 @@
-# nuci (Nix-UCI)
+# nuci
 
-Declarative configuration management for OpenWrt routers. Nix defines the config, Rust compiles it to UCI, and a hermetic shell script deploys it over SSH.
-
-## Architecture
+Declarative config management for OpenWrt. Define everything in Nix, compile it with Rust, deploy over SSH.
 
 ```
-Nix Config (.nix)
-       │
-       ▼
-  lib.evalModules ──► uci.json
-                          │
-SOPS secrets ──► age decrypt (local)
-                          │
-                          ▼
-                    nuci (Rust)
-                 validate → resolve → serialize
-                          │
-                          ▼
-               uci -q batch <<'EOF'
-               commit <config>
-               EOF
-                          │
-                     SSH pipe ──► Target Router
+Nix ──► uci.json ──► nuci ──► SSH pipe ──► Router
+                         │
+                    validates, resolves
+                    secrets, serializes
+                    UCI batch commands
 ```
 
-**Pipeline:** `JSON → parse → validate_root → resolve_secrets → serialize_uci → serialize_opkg → shell`
+## Why?
 
-## Features
+- Web UI config = no version control, no reproducibility
+- Ansible on a 128MB router = painful
+- Running Nix on the router itself = impossible
 
-- **`uci batch` blocks** — atomic writes per config file, minimizing fork/exec overhead on embedded devices
-- **AST secret resolution** — `@placeholder@` interpolation happens in a dedicated pass before serialization; the serializer never sees secrets
-- **Deterministic output** — `BTreeMap` ordering guarantees consistent UCI command sequences and reproducible `dry-run` diffs
-- **UCI spec validation** — config/section/option names enforced as `[a-zA-Z0-9_]`, types allow `[a-zA-Z0-9_-]` (for `wifi-iface` etc.), null values blocked; empty list sections are rejected to prevent spurious type-mismatched cleanup loops; fails fast at parse time
-- **Deploy-time decryption** — SOPS files decrypted locally via `age`, only plaintext UCI batch crosses the SSH pipe; no private keys on the router
-- **Rollback watchdog** — background process on the target restores `/etc/config` backup if connectivity isn't re-established within 60s
-- **SSH key lockout prevention** — deployment script ensures the deployer's current key is always appended to `authorized_keys`
-- **Package management** — dual-backend support (`opkg` for older releases, `apk` for OpenWrt 25.12+); manages feeds, remote packages, and local `.ipk`/`.apk` transfer via SCP
+**nuci** does all the heavy lifting locally. The router just runs a small shell script.
 
-## Getting Started
+## How it works
 
-### Prerequisites
+1. You write Nix config with `@placeholder@` for secrets
+2. `nuci compile` → validates, decrypts SOPS, outputs `uci batch` script
+3. `nuci deploy` → SSHes the script to the router, with rollback safety
 
-- [Nix](https://nixos.org/download.html) with flakes enabled (`experimental-features = nix-command flakes`)
-- [Just](https://github.com/casey/just) task runner
-- [age](https://github.com/FiloSottile/age) for SOPS encryption
-- Target device: default `Justfile` targets Linksys E8450 (UBI); edit `sysupgrade_url` for other devices
+**Watchdog**: if the new config kills SSH, the router auto-restores from backup within 60s.
 
-### 1. Clone and enter the project
+## Quick start
 
 ```bash
-git clone https://github.com/lonerOrz/openwrt-nix.git
-cd openwrt-nix
-```
-
-### 2. Set up secrets
-
-```bash
+# Setup
 age-keygen -o age.key
+sops test/secrets.enc.json     # add wifi_password, root_password, etc.
+
+# Edit config
+vim example.nix                 # use @wifi_password@ for secrets
+
+# Deploy
+export ROUTER_HOST=192.168.1.1
+just apply                      # full deploy
+just dry-run                    # preview only
 ```
 
-Create `.sops.yaml`:
+## CLI
 
-```yaml
-creation_rules:
-  - path_regex: secrets\.enc\.json$
-    age:
-      - <YOUR_AGE_PUBLIC_KEY>
+```
+nuci compile <json> [secrets_dir]   # JSON → UCI batch (stdout)
+nuci deploy <json>                  # Deploy to router
+  --target <user@host>              # SSH target
+  --port <port>                     # SSH port (default: 22)
+  --identity <key_file>             # SSH identity file
 ```
 
-Create and encrypt your secrets file:
+## Testing
 
 ```bash
-sops secrets.enc.json
-# add keys like: wifi_password, root_password, tsig_key, etc.
+just test-all      # unit + integration
+just test-unit     # cargo test + mock JSON
 ```
 
-### 3. Configure
+Integration tests run real OpenWrt containers via Podman — no physical router needed.
 
-Edit `example.nix` (or create your own config). Reference secrets with `@placeholder@`:
+| Test | Verifies |
+|------|----------|
+| `TestCommandGeneration` | UCI batch syntax (opkg + apk) |
+| `TestDeployment` | Deploy + UCI state verification |
+| `TestWatchdogRollback` | Auto-restore after config break |
+| `TestNetworkFaultInjection` | Watchdog under packet loss / blackout |
+| `TestAgentLockout` | SSH key lockout prevention |
+| `TestRealDeploy` | End-to-end `nuci deploy` binary |
 
-```nix
-uci.settings.wireless.radio0.key = "@wifi_password@";
-```
+Each test run gets unique UUID-based container names and dynamic ports — run multiple suites in parallel safely.
 
-Set your router IP in the `Justfile` (`host` variable) or export `ROUTER_HOST`.
-
-### 4. Deploy
-
-```bash
-just apply          # full deployment: SSH keys, password, UCI, packages
-just dry-run        # preview changes without applying
-just upgrade        # download + flash latest OpenWrt, then re-apply config
-```
-
-## Development
-
-### Run all tests
-
-```bash
-just test-all
-```
-
-### Unit tests (69)
-
-```bash
-just test-unit      # cargo test + 5 mock JSON files through the binary
-```
-
-### Integration tests (10 phases)
-
-```bash
-just test-integration
-```
-
-Runs `test/run_integration.sh` against a Podman container (`openwrt/rootfs:latest`):
-
-| Phase | What                                                         |
-| ----- | ------------------------------------------------------------ |
-| 1-2   | Build & start container                                      |
-| 3-5   | Wait for dropbear, inject SSH key, create SSH config         |
-| 6     | Generate temp age key, SOPS-encrypt mock secrets             |
-| 7     | Verify `nuci` command generation via `nix run .#test-deploy` |
-| 8     | Deploy into container, verify UCI state with `uci get`       |
-| 9     | Verify JSON artifact structure                               |
-| 10    | Watchdog rollback test: break config, verify auto-restore    |
-
-### Other commands
-
-```bash
-just fmt            # cargo fmt + nix fmt
-just clippy         # cargo clippy -D warnings
-just eval-config    # render UCI commands to stdout
-just ssh <cmd>      # execute command on router
-```
-
-## Project Structure
+## Structure
 
 ```
-├── src/main.rs              # Rust UCI compiler (~1200 LOC, 69 tests)
-├── nix/
-│   ├── default.nix          # writeUci: JSON generator + deployment script
-│   ├── module-options.nix   # NixOS-style option declarations
-│   └── nuci.nix             # Rust package build
-├── flake.nix                # Build system entry
-├── Justfile                 # Task runner
-├── example.nix              # Example/real router config
-├── test/
-│   ├── run_integration.sh   # 10-phase E2E test
-│   ├── Containerfile        # OpenWrt test container
-│   └── test_config.nix      # Test fixture
-└── Cargo.toml
+src/
+├── main.rs          # CLI (clap), compile & deploy
+├── deploy.rs        # SSH transport, watchdog, key lockout
+├── generator.rs     # UCI batch serialization
+├── validation.rs    # UCI spec validation
+├── secrets.rs       # SOPS decryption + @placeholder@ resolution
+├── models.rs        # JSON config models
+├── helpers.rs       # Utilities
+└── error.rs         # Error types
+
+test/
+├── integration_test.py      # 25 pytest tests
+├── package-server.py        # .ipk/.apk builder
+├── Containerfile            # OpenWrt sandbox
+└── test_config.nix          # Test fixture
+
+nix/
+├── default.nix      # writeUci + deployment script
+├── module-options.nix
+└── nuci.nix         # Rust package build
 ```
 
 ## License
