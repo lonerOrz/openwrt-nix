@@ -12,7 +12,7 @@ pub(crate) struct DeployConfig {
     pub identity_file: Option<String>,
 }
 
-fn build_ssh_args(config: &DeployConfig, is_scp: bool) -> Vec<String> {
+fn build_ssh_args(config: &DeployConfig) -> Vec<String> {
     let mut args = vec![
         "-o".into(),
         "StrictHostKeyChecking=no".into(),
@@ -30,8 +30,7 @@ fn build_ssh_args(config: &DeployConfig, is_scp: bool) -> Vec<String> {
         "ControlPersist=5m".into(),
     ];
     if config.port != 22 {
-        let port_flag = if is_scp { "-P" } else { "-p" };
-        args.extend([port_flag.into(), config.port.to_string()]);
+        args.extend(["-p".into(), config.port.to_string()]);
     }
     if let Some(ref identity) = config.identity_file {
         args.extend(["-i".into(), identity.clone()]);
@@ -45,7 +44,7 @@ pub(crate) fn ssh_exec(
     stdin_data: Option<&[u8]>,
     config: &DeployConfig,
 ) -> Result<String, ConfigError> {
-    let mut args = build_ssh_args(config, false);
+    let mut args = build_ssh_args(config);
     args.push(target.into());
     args.push(cmd.into());
 
@@ -83,35 +82,6 @@ pub(crate) fn ssh_exec(
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn scp_to_target(
-    target: &str,
-    local_path: &Path,
-    remote_path: &str,
-    config: &DeployConfig,
-) -> Result<(), ConfigError> {
-    let local_str = local_path
-        .to_str()
-        .ok_or_else(|| ConfigError::Validation("Invalid local path".into()))?;
-
-    let mut args = build_ssh_args(config, true);
-    args.push("-O".into());
-    args.push(local_str.into());
-    args.push(format!("{target}:{remote_path}"));
-
-    let status = Command::new("scp")
-        .args(&args)
-        .status()
-        .map_err(|e| ConfigError::Deploy(format!("Failed to spawn scp: {e}")))?;
-
-    if !status.success() {
-        return Err(ConfigError::Deploy(format!(
-            "SCP failed to copy {} to {target}:{remote_path}",
-            local_path.display()
-        )));
-    }
-    Ok(())
-}
-
 fn transfer_packages(target: &str, root: &Root, config: &DeployConfig) -> Result<(), ConfigError> {
     let local_pkgs = match &root.package_sources {
         Some(sources) => match &sources.local_packages {
@@ -121,6 +91,12 @@ fn transfer_packages(target: &str, root: &Root, config: &DeployConfig) -> Result
         None => return Ok(()),
     };
 
+    if local_pkgs.is_empty() {
+        return Ok(());
+    }
+
+    // Stage all packages into a temp dir
+    let staging = tempfile::tempdir()?;
     for pkg in local_pkgs {
         let path = Path::new(pkg);
         if !path.exists() {
@@ -130,9 +106,29 @@ fn transfer_packages(target: &str, root: &Root, config: &DeployConfig) -> Result
             )));
         }
         let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or(pkg);
-        eprintln!("Transferring {filename} to {target}:/tmp/ ...");
-        scp_to_target(target, path, &format!("/tmp/{filename}"), config)?;
+        std::fs::copy(path, staging.path().join(filename))?;
     }
+
+    // Tar + SSH stdin — single channel, no scp dependency
+    eprintln!("Bundling {} local package(s)...", local_pkgs.len());
+    let tar_bytes = Command::new("tar")
+        .arg("-cf")
+        .arg("-")
+        .arg("-C")
+        .arg(staging.path())
+        .arg(".")
+        .output()
+        .map_err(|e| ConfigError::Deploy(format!("Failed to run local tar: {e}")))?;
+
+    if !tar_bytes.status.success() {
+        return Err(ConfigError::Deploy(format!(
+            "Local tar failed: {}",
+            String::from_utf8_lossy(&tar_bytes.stderr)
+        )));
+    }
+
+    eprintln!("Transferring to {target}:/tmp/ via SSH stream...");
+    ssh_exec(target, "tar -xf - -C /tmp", Some(&tar_bytes.stdout), config)?;
     Ok(())
 }
 
@@ -227,7 +223,7 @@ pub(crate) fn run(
     // 1. Compile config through shared pipeline
     let compiled = compile_config(json_path, secrets_dir)?;
 
-    // 2. Transfer local packages (separate SCP, can't do in script)
+    // 2. Transfer local packages via tar over SSH stdin
     transfer_packages(target, &compiled.resolved_root, config)?;
 
     // 3. Build and execute the entire remote deployment script in one SSH call
