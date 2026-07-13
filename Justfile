@@ -25,7 +25,7 @@ test-unit:
 
 # Run Podman-based end-to-end integration tests against a real OpenWrt container
 test-integration:
-	@test/run_integration.sh
+	@nix develop --command python3 -m pytest test/integration_test.py -v --tb=short
 
 # Run all test suites
 test-all: test-unit test-integration

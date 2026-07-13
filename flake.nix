@@ -49,6 +49,8 @@
               shfmt.enable = true;
               yamlfmt.enable = true;
               prettier.enable = true;
+              ruff-check.enable = true;
+              ruff-format.enable = true;
             };
             # 约束 prettier 的工作范围为 Markdown 和 JSON
             settings.formatter.prettier.includes = [
@@ -96,6 +98,8 @@
               openssh
               cargo
               rustc
+              python3
+              python3Packages.pytest
               config.treefmt.build.wrapper
             ];
           };

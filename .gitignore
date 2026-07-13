@@ -10,3 +10,6 @@ bin/
 
 # Rust
 /target/
+
+# Python
+__pycache__/
