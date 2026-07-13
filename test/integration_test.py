@@ -678,10 +678,6 @@ class TestServiceState:
         port = podman_exec(CONTAINER_NAME, "uci get dropbear.@dropbear[0].Port")
         assert port == "22", f"dropbear port is '{port}', expected '22'"
 
-    def test_port_listening(self):
-        """Port 22 is actually open."""
-        pass
-
     def test_uci_persisted(self):
         hostname = podman_exec(CONTAINER_NAME, "uci get system.@system[0].hostname")
         assert hostname, "UCI state not persisted (hostname empty)"
