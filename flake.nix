@@ -96,6 +96,7 @@
               just
               sops
               openssh
+              sshpass
               cargo
               rustc
               python3

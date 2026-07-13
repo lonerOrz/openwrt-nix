@@ -641,6 +641,39 @@ class TestServiceState:
         )
 
 
+class TestPasswordSync:
+    """Verify root password sync via chpasswd in deploy script."""
+
+    def test_password_changed(self):
+        """Root password was changed by deploy and matches secrets."""
+        shadow = podman_exec(CONTAINER_NAME, "grep '^root:' /etc/shadow")
+        has_real_hash = any(marker in shadow for marker in ["$1$", "$5$", "$6$"])
+        assert has_real_hash, f"Root password not synced: {shadow}"
+
+    def test_password_correct(self):
+        """SSH login works with the deployed password."""
+        r = run(
+            [
+                "sshpass",
+                "-p",
+                "nuci-test-pw-2025",
+                "ssh",
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "UserKnownHostsFile=/dev/null",
+                "-p",
+                "2222",
+                "root@127.0.0.1",
+                "echo ok",
+            ],
+            check=False,
+            timeout=10,
+        )
+        assert r.returncode == 0, f"Password auth failed: {r.stderr}"
+        assert "ok" in r.stdout
+
+
 class TestAgentLockout:
     """Step 12: ssh-agent lockout prevention."""
 
