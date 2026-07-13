@@ -11,6 +11,7 @@ import shutil
 import socket
 import subprocess
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -20,16 +21,26 @@ import pytest
 # ---------------------------------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CONTAINER_NAME = "openwrt-integration-test"
-OPKG_CONTAINER_NAME = "openwrt-integration-test-opkg"
-AGENT_CONTAINER_NAME = "openwrt-agent-test"
-SSH_KEY_PATH = Path("/tmp/openwrt_test_key")
-SSH_CONFIG_PATH = Path("/tmp/openwrt_test_ssh_config")
-SOPS_KEY_DIR = Path("/tmp/nuci_sops_test")
+
+# Unique session ID — isolates concurrent test runs
+SESSION_ID = uuid.uuid4().hex[:8]
+
+CONTAINER_NAME = f"nuci-test-{SESSION_ID}"
+OPKG_CONTAINER_NAME = f"nuci-test-opkg-{SESSION_ID}"
+AGENT_CONTAINER_NAME = f"nuci-agent-{SESSION_ID}"
+
+SSH_KEY_PATH = Path(f"/tmp/nuci_key_{SESSION_ID}")
+SSH_CONFIG_PATH = Path(f"/tmp/nuci_ssh_config_{SESSION_ID}")
+SOPS_KEY_DIR = Path(f"/tmp/nuci_sops_{SESSION_ID}")
 ENCRYPTED_SECRETS = PROJECT_ROOT / "test" / "secrets.enc.json"
-PACKAGE_DIR = Path("/tmp/nuci-test-packages")
+PACKAGE_DIR = Path(f"/tmp/nuci_packages_{SESSION_ID}")
 
 ENGINE = os.environ.get("CONTAINER_ENGINE", "podman")
+
+# Dynamic ports — populated by setup_and_teardown, used by all test classes
+MAIN_SSH_PORT = 0
+OPKG_SSH_PORT = 0
+AGENT_SSH_PORT = 0
 
 # Dropbear binary — procd not running in test containers, can't use init.d scripts
 DROPBEAR_BIN = "/usr/sbin/dropbear -F -E -p 22 -R"
@@ -56,6 +67,13 @@ def run(
 def engine(*args: str, check: bool = True, **kw) -> subprocess.CompletedProcess:
     """Run a container engine command."""
     return run([ENGINE, *args], check=check, **kw)
+
+
+def get_free_port() -> int:
+    """Find a free ephemeral port on the host."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 def podman_exec(container: str, cmd: str, *, check: bool = True) -> str:
@@ -204,17 +222,26 @@ def test_json_apk() -> Path:
 
 @pytest.fixture(scope="session", autouse=True)
 def setup_and_teardown(project_root: Path):
-    """Session-scoped setup: build container, inject keys, setup SOPS, start package server."""
+    """Session-scoped setup: build container, inject keys, setup SOPS, generate packages."""
+    global MAIN_SSH_PORT, OPKG_SSH_PORT, AGENT_SSH_PORT
+
+    # Allocate dynamic ports before anything binds
+    MAIN_SSH_PORT = get_free_port()
+    OPKG_SSH_PORT = get_free_port()
+    AGENT_SSH_PORT = get_free_port()
+
     # Clean previous artifacts
-    engine("rm", "-f", CONTAINER_NAME, check=False)
-    engine("rm", "-f", AGENT_CONTAINER_NAME, check=False)
+    for name in [CONTAINER_NAME, OPKG_CONTAINER_NAME, AGENT_CONTAINER_NAME]:
+        engine("rm", "-f", name, check=False)
     for p in [
         SSH_KEY_PATH,
         Path(f"{SSH_KEY_PATH}.pub"),
         SSH_CONFIG_PATH,
         Path(f"{SSH_KEY_PATH}.agent"),
         Path(f"{SSH_KEY_PATH}.agent.pub"),
-        Path("/tmp/openwrt_agent_ssh_config"),
+        Path(f"/tmp/openwrt_agent_key_{SESSION_ID}"),
+        Path(f"/tmp/openwrt_agent_key_{SESSION_ID}.pub"),
+        Path(f"/tmp/openwrt_agent_ssh_config_{SESSION_ID}"),
     ]:
         p.unlink(missing_ok=True)
     shutil.rmtree(SOPS_KEY_DIR, ignore_errors=True)
@@ -240,7 +267,7 @@ def setup_and_teardown(project_root: Path):
         CONTAINER_NAME,
         "--cap-add=NET_ADMIN",
         "-p",
-        "2222:22",
+        f"{MAIN_SSH_PORT}:22",
         "openwrt-test-env",
     )
 
@@ -264,12 +291,13 @@ def setup_and_teardown(project_root: Path):
         "--name",
         OPKG_CONTAINER_NAME,
         "-p",
-        "2224:22",
+        f"{OPKG_SSH_PORT}:22",
         "openwrt-test-opkg-env",
     )
 
     # Wait for dropbear
-    wait_for_port("127.0.0.1", 2222)
+    wait_for_port("127.0.0.1", MAIN_SSH_PORT)
+    wait_for_port("127.0.0.1", OPKG_SSH_PORT)
 
     # Inject SSH key
     run(
@@ -316,7 +344,7 @@ def setup_and_teardown(project_root: Path):
     SSH_CONFIG_PATH.write_text(
         f"Host openwrt-test\n"
         f"    HostName localhost\n"
-        f"    Port 2222\n"
+        f"    Port {MAIN_SSH_PORT}\n"
         f"    User root\n"
         f"    StrictHostKeyChecking no\n"
         f"    UserKnownHostsFile /dev/null\n"
@@ -404,16 +432,17 @@ def setup_and_teardown(project_root: Path):
     yield
 
     # Teardown
-    engine("rm", "-f", CONTAINER_NAME, check=False)
-    engine("rm", "-f", AGENT_CONTAINER_NAME, check=False)
-    engine("rm", "-f", OPKG_CONTAINER_NAME, check=False)
+    for name in [CONTAINER_NAME, OPKG_CONTAINER_NAME, AGENT_CONTAINER_NAME]:
+        engine("rm", "-f", name, check=False)
     for p in [
         SSH_KEY_PATH,
         Path(f"{SSH_KEY_PATH}.pub"),
         SSH_CONFIG_PATH,
         Path(f"{SSH_KEY_PATH}.agent"),
         Path(f"{SSH_KEY_PATH}.agent.pub"),
-        Path("/tmp/openwrt_agent_ssh_config"),
+        Path(f"/tmp/openwrt_agent_key_{SESSION_ID}"),
+        Path(f"/tmp/openwrt_agent_key_{SESSION_ID}.pub"),
+        Path(f"/tmp/openwrt_agent_ssh_config_{SESSION_ID}"),
     ]:
         p.unlink(missing_ok=True)
     shutil.rmtree(SOPS_KEY_DIR, ignore_errors=True)
@@ -757,7 +786,7 @@ class TestServiceState:
 
     def test_dropbear_running(self):
         try:
-            with socket.create_connection(("127.0.0.1", 2222), timeout=2):
+            with socket.create_connection(("127.0.0.1", MAIN_SSH_PORT), timeout=2):
                 return
         except OSError:
             pytest.fail("dropbear is not listening on port 22")
@@ -825,15 +854,15 @@ class TestAgentLockout:
             "--name",
             AGENT_CONTAINER_NAME,
             "-p",
-            "2223:22",
+            f"{AGENT_SSH_PORT}:22",
             "openwrt-agent-test-env",
         )
-        wait_for_port("127.0.0.1", 2223)
+        wait_for_port("127.0.0.1", AGENT_SSH_PORT)
         yield
         engine("rm", "-f", AGENT_CONTAINER_NAME, check=False)
 
     def test_password_auth_works(self, agent_container):
-        wait_for_port("127.0.0.1", 2223)
+        wait_for_port("127.0.0.1", AGENT_SSH_PORT)
 
     def test_initial_keys_empty(self, agent_container):
         keys = podman_exec(
@@ -843,7 +872,7 @@ class TestAgentLockout:
 
     def test_key_deployment(self, agent_container):
         """Deploy SSH key and verify it works."""
-        agent_key = Path("/tmp/openwrt_agent_key")
+        agent_key = Path(f"/tmp/openwrt_agent_key_{SESSION_ID}")
         agent_key.unlink(missing_ok=True)
         Path(f"{agent_key}.pub").unlink(missing_ok=True)
         run(
@@ -880,11 +909,11 @@ SSHKEYS
         )
         assert "agent-test-key" in deployed, "Agent key not found in authorized_keys"
 
-        agent_ssh_config = Path("/tmp/openwrt_agent_ssh_config")
+        agent_ssh_config = Path(f"/tmp/openwrt_agent_ssh_config_{SESSION_ID}")
         agent_ssh_config.write_text(
             f"Host openwrt-agent-test\n"
             f"    HostName localhost\n"
-            f"    Port 2223\n"
+            f"    Port {AGENT_SSH_PORT}\n"
             f"    User root\n"
             f"    StrictHostKeyChecking no\n"
             f"    UserKnownHostsFile /dev/null\n"
@@ -936,7 +965,7 @@ class TestRealDeploy:
                 "--target",
                 "root@127.0.0.1",
                 "--port",
-                "2222",
+                str(MAIN_SSH_PORT),
                 "--identity",
                 str(SSH_KEY_PATH),
             ],
