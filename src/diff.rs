@@ -7,6 +7,46 @@ use crate::helpers::iter_options;
 use crate::models::Section;
 use crate::pipeline::compile_config;
 
+pub(crate) const SERVICE_SEPARATOR: &str = "===NUCI_SERVICES===";
+
+/// Build a single SSH command that fetches UCI state + discovers init.d service mappings.
+pub(crate) fn build_discovery_command(managed: &[&str]) -> String {
+    format!(
+        "for c in {configs}; do uci -q show \"$c\" 2>/dev/null; done; \
+         echo '{sep}'; \
+         for c in {configs}; do \
+             if [ -x /etc/init.d/\"$c\" ]; then \
+                 echo \"$c:/etc/init.d/$c reload\"; \
+             elif [ \"$c\" = wireless ]; then \
+                 if [ -x /sbin/wifi ]; then echo \"wireless:/sbin/wifi reload\"; \
+                 elif [ -x /etc/init.d/network ]; then echo \"wireless:/etc/init.d/network restart\"; \
+                 else echo \"wireless:none\"; fi; \
+             else \
+                 m=$(grep -lE \"config_load .?$c.?\" /etc/init.d/* 2>/dev/null | head -n 1); \
+                 if [ -n \"$m\" ]; then echo \"$c:$m reload\"; \
+                 else echo \"$c:none\"; fi; \
+             fi; \
+         done",
+        configs = managed.join(" "),
+        sep = SERVICE_SEPARATOR,
+    )
+}
+
+/// Parse the service discovery portion of a combined SSH output into `config -> reload command`.
+pub(crate) fn parse_services(output: &str) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    for line in output.lines() {
+        let line = line.trim();
+        if let Some((config, cmd)) = line.split_once(':')
+            && cmd != "none"
+            && !config.is_empty()
+        {
+            map.insert(config.to_string(), cmd.to_string());
+        }
+    }
+    map
+}
+
 /// Flatten Nix config into `config.section.option = value` map (no quoting — matches `uci show`).
 pub(crate) fn extract_desired_map(
     configs: &indexmap::IndexMap<String, indexmap::IndexMap<String, Section>>,
@@ -115,17 +155,21 @@ pub(crate) fn run(
         return Ok(());
     }
 
-    let uci_cmd = format!(
-        "for c in {}; do uci -q show \"$c\" 2>/dev/null; done",
-        managed.join(" ")
-    );
-    eprintln!("Fetching current configuration from {target} (read-only)...");
+    let uci_cmd = build_discovery_command(&managed);
+    eprintln!("Fetching current configuration & services from {target} (read-only)...");
     let remote_output = ssh_exec(target, &uci_cmd, None, config)?;
-    let remote = parse_uci_show(&remote_output);
+
+    let mut parts = remote_output.splitn(2, SERVICE_SEPARATOR);
+    let uci_output = parts.next().unwrap_or("");
+    let services_output = parts.next().unwrap_or("");
+
+    let remote = parse_uci_show(uci_output);
+    let service_map = parse_services(services_output);
 
     let all_keys: BTreeSet<&String> = remote.keys().chain(desired.keys()).collect();
 
     let (mut adds, mut dels, mut mods, mut same) = (0u32, 0u32, 0u32, 0u32);
+    let mut affected = BTreeSet::new();
 
     println!("\n\x1b[1;36m=== Configuration Diff ({target}) ===\x1b[0m\n");
 
@@ -134,15 +178,24 @@ pub(crate) fn run(
             (None, Some(d)) => {
                 println!("\x1b[32m+ {key}={d}\x1b[0m");
                 adds += 1;
+                if let Some(cfg) = key.split('.').next() {
+                    affected.insert(cfg.to_string());
+                }
             }
             (Some(r), None) => {
                 println!("\x1b[31m- {key}={r}\x1b[0m");
                 dels += 1;
+                if let Some(cfg) = key.split('.').next() {
+                    affected.insert(cfg.to_string());
+                }
             }
             (Some(r), Some(d)) if r != d => {
                 println!("\x1b[31m- {key}={r}\x1b[0m");
                 println!("\x1b[32m+ {key}={d}\x1b[0m");
                 mods += 1;
+                if let Some(cfg) = key.split('.').next() {
+                    affected.insert(cfg.to_string());
+                }
             }
             _ => same += 1,
         }
@@ -151,6 +204,17 @@ pub(crate) fn run(
     println!(
         "\n\x1b[1mSummary:\x1b[0m \x1b[32m{adds} to add\x1b[0m, \x1b[31m{dels} to remove\x1b[0m, \x1b[33m{mods} to change\x1b[0m, {same} unchanged."
     );
+
+    if !affected.is_empty() {
+        println!("\n\x1b[1;33mAffected services (auto-discovered):\x1b[0m");
+        for cfg in &affected {
+            match service_map.get(cfg) {
+                Some(cmd) => println!("  {cfg} \u{2192} {cmd}"),
+                None => println!("  {cfg} \u{2192} /etc/init.d/{cfg} reload"),
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -203,5 +267,41 @@ mod tests {
             val_str(&serde_json::json!([1, "two", true])),
             Some("1 two 1".into())
         );
+    }
+
+    #[test]
+    fn parse_services_direct_initd() {
+        let input = "network:/etc/init.d/network reload\ndropbear:/etc/init.d/dropbear reload\n";
+        let map = parse_services(input);
+        assert_eq!(
+            map.get("network"),
+            Some(&"/etc/init.d/network reload".to_string())
+        );
+        assert_eq!(
+            map.get("dropbear"),
+            Some(&"/etc/init.d/dropbear reload".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_services_none_excluded() {
+        let input = "wireless:none\nfirewall:/etc/init.d/firewall reload\n";
+        let map = parse_services(input);
+        assert!(!map.contains_key("wireless"));
+        assert!(map.contains_key("firewall"));
+    }
+
+    #[test]
+    fn parse_services_empty() {
+        let map = parse_services("");
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn build_discovery_command_contains_separator() {
+        let cmd = build_discovery_command(&["network", "wireless"]);
+        assert!(cmd.contains(SERVICE_SEPARATOR));
+        assert!(cmd.contains("uci -q show"));
+        assert!(cmd.contains("config_load"));
     }
 }

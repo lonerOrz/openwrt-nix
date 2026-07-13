@@ -1,8 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+use crate::diff::{
+    SERVICE_SEPARATOR, build_discovery_command, extract_desired_map, parse_services, parse_uci_show,
+};
 use crate::error::ConfigError;
 use crate::models::Root;
 use crate::pipeline::compile_config;
@@ -150,10 +153,9 @@ fn get_local_deployer_key() -> Option<String> {
         .and_then(|s| s.lines().next().map(String::from))
 }
 
-/// Generate shell reload commands for specific configs.
-/// Fast path: `/sbin/reload_config` if available.
-/// Fallback: targeted reload per changed config.
-fn reload_commands(modified: &[String]) -> String {
+/// Generate shell reload commands using the target's dynamically discovered service map.
+/// Zero hardcoded service names — fully self-adaptive.
+fn reload_commands(modified: &[String], service_map: &BTreeMap<String, String>) -> String {
     if modified.is_empty() {
         return "if [ -x /sbin/reload_config ]; then /sbin/reload_config; fi\n".to_string();
     }
@@ -161,30 +163,17 @@ fn reload_commands(modified: &[String]) -> String {
     let mut out = String::with_capacity(512);
     out.push_str("if [ -x /sbin/reload_config ]; then /sbin/reload_config; else\n");
 
-    let mut network_reloaded = false;
+    let mut seen = std::collections::HashSet::new();
     for config in modified {
-        match config.as_str() {
-            "network" | "wireless" => {
-                if !network_reloaded {
-                    out.push_str("  [ -x /etc/init.d/network ] && /etc/init.d/network restart\n");
-                    network_reloaded = true;
-                }
-            }
-            "dropbear" => {
-                out.push_str("  [ -x /etc/init.d/dropbear ] && /etc/init.d/dropbear reload\n");
-            }
-            "firewall" => {
-                out.push_str("  [ -x /etc/init.d/firewall ] && /etc/init.d/firewall reload\n");
-            }
-            "dhcp" => {
-                out.push_str("  [ -x /etc/init.d/dnsmasq ] && /etc/init.d/dnsmasq reload\n");
-            }
-            _ => {
-                out.push_str(&format!(
-                    "  [ -x /etc/init.d/{c} ] && /etc/init.d/{c} reload\n",
-                    c = config
-                ));
-            }
+        let cmd = service_map
+            .get(config)
+            .cloned()
+            .unwrap_or_else(|| format!("/etc/init.d/{config} reload"));
+
+        // Dedup by command string (e.g. network+wireless both mapping to same restart)
+        if seen.insert(cmd.clone()) {
+            let bin = cmd.split_whitespace().next().unwrap_or(&cmd);
+            out.push_str(&format!("  [ -x {bin} ] && {cmd}\n"));
         }
     }
 
@@ -198,6 +187,7 @@ fn build_remote_script(
     uci_commands: &str,
     deployer_key: Option<&str>,
     modified_configs: &[String],
+    service_map: &BTreeMap<String, String>,
 ) -> String {
     let mut script = String::with_capacity(4096);
 
@@ -258,7 +248,7 @@ fn build_remote_script(
     // 5. Rollback watchdog — restore persistent backup + targeted reload on timeout
     let watchdog_timeout =
         std::env::var("NUCI_WATCHDOG_TIMEOUT").unwrap_or_else(|_| "60".to_string());
-    let reload_cmds = reload_commands(modified_configs);
+    let reload_cmds = reload_commands(modified_configs, service_map);
     script.push_str(&format!(
         "( sleep {watchdog_timeout}; \
           if [ -d /etc/.uci-rollback-backup ]; then \
@@ -271,7 +261,7 @@ fn build_remote_script(
     ));
 
     // 6. Apply config — targeted service reload
-    script.push_str(&reload_commands(modified_configs));
+    script.push_str(&reload_commands(modified_configs, service_map));
 
     script
 }
@@ -282,46 +272,47 @@ pub(crate) fn run(
     config: &DeployConfig,
     secrets_dir: Option<&Path>,
 ) -> Result<(), ConfigError> {
-    // 1. Compile config through shared pipeline
     let compiled = compile_config(json_path, secrets_dir)?;
 
-    // 2. Idempotency guard: skip if remote already matches desired state
-    let managed_configs: Vec<&str> = compiled
-        .resolved_root
-        .settings
-        .keys()
-        .map(|k| k.as_str())
-        .collect();
+    let managed_configs: Vec<String> = compiled.resolved_root.settings.keys().cloned().collect();
+    let managed_refs: Vec<&str> = managed_configs.iter().map(|s| s.as_str()).collect();
 
-    if !config.force && !managed_configs.is_empty() {
-        let uci_cmd = format!(
-            "for c in {}; do uci -q show \"$c\" 2>/dev/null; done",
-            managed_configs.join(" ")
-        );
-        if let Ok(remote_output) = ssh_exec(target, &uci_cmd, None, config) {
-            let remote_map = crate::diff::parse_uci_show(&remote_output);
-            let desired_map = crate::diff::extract_desired_map(&compiled.resolved_root.settings);
-            if remote_map == desired_map {
-                eprintln!("Configuration on {target} is already up-to-date. Skipping deployment.");
-                return Ok(());
+    // Combined idempotency check + service discovery (single SSH round-trip)
+    let mut service_map = BTreeMap::new();
+
+    // Combined idempotency check + service discovery (single SSH round-trip)
+    if !managed_refs.is_empty() {
+        let discovery_cmd = build_discovery_command(&managed_refs);
+        if let Ok(remote_output) = ssh_exec(target, &discovery_cmd, None, config) {
+            let mut parts = remote_output.splitn(2, SERVICE_SEPARATOR);
+            let uci_output = parts.next().unwrap_or("");
+            let services_output = parts.next().unwrap_or("");
+
+            service_map = parse_services(services_output);
+
+            if !config.force {
+                let remote_map = parse_uci_show(uci_output);
+                let desired_map = extract_desired_map(&compiled.resolved_root.settings);
+                if remote_map == desired_map {
+                    eprintln!(
+                        "Configuration on {target} is already up-to-date. Skipping deployment."
+                    );
+                    return Ok(());
+                }
             }
         }
     }
 
-    // 3. Transfer local packages via tar over SSH stdin
     transfer_packages(target, &compiled.resolved_root, config)?;
 
-    // Collect which config files are being modified
-    let modified_configs: Vec<String> = compiled.resolved_root.settings.keys().cloned().collect();
-
-    // 3. Build and execute the entire remote deployment script in one SSH call
     let deployer_key = get_local_deployer_key();
     let remote_script = build_remote_script(
         &compiled.resolved_root,
         &compiled.secrets,
         &compiled.uci_batch,
         deployer_key.as_deref(),
-        &modified_configs,
+        &managed_configs,
+        &service_map,
     );
     eprintln!("Deploying to {target}...");
     ssh_exec(
@@ -373,32 +364,42 @@ mod tests {
 
     #[test]
     fn reload_empty_configs_skips_else() {
-        let out = reload_commands(&[]);
+        let out = reload_commands(&[], &BTreeMap::new());
         assert_eq!(
             out,
             "if [ -x /sbin/reload_config ]; then /sbin/reload_config; fi\n"
         );
-        // Must NOT contain bare "else\nfi" (POSIX syntax error)
         assert!(!out.contains("else\nfi"));
     }
 
     #[test]
     fn reload_single_config() {
-        let out = reload_commands(&["dropbear".into()]);
+        let out = reload_commands(&["dropbear".into()], &BTreeMap::new());
         assert!(out.contains("/etc/init.d/dropbear reload"));
         assert!(!out.contains("network restart"));
     }
 
     #[test]
-    fn reload_network_and_wireless_dedup() {
-        let out = reload_commands(&["network".into(), "wireless".into()]);
-        // Should only contain one network restart, not two
+    fn reload_uses_dynamic_map() {
+        let mut map = BTreeMap::new();
+        map.insert("dhcp".into(), "/etc/init.d/dnsmasq reload".into());
+        let out = reload_commands(&["dhcp".into()], &map);
+        assert!(out.contains("/etc/init.d/dnsmasq reload"));
+        assert!(!out.contains("/etc/init.d/dhcp reload"));
+    }
+
+    #[test]
+    fn reload_dedup_by_command() {
+        let mut map = BTreeMap::new();
+        map.insert("network".into(), "/etc/init.d/network restart".into());
+        map.insert("wireless".into(), "/etc/init.d/network restart".into());
+        let out = reload_commands(&["network".into(), "wireless".into()], &map);
         assert_eq!(out.matches("network restart").count(), 1);
     }
 
     #[test]
     fn reload_fallback_to_generic_initd() {
-        let out = reload_commands(&["custom-svc".into()]);
+        let out = reload_commands(&["custom-svc".into()], &BTreeMap::new());
         assert!(out.contains("/etc/init.d/custom-svc reload"));
     }
 }
