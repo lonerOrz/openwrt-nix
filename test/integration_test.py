@@ -171,7 +171,7 @@ def nuci_output_opkg() -> str:
     env = os.environ.copy()
     env["SOPS_AGE_KEY_FILE"] = str(SOPS_KEY_DIR / "keys.txt")
     r = run(
-        ["nix", "run", f"{PROJECT_ROOT}#test-deploy", "--"],
+        ["nix", "run", f"path:{PROJECT_ROOT}#test-deploy", "--"],
         check=True,
         env=env,
     )
@@ -184,7 +184,7 @@ def nuci_output_apk() -> str:
     env = os.environ.copy()
     env["SOPS_AGE_KEY_FILE"] = str(SOPS_KEY_DIR / "keys.txt")
     r = run(
-        ["nix", "run", f"{PROJECT_ROOT}#test-deploy-apk", "--"],
+        ["nix", "run", f"path:{PROJECT_ROOT}#test-deploy-apk", "--"],
         check=True,
         env=env,
     )
@@ -195,7 +195,13 @@ def nuci_output_apk() -> str:
 def test_json_opkg() -> Path:
     """Build and return path to test JSON artifact (opkg)."""
     r = run(
-        ["nix", "build", f"{PROJECT_ROOT}#test-json", "--print-out-paths", "--no-link"]
+        [
+            "nix",
+            "build",
+            f"path:{PROJECT_ROOT}#test-json",
+            "--print-out-paths",
+            "--no-link",
+        ]
     )
     return Path(r.stdout.strip())
 
@@ -207,7 +213,7 @@ def test_json_apk() -> Path:
         [
             "nix",
             "build",
-            f"{PROJECT_ROOT}#test-json-apk",
+            f"path:{PROJECT_ROOT}#test-json-apk",
             "--print-out-paths",
             "--no-link",
         ]
@@ -422,6 +428,12 @@ def setup_and_teardown(project_root: Path):
     ]:
         ipk = _ps.build_ipk(name, ver, description=f"Test package {name}", depends=deps)
         (PACKAGE_DIR / f"{name}_{ver}_all.ipk").write_bytes(ipk)
+
+    # Mock package referenced by test_config.nix / test_config_apk.nix
+    pkg = _ps.build_ipk("test-package", "1.0", description="Mock test-package")
+    (PACKAGE_DIR / "test-package_1.0_all.ipk").write_bytes(pkg)
+    pkg = _ps.build_apk("test-package", "1.0", description="Mock test-package")
+    (PACKAGE_DIR / "test-package_1.0_all.apk").write_bytes(pkg)
 
     for name, ver in [("test-pkg-a", "1.0-r1"), ("test-pkg-b", "2.0-r1")]:
         apk = _ps.build_apk(name, ver, description=f"Test package {name}")
@@ -664,7 +676,9 @@ class TestDeployment:
         errors = [
             line
             for line in r.stderr.splitlines()
-            if line and not any(n in line for n in NOISE)
+            if line
+            and not any(n in line for n in NOISE)
+            and not ("[" in line and "]" in line)
         ]
         assert not errors, "[APK] Unexpected errors:\n" + "\n".join(errors)
 

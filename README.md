@@ -61,14 +61,14 @@ just test-unit     # cargo test + mock JSON
 
 Integration tests run real OpenWrt containers via Podman — no physical router needed.
 
-| Test | Verifies |
-|------|----------|
-| `TestCommandGeneration` | UCI batch syntax (opkg + apk) |
-| `TestDeployment` | Deploy + UCI state verification |
-| `TestWatchdogRollback` | Auto-restore after config break |
+| Test                        | Verifies                              |
+| --------------------------- | ------------------------------------- |
+| `TestCommandGeneration`     | UCI batch syntax (opkg + apk)         |
+| `TestDeployment`            | Deploy + UCI state verification       |
+| `TestWatchdogRollback`      | Auto-restore after config break       |
 | `TestNetworkFaultInjection` | Watchdog under packet loss / blackout |
-| `TestAgentLockout` | SSH key lockout prevention |
-| `TestRealDeploy` | End-to-end `nuci deploy` binary |
+| `TestAgentLockout`          | SSH key lockout prevention            |
+| `TestRealDeploy`            | End-to-end `nuci deploy` binary       |
 
 Each test run gets unique UUID-based container names and dynamic ports — run multiple suites in parallel safely.
 

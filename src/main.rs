@@ -3,19 +3,15 @@ mod error;
 mod generator;
 mod helpers;
 mod models;
+mod pipeline;
 mod secrets;
 mod validation;
 
-use std::fs::File;
-use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use error::ConfigError;
-use generator::{serialize_package_management, serialize_uci};
-use models::{PkgBackend, Root};
-use secrets::{load_secrets_dir, resolve_secrets};
-use validation::validate_root;
+use pipeline::compile_config;
 
 #[derive(Parser)]
 #[command(
@@ -54,37 +50,15 @@ enum Command {
         /// Path to SSH identity file
         #[arg(short, long)]
         identity: Option<PathBuf>,
+
+        /// Optional directory containing secrets files
+        secrets_dir: Option<PathBuf>,
     },
 }
 
-fn compile(path: &PathBuf, secrets_dir: Option<&Path>) -> Result<String, ConfigError> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-
-    let root: Root = serde_json::from_reader(reader)?;
-    validate_root(&root)?;
-
-    // Decrypt SOPS files embedded in the JSON (if any)
-    let mut secrets = secrets::decrypt_sops_mem(&root)?;
-    // Merge with directory-based secrets (if provided)
-    if let Some(dir_path) = secrets_dir {
-        secrets.extend(load_secrets_dir(dir_path.to_str().unwrap())?);
-    }
-
-    let resolved_root = resolve_secrets(root, &secrets)?;
-
-    let mut output_buffer = String::with_capacity(4096);
-    serialize_uci(&mut output_buffer, &resolved_root.settings)?;
-
-    let backend = PkgBackend::from_str(&resolved_root.package_manager);
-    serialize_package_management(
-        &mut output_buffer,
-        backend,
-        resolved_root.package_sources.as_ref(),
-        resolved_root.packages.as_deref(),
-    )?;
-
-    Ok(output_buffer)
+fn compile(path: &Path, secrets_dir: Option<&Path>) -> Result<String, ConfigError> {
+    let config = compile_config(path, secrets_dir)?;
+    Ok(config.uci_batch)
 }
 
 fn main() {
@@ -99,12 +73,13 @@ fn main() {
             target,
             port,
             identity,
+            secrets_dir,
         }) => {
             let config = deploy::DeployConfig {
                 port,
                 identity_file: identity.map(|p| p.to_string_lossy().into_owned()),
             };
-            if let Err(e) = deploy::run(&json, &target, &config) {
+            if let Err(e) = deploy::run(&json, &target, &config, secrets_dir.as_deref()) {
                 eprintln!("{e}");
                 std::process::exit(1);
             }
@@ -118,7 +93,7 @@ fn main() {
     }
 }
 
-fn run_compile(json_path: &PathBuf, secrets_dir: Option<&Path>) {
+fn run_compile(json_path: &Path, secrets_dir: Option<&Path>) {
     match compile(json_path, secrets_dir) {
         Ok(output) => print!("{output}"),
         Err(e) => {
@@ -182,7 +157,7 @@ mod tests {
     #[test]
     fn convert_file_missing_file() {
         let err = compile(&PathBuf::from("/tmp/nonexistent_xyz.json"), None).unwrap_err();
-        assert!(err.0.contains("No such file"));
+        assert!(format!("{err}").contains("No such file"));
     }
 
     #[test]
@@ -191,7 +166,7 @@ mod tests {
         let json_path = dir.path().join("bad.json");
         fs::write(&json_path, "not json").unwrap();
         let err = compile(&json_path, None).unwrap_err();
-        assert!(err.0.contains("Failed to parse JSON"));
+        assert!(format!("{err}").contains("Failed to parse JSON"));
     }
 
     #[test]

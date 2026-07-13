@@ -21,25 +21,25 @@ fn validate_section_map(
     section_path: &str,
 ) -> Result<(), ConfigError> {
     let ty = map.get("_type").and_then(|v| v.as_str()).ok_or_else(|| {
-        ConfigError(format!(
+        ConfigError::Validation(format!(
             "{config_name}.{section_path} missing required '_type'"
         ))
     })?;
 
     if !is_valid_uci_type(ty) {
-        return Err(ConfigError(format!(
+        return Err(ConfigError::Validation(format!(
             "Invalid type '{ty}' in {config_name}.{section_path}: only [a-zA-Z0-9_-] allowed"
         )));
     }
 
     for (opt_name, opt_val) in iter_options(map) {
         if !is_valid_uci_identifier(opt_name) {
-            return Err(ConfigError(format!(
+            return Err(ConfigError::Validation(format!(
                 "Invalid option '{opt_name}' in {config_name}.{section_path}: only [a-zA-Z0-9_-] allowed"
             )));
         }
         if matches!(opt_val, Value::Null) {
-            return Err(ConfigError(format!(
+            return Err(ConfigError::Validation(format!(
                 "{config_name}.{section_path}.{opt_name} has null value"
             )));
         }
@@ -57,7 +57,7 @@ fn validate_section_map(
 pub(crate) fn validate_root(root: &Root) -> Result<(), ConfigError> {
     for (config_name, sections) in &root.settings {
         if !is_valid_uci_identifier(config_name) {
-            return Err(ConfigError(format!(
+            return Err(ConfigError::Validation(format!(
                 "Invalid config name '{config_name}': only [a-zA-Z0-9_-] allowed"
             )));
         }
@@ -66,12 +66,12 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), ConfigError> {
             match section {
                 Section::List(arr) => {
                     if arr.is_empty() {
-                        return Err(ConfigError(format!(
+                        return Err(ConfigError::Validation(format!(
                             "Empty list section '{section_name}' in config '{config_name}' is not supported: its UCI type cannot be determined. To remove a section, omit it from your Nix configuration."
                         )));
                     }
                     if !is_valid_uci_type(section_name) {
-                        return Err(ConfigError(format!(
+                        return Err(ConfigError::Validation(format!(
                             "Invalid list identifier '{section_name}' in config '{config_name}': only [a-zA-Z0-9_-] allowed"
                         )));
                     }
@@ -83,7 +83,7 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), ConfigError> {
                 }
                 Section::Named(map) => {
                     if !is_valid_uci_identifier(section_name) {
-                        return Err(ConfigError(format!(
+                        return Err(ConfigError::Validation(format!(
                             "Invalid section '{section_name}' in config '{config_name}': only [a-zA-Z0-9_-] allowed"
                         )));
                     }
@@ -112,7 +112,7 @@ mod tests {
             secrets: None,
         };
         let err = validate_root(&root).unwrap_err();
-        assert!(err.0.contains("Invalid config name"));
+        assert!(format!("{err}").contains("Invalid config name"));
     }
 
     #[test]
@@ -150,7 +150,7 @@ mod tests {
             secrets: None,
         };
         let err = validate_root(&root).unwrap_err();
-        assert!(err.0.contains("Invalid option"));
+        assert!(format!("{err}").contains("Invalid option"));
     }
 
     #[test]
@@ -169,7 +169,7 @@ mod tests {
             secrets: None,
         };
         let err = validate_root(&root).unwrap_err();
-        assert!(err.0.contains("Invalid section"));
+        assert!(format!("{err}").contains("Invalid section"));
     }
 
     #[test]
@@ -189,7 +189,7 @@ mod tests {
             secrets: None,
         };
         let err = validate_root(&root).unwrap_err();
-        assert!(err.0.contains("null value"));
+        assert!(format!("{err}").contains("null value"));
     }
 
     #[test]
@@ -208,7 +208,7 @@ mod tests {
             secrets: None,
         };
         let err = validate_root(&root).unwrap_err();
-        assert!(err.0.contains("missing required '_type'"));
+        assert!(format!("{err}").contains("missing required '_type'"));
     }
 
     #[test]
@@ -227,7 +227,7 @@ mod tests {
             secrets: None,
         };
         let err = validate_root(&root).unwrap_err();
-        assert!(err.0.contains("missing required '_type'"));
+        assert!(format!("{err}").contains("missing required '_type'"));
     }
 
     #[test]
@@ -244,7 +244,7 @@ mod tests {
             secrets: None,
         };
         let err = validate_root(&root).unwrap_err();
-        assert!(err.0.contains("Empty list section"));
+        assert!(format!("{err}").contains("Empty list section"));
     }
 
     #[test]
@@ -264,7 +264,7 @@ mod tests {
             secrets: None,
         };
         let err = validate_root(&root).unwrap_err();
-        assert!(err.0.contains("Invalid option"));
+        assert!(format!("{err}").contains("Invalid option"));
     }
 
     #[test]
@@ -291,7 +291,7 @@ mod tests {
             secrets: None,
         };
         let err = validate_root(&root).unwrap_err();
-        assert!(err.0.contains("Invalid config name"));
+        assert!(format!("{err}").contains("Invalid config name"));
     }
 
     #[test]
@@ -311,6 +311,6 @@ mod tests {
             secrets: None,
         };
         let err = validate_root(&root).unwrap_err();
-        assert!(err.0.contains("Invalid option"));
+        assert!(format!("{err}").contains("Invalid option"));
     }
 }

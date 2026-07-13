@@ -32,7 +32,7 @@ fn serialize_option_val(writer: &mut String, key: &str, val: &Value) -> Result<(
                     Value::Number(n) => Cow::Owned(n.to_string()),
                     Value::Bool(b) => Cow::Owned(b.to_string()),
                     _ => {
-                        return Err(ConfigError(format!(
+                        return Err(ConfigError::Validation(format!(
                             "{:?} is not a supported list value type",
                             item
                         )));
@@ -42,7 +42,7 @@ fn serialize_option_val(writer: &mut String, key: &str, val: &Value) -> Result<(
             }
         }
         _ => {
-            return Err(ConfigError(format!(
+            return Err(ConfigError::Validation(format!(
                 "{:?} is not a supported option value type",
                 val
             )));
@@ -84,7 +84,7 @@ pub(crate) fn serialize_uci(
                                 .get("_type")
                                 .and_then(|v| v.as_str())
                                 .ok_or_else(|| {
-                                    ConfigError(format!(
+                                    ConfigError::Validation(format!(
                                         "{}.@{}[{}] has no type!",
                                         config_name, section_name, idx
                                     ))
@@ -100,7 +100,10 @@ pub(crate) fn serialize_uci(
                 }
                 Section::Named(obj) => {
                     let ty = obj.get("_type").and_then(|v| v.as_str()).ok_or_else(|| {
-                        ConfigError(format!("{}.{} has no type", config_name, section_name))
+                        ConfigError::Validation(format!(
+                            "{}.{} has no type",
+                            config_name, section_name
+                        ))
                     })?;
 
                     writeln!(uci_cmds, "delete {}.{}", config_name, section_name).unwrap();
@@ -295,7 +298,7 @@ mod tests {
         let mut w = String::new();
         let obj = serde_json::json!({"nested": "value"});
         let err = serialize_option_val(&mut w, "key", &obj).unwrap_err();
-        assert!(err.0.contains("not a supported option value type"));
+        assert!(format!("{err}").contains("not a supported option value type"));
     }
 
     #[test]
@@ -303,14 +306,14 @@ mod tests {
         let mut w = String::new();
         let arr = Value::Array(vec![serde_json::json!({"bad": true})]);
         let err = serialize_option_val(&mut w, "key", &arr).unwrap_err();
-        assert!(err.0.contains("not a supported list value type"));
+        assert!(format!("{err}").contains("not a supported list value type"));
     }
 
     #[test]
     fn serialize_null_val_errors() {
         let mut w = String::new();
         let err = serialize_option_val(&mut w, "key", &Value::Null).unwrap_err();
-        assert!(err.0.contains("not a supported option value type"));
+        assert!(format!("{err}").contains("not a supported option value type"));
     }
 
     #[test]
@@ -373,7 +376,7 @@ mod tests {
 
         let mut w = String::new();
         let err = serialize_uci(&mut w, &configs).unwrap_err();
-        assert!(err.0.contains("has no type"));
+        assert!(format!("{err}").contains("has no type"));
     }
 
     #[test]
@@ -387,7 +390,7 @@ mod tests {
 
         let mut w = String::new();
         let err = serialize_uci(&mut w, &configs).unwrap_err();
-        assert!(err.0.contains("has no type"));
+        assert!(format!("{err}").contains("has no type"));
     }
 
     #[test]

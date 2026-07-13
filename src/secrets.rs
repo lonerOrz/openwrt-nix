@@ -41,7 +41,7 @@ pub(crate) fn interpolate_secrets<'a>(
                         .all(|c| c.is_ascii_alphanumeric() || c == '_');
 
                 if is_valid_identifier {
-                    return Err(ConfigError(format!(
+                    return Err(ConfigError::Validation(format!(
                         "Tried to use secret {}, but no secret with this name specified.",
                         secret_name
                     )));
@@ -148,7 +148,7 @@ pub(crate) fn load_secrets_dir(dir_path: &str) -> Result<HashMap<String, String>
                     if let Some(old_val) = secrets.insert(k.clone(), val_str)
                         && old_val != secrets[k]
                     {
-                        return Err(ConfigError(format!(
+                        return Err(ConfigError::Validation(format!(
                             "Secret key '{}' conflicts with different values across files. File causing conflict: '{}'",
                             k,
                             path.display()
@@ -170,7 +170,7 @@ pub(crate) fn decrypt_sops_mem(root: &Root) -> Result<HashMap<String, String>, C
 
     for file in sops_files {
         if !Path::new(file).exists() {
-            return Err(ConfigError(format!(
+            return Err(ConfigError::Sops(format!(
                 "Configured SOPS file not found: {file}"
             )));
         }
@@ -178,14 +178,16 @@ pub(crate) fn decrypt_sops_mem(root: &Root) -> Result<HashMap<String, String>, C
         let output = Command::new("sops")
             .args(["-d", "--output-type", "json", file])
             .output()
-            .map_err(|e| ConfigError(format!("Failed to run sops: {e}")))?;
+            .map_err(|e| ConfigError::Sops(format!("Failed to run sops: {e}")))?;
 
         if !output.status.success() {
-            return Err(ConfigError(format!("Failed to decrypt sops file: {file}")));
+            return Err(ConfigError::Sops(format!(
+                "Failed to decrypt sops file: {file}"
+            )));
         }
 
         let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
-            .map_err(|e| ConfigError(format!("Failed to parse decrypted JSON: {e}")))?;
+            .map_err(|e| ConfigError::Sops(format!("Failed to parse decrypted JSON: {e}")))?;
 
         if let Some(obj) = parsed.as_object() {
             for (k, v) in obj {
@@ -248,7 +250,7 @@ mod tests {
     #[test]
     fn interpolate_missing_secret_errors() {
         let err = interpolate_secrets("@missing@", &secrets(&[("other", "v")])).unwrap_err();
-        assert!(err.0.contains("missing"));
+        assert!(format!("{err}").contains("missing"));
     }
 
     #[test]
@@ -316,7 +318,7 @@ mod tests {
         };
 
         let err = resolve_secrets(root, &secrets(&[("other", "v")])).unwrap_err();
-        assert!(err.0.contains("missing_secret"));
+        assert!(format!("{err}").contains("missing_secret"));
     }
 
     #[test]
@@ -479,8 +481,8 @@ mod tests {
         fs::write(dir.path().join("a.json"), r#"{"key": "val_a"}"#).unwrap();
         fs::write(dir.path().join("b.json"), r#"{"key": "val_b"}"#).unwrap();
         let err = load_secrets_dir(dir.path().to_str().unwrap()).unwrap_err();
-        assert!(err.0.contains("conflicts"));
-        assert!(err.0.contains("key"));
+        assert!(format!("{err}").contains("conflicts"));
+        assert!(format!("{err}").contains("key"));
     }
 
     #[test]
@@ -497,7 +499,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("bad.json"), "not valid json {{{").unwrap();
         let err = load_secrets_dir(dir.path().to_str().unwrap()).unwrap_err();
-        assert!(err.0.contains("Failed to parse"));
+        assert!(format!("{err}").contains("Failed to parse"));
     }
 
     #[test]

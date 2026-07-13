@@ -1,27 +1,15 @@
 use std::collections::HashMap;
-use std::fs;
 use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::error::ConfigError;
-use crate::generator::{serialize_package_management, serialize_uci};
-use crate::models::{PkgBackend, Root};
-use crate::secrets::decrypt_sops_mem;
-use crate::validation::validate_root;
+use crate::models::Root;
+use crate::pipeline::compile_config;
 
 pub(crate) struct DeployConfig {
     pub port: u16,
     pub identity_file: Option<String>,
-}
-
-impl Default for DeployConfig {
-    fn default() -> Self {
-        Self {
-            port: 22,
-            identity_file: None,
-        }
-    }
 }
 
 fn build_ssh_args(config: &DeployConfig, is_scp: bool) -> Vec<String> {
@@ -42,7 +30,6 @@ fn build_ssh_args(config: &DeployConfig, is_scp: bool) -> Vec<String> {
         "ControlPersist=5m".into(),
     ];
     if config.port != 22 {
-        // ssh uses -p, scp uses -P
         let port_flag = if is_scp { "-P" } else { "-p" };
         args.extend([port_flag.into(), config.port.to_string()]);
     }
@@ -72,22 +59,22 @@ fn ssh_exec(
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
-        .map_err(|e| ConfigError(format!("Failed to spawn ssh: {e}")))?;
+        .map_err(|e| ConfigError::Deploy(format!("Failed to spawn ssh: {e}")))?;
 
     if let Some(data) = stdin_data
         && let Some(mut stdin) = child.stdin.take()
     {
         stdin
             .write_all(data)
-            .map_err(|e| ConfigError(format!("Failed to write to ssh stdin: {e}")))?;
+            .map_err(|e| ConfigError::Deploy(format!("Failed to write to ssh stdin: {e}")))?;
     }
 
     let output = child
         .wait_with_output()
-        .map_err(|e| ConfigError(format!("Failed to wait for ssh: {e}")))?;
+        .map_err(|e| ConfigError::Deploy(format!("Failed to wait for ssh: {e}")))?;
 
     if !output.status.success() {
-        return Err(ConfigError(format!(
+        return Err(ConfigError::Deploy(format!(
             "SSH command failed on {target}: {cmd} (exit {})",
             output.status.code().unwrap_or(-1)
         )));
@@ -104,19 +91,20 @@ fn scp_to_target(
 ) -> Result<(), ConfigError> {
     let local_str = local_path
         .to_str()
-        .ok_or_else(|| ConfigError("Invalid local path".into()))?;
+        .ok_or_else(|| ConfigError::Validation("Invalid local path".into()))?;
 
     let mut args = build_ssh_args(config, true);
+    args.push("-O".into());
     args.push(local_str.into());
     args.push(format!("{target}:{remote_path}"));
 
     let status = Command::new("scp")
         .args(&args)
         .status()
-        .map_err(|e| ConfigError(format!("Failed to spawn scp: {e}")))?;
+        .map_err(|e| ConfigError::Deploy(format!("Failed to spawn scp: {e}")))?;
 
     if !status.success() {
-        return Err(ConfigError(format!(
+        return Err(ConfigError::Deploy(format!(
             "SCP failed to copy {} to {target}:{remote_path}",
             local_path.display()
         )));
@@ -136,7 +124,10 @@ fn transfer_packages(target: &str, root: &Root, config: &DeployConfig) -> Result
     for pkg in local_pkgs {
         let path = Path::new(pkg);
         if !path.exists() {
-            continue;
+            return Err(ConfigError::Validation(format!(
+                "Local package not found: {}",
+                path.display()
+            )));
         }
         let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or(pkg);
         eprintln!("Transferring {filename} to {target}:/tmp/ ...");
@@ -145,10 +136,28 @@ fn transfer_packages(target: &str, root: &Root, config: &DeployConfig) -> Result
     Ok(())
 }
 
+fn get_local_deployer_key() -> Option<String> {
+    Command::new("ssh-add")
+        .arg("-L")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                String::from_utf8(o.stdout).ok()
+            } else {
+                None
+            }
+        })
+        .and_then(|s| s.lines().next().map(String::from))
+}
+
 fn build_remote_script(
     root: &Root,
     secrets: &HashMap<String, String>,
     uci_commands: &str,
+    deployer_key: Option<&str>,
 ) -> String {
     let mut script = String::with_capacity(4096);
 
@@ -156,23 +165,7 @@ fn build_remote_script(
     if !root.ssh_keys.is_empty() {
         let mut keys = root.ssh_keys.join("\n");
 
-        // Prevent lockout: check if deployer's key is included
-        let deployer_key = Command::new("ssh-add")
-            .arg("-L")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-            .ok()
-            .and_then(|o| {
-                if o.status.success() {
-                    String::from_utf8(o.stdout).ok()
-                } else {
-                    None
-                }
-            })
-            .and_then(|s| s.lines().next().map(String::from));
-
-        if let Some(ref key) = deployer_key {
+        if let Some(key) = deployer_key {
             let pub_part: String = key
                 .split_whitespace()
                 .take(2)
@@ -229,36 +222,26 @@ pub(crate) fn run(
     json_path: &Path,
     target: &str,
     config: &DeployConfig,
+    secrets_dir: Option<&Path>,
 ) -> Result<(), ConfigError> {
-    // 1. Parse config
-    let file = fs::File::open(json_path)?;
-    let root: Root = serde_json::from_reader(std::io::BufReader::new(file))?;
-    validate_root(&root)?;
+    // 1. Compile config through shared pipeline
+    let compiled = compile_config(json_path, secrets_dir)?;
 
-    // 2. Decrypt SOPS in memory
-    let secrets = decrypt_sops_mem(&root)?;
+    // 2. Transfer local packages (separate SCP, can't do in script)
+    transfer_packages(target, &compiled.resolved_root, config)?;
 
-    // 3. Resolve secrets and generate UCI commands
-    let resolved_root = crate::secrets::resolve_secrets(root, &secrets)?;
-    let mut uci_buffer = String::with_capacity(4096);
-    serialize_uci(&mut uci_buffer, &resolved_root.settings)?;
-    let backend = PkgBackend::from_str(&resolved_root.package_manager);
-    serialize_package_management(
-        &mut uci_buffer,
-        backend,
-        resolved_root.package_sources.as_ref(),
-        resolved_root.packages.as_deref(),
-    )?;
-
-    // 4. Transfer local packages (separate SCP, can't do in script)
-    transfer_packages(target, &resolved_root, config)?;
-
-    // 5. Build and execute the entire remote deployment script in one SSH call
-    let remote_script = build_remote_script(&resolved_root, &secrets, &uci_buffer);
+    // 3. Build and execute the entire remote deployment script in one SSH call
+    let deployer_key = get_local_deployer_key();
+    let remote_script = build_remote_script(
+        &compiled.resolved_root,
+        &compiled.secrets,
+        &compiled.uci_batch,
+        deployer_key.as_deref(),
+    );
     eprintln!("Deploying to {target}...");
     ssh_exec(target, "sh -s", Some(remote_script.as_bytes()), config)?;
 
-    // 6. Wait for target to come back, kill rollback watchdog
+    // 4. Wait for target to come back, kill rollback watchdog
     eprintln!("Waiting for target to come back (60s rollback window)...");
     let mut connected = false;
     for _ in 0..30 {
@@ -278,12 +261,12 @@ pub(crate) fn run(
     }
 
     if !connected {
-        return Err(ConfigError(
+        return Err(ConfigError::Deploy(
             "Failed to reconnect within 60s. Target may have rolled back.".into(),
         ));
     }
 
-    // 7. Cleanup
+    // 5. Cleanup
     let _ = ssh_exec(
         target,
         "rm -rf /tmp/.uci-rollback-backup /tmp/.uci-watchdog-pid",
