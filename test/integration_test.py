@@ -1289,3 +1289,85 @@ class TestNetworkFaultInjection:
         """,
             check=False,
         )
+
+
+class TestSmartReloadFallback:
+    """Verify targeted service reload when /sbin/reload_config is absent."""
+
+    def test_fallback_reload_respects_modified_configs(self, test_json_opkg: Path):
+        env = os.environ.copy()
+        env["SOPS_AGE_KEY_FILE"] = str(SOPS_KEY_DIR / "keys.txt")
+        env["NUCI_WATCHDOG_TIMEOUT"] = "10"
+
+        # 1. Remove global reload_config to force fallback path
+        podman_exec(CONTAINER_NAME, "rm -f /sbin/reload_config")
+
+        # 2. Create mock init.d scripts that log which services were called
+        podman_exec(CONTAINER_NAME, "mkdir -p /etc/init.d")
+        for svc in ("dropbear", "network", "firewall", "dnsmasq", "system"):
+            podman_exec(
+                CONTAINER_NAME,
+                f"printf '#!/bin/sh\\necho \"{svc} called\" >> /tmp/reload_history\\n'"
+                f" > /etc/init.d/{svc} && chmod +x /etc/init.d/{svc}",
+            )
+
+        try:
+            # 3. Deploy — test_config.nix touches system, wireless, network
+            r = run(
+                [
+                    "cargo",
+                    "run",
+                    "--",
+                    "deploy",
+                    str(test_json_opkg),
+                    "--target",
+                    "root@127.0.0.1",
+                    "--port",
+                    str(MAIN_SSH_PORT),
+                    "--identity",
+                    str(SSH_KEY_PATH),
+                ],
+                check=False,
+                env=env,
+                timeout=120,
+            )
+            assert r.returncode == 0, f"deploy failed:\n{r.stderr}\n{r.stdout}"
+
+            # 4. Wait for SSH to come back (dropbear may have been restarted)
+            reconnected = False
+            for _ in range(15):
+                time.sleep(2)
+                try:
+                    result = ssh_cmd(SSH_CONFIG_PATH, "openwrt-test", "echo ok", timeout=3)
+                    if result == "ok":
+                        reconnected = True
+                        break
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+                    continue
+            assert reconnected, "SSH did not reconnect after fallback reload"
+
+            # 5. Verify targeted services were called (not blanket network restart)
+            history = podman_exec(
+                CONTAINER_NAME, "cat /tmp/reload_history 2>/dev/null", check=False
+            )
+            # test_config.nix defines: system, wireless, network
+            assert "network called" in history, (
+                f"network reload missing from history:\n{history}"
+            )
+            assert "system called" in history, (
+                f"system reload missing from history:\n{history}"
+            )
+            # Must NOT have triggered firewall (not in config)
+            assert "firewall called" not in history, (
+                f"firewall was unexpectedly triggered:\n{history}"
+            )
+
+        finally:
+            # 6. Restore environment regardless of test outcome
+            podman_exec(
+                CONTAINER_NAME,
+                "printf '#!/bin/sh\\nexit 0\\n' > /sbin/reload_config && chmod +x /sbin/reload_config",
+            )
+            for svc in ("dropbear", "network", "firewall", "dnsmasq", "system"):
+                podman_exec(CONTAINER_NAME, f"rm -f /etc/init.d/{svc}", check=False)
+            podman_exec(CONTAINER_NAME, "rm -f /tmp/reload_history", check=False)

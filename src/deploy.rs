@@ -153,6 +153,10 @@ fn get_local_deployer_key() -> Option<String> {
 /// Fast path: `/sbin/reload_config` if available.
 /// Fallback: targeted reload per changed config.
 fn reload_commands(modified: &[String]) -> String {
+    if modified.is_empty() {
+        return "if [ -x /sbin/reload_config ]; then /sbin/reload_config; fi\n".to_string();
+    }
+
     let mut out = String::with_capacity(512);
     out.push_str("if [ -x /sbin/reload_config ]; then /sbin/reload_config; else\n");
 
@@ -314,4 +318,40 @@ pub(crate) fn run(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reload_empty_configs_skips_else() {
+        let out = reload_commands(&[]);
+        assert_eq!(
+            out,
+            "if [ -x /sbin/reload_config ]; then /sbin/reload_config; fi\n"
+        );
+        // Must NOT contain bare "else\nfi" (POSIX syntax error)
+        assert!(!out.contains("else\nfi"));
+    }
+
+    #[test]
+    fn reload_single_config() {
+        let out = reload_commands(&["dropbear".into()]);
+        assert!(out.contains("/etc/init.d/dropbear reload"));
+        assert!(!out.contains("network restart"));
+    }
+
+    #[test]
+    fn reload_network_and_wireless_dedup() {
+        let out = reload_commands(&["network".into(), "wireless".into()]);
+        // Should only contain one network restart, not two
+        assert_eq!(out.matches("network restart").count(), 1);
+    }
+
+    #[test]
+    fn reload_fallback_to_generic_initd() {
+        let out = reload_commands(&["custom-svc".into()]);
+        assert!(out.contains("/etc/init.d/custom-svc reload"));
+    }
 }
