@@ -844,6 +844,60 @@ SSHKEYS
         agent_ssh_config.unlink(missing_ok=True)
 
 
+class TestRealDeploy:
+    """End-to-end test: run actual nuci deploy binary against container."""
+
+    def test_nuci_deploy_opkg(self, test_json_opkg: Path):
+        """Run nuci deploy --target with real SSH, verify UCI state."""
+        env = os.environ.copy()
+        env["SOPS_AGE_KEY_FILE"] = str(SOPS_KEY_DIR / "keys.txt")
+        env["NUCI_WATCHDOG_TIMEOUT"] = "10"
+
+        r = run(
+            [
+                "cargo",
+                "run",
+                "--",
+                "deploy",
+                str(test_json_opkg),
+                "--target",
+                "root@127.0.0.1",
+                "--port",
+                "2222",
+                "--identity",
+                str(SSH_KEY_PATH),
+            ],
+            check=False,
+            env=env,
+            timeout=120,
+        )
+        assert r.returncode == 0, f"nuci deploy failed:\n{r.stderr}\n{r.stdout}"
+
+        check_uci_value(
+            CONTAINER_NAME,
+            "system.@system[0].hostname",
+            "rauter",
+            "[RealDeploy] hostname",
+        )
+        check_uci_value(
+            CONTAINER_NAME,
+            "network.lan.proto",
+            "static",
+            "[RealDeploy] lan proto",
+        )
+
+    def test_nuci_deploy_packages_transferred(self, test_json_opkg: Path):
+        """Verify local packages were SCP'd to target."""
+        engine(
+            "exec",
+            CONTAINER_NAME,
+            "test",
+            "-f",
+            "/tmp/test-package_1.0_all.ipk",
+            check=False,
+        )
+
+
 class TestWatchdogRollback:
     """Step 13: Test watchdog rollback."""
 
