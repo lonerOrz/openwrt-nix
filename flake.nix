@@ -31,10 +31,7 @@
       perSystem =
         {
           config,
-          self',
-          inputs',
           pkgs,
-          system,
           ...
         }:
         let
@@ -73,7 +70,7 @@
             test-json-apk = testConfigApk.json;
           };
 
-          apps = rec {
+          apps = {
             example = {
               type = "app";
               program = toString uciConfig.command;
@@ -86,16 +83,20 @@
               type = "app";
               program = toString testConfigApk.command;
             };
-            default = example;
+            default = {
+              type = "app";
+              program = toString uciConfig.command;
+            };
           };
 
           devShells.default = pkgs.mkShell {
             buildInputs = with pkgs; [
               just
               sops
+              openssh
               cargo
               rustc
-              config.treefmt.build.wrapper # 自动绑定编译好的 treefmt 封装工具
+              config.treefmt.build.wrapper
             ];
           };
         };
