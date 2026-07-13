@@ -54,6 +54,10 @@ enum Command {
 
         /// Optional directory containing secrets files
         secrets_dir: Option<PathBuf>,
+
+        /// Force deployment even if configuration is already up-to-date
+        #[arg(short, long)]
+        force: bool,
     },
 
     /// Preview differences between target and compiled config (read-only)
@@ -96,10 +100,12 @@ fn main() {
             port,
             identity,
             secrets_dir,
+            force,
         }) => {
             let config = deploy::DeployConfig {
                 port,
                 identity_file: identity.map(|p| p.to_string_lossy().into_owned()),
+                force,
             };
             if let Err(e) = deploy::run(&json, &target, &config, secrets_dir.as_deref()) {
                 eprintln!("{e}");
@@ -116,6 +122,7 @@ fn main() {
             let config = deploy::DeployConfig {
                 port,
                 identity_file: identity.map(|p| p.to_string_lossy().into_owned()),
+                force: false,
             };
             if let Err(e) = diff::run(&json, &target, &config, secrets_dir.as_deref()) {
                 eprintln!("{e}");

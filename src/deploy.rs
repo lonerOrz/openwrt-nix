@@ -10,6 +10,7 @@ use crate::pipeline::compile_config;
 pub(crate) struct DeployConfig {
     pub port: u16,
     pub identity_file: Option<String>,
+    pub force: bool,
 }
 
 fn build_ssh_args(config: &DeployConfig) -> Vec<String> {
@@ -284,7 +285,30 @@ pub(crate) fn run(
     // 1. Compile config through shared pipeline
     let compiled = compile_config(json_path, secrets_dir)?;
 
-    // 2. Transfer local packages via tar over SSH stdin
+    // 2. Idempotency guard: skip if remote already matches desired state
+    let managed_configs: Vec<&str> = compiled
+        .resolved_root
+        .settings
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+
+    if !config.force && !managed_configs.is_empty() {
+        let uci_cmd = format!(
+            "for c in {}; do uci -q show \"$c\" 2>/dev/null; done",
+            managed_configs.join(" ")
+        );
+        if let Ok(remote_output) = ssh_exec(target, &uci_cmd, None, config) {
+            let remote_map = crate::diff::parse_uci_show(&remote_output);
+            let desired_map = crate::diff::extract_desired_map(&compiled.resolved_root.settings);
+            if remote_map == desired_map {
+                eprintln!("Configuration on {target} is already up-to-date. Skipping deployment.");
+                return Ok(());
+            }
+        }
+    }
+
+    // 3. Transfer local packages via tar over SSH stdin
     transfer_packages(target, &compiled.resolved_root, config)?;
 
     // Collect which config files are being modified

@@ -6,7 +6,7 @@
 host := env_var_or_default("ROUTER_HOST", "192.168.188.2")
 
 # SSH connection reuse
-ssh_opts := "-o ControlMaster=auto -o ControlPath=/tmp/ssh-%r@%h:%p -o ControlPersist=5m"
+ssh_opts := "-o ControlMaster=auto -o ControlPath=/tmp/ssh-%C -o ControlPersist=5m"
 
 # ==============================================================================
 # Development & Testing Recipes

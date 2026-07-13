@@ -8,7 +8,7 @@ use crate::models::Section;
 use crate::pipeline::compile_config;
 
 /// Flatten Nix config into `config.section.option = value` map (no quoting — matches `uci show`).
-fn extract_desired_map(
+pub(crate) fn extract_desired_map(
     configs: &indexmap::IndexMap<String, indexmap::IndexMap<String, Section>>,
 ) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
@@ -80,7 +80,7 @@ fn sanitize_uci_value(v: &str) -> String {
 }
 
 /// Parse `uci show` output into a flat map.
-fn parse_uci_show(output: &str) -> BTreeMap<String, String> {
+pub(crate) fn parse_uci_show(output: &str) -> BTreeMap<String, String> {
     output
         .lines()
         .filter_map(|line| {
