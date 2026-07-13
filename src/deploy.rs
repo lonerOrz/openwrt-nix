@@ -232,21 +232,39 @@ fn build_remote_script(
         script.push_str(&format!("chpasswd <<'CHPWD'\nroot:{pwd}\nCHPWD\n"));
     }
 
-    // 3. Backup current config
-    script.push_str("cp -a /etc/config /tmp/.uci-rollback-backup\n");
+    // 3. Persistent backup + boot-time self-destructing rollback hook
+    script.push_str("cp -a /etc/config /etc/.uci-rollback-backup\n");
+    script.push_str("mkdir -p /etc/init.d /etc/rc.d\n");
+    script.push_str("cat > /etc/init.d/nuci_rollback <<'BOOT_EOF'\n");
+    script.push_str("#!/bin/sh\n");
+    script.push_str(
+        "if [ \"$1\" = \"boot\" ] || [ \"$1\" = \"start\" ] || [ \"$1\" = \"\" ]; then\n",
+    );
+    script.push_str("    if [ -d /etc/.uci-rollback-backup ]; then\n");
+    script.push_str("        cp -a /etc/.uci-rollback-backup/* /etc/config/\n");
+    script.push_str("        rm -rf /etc/.uci-rollback-backup\n");
+    script.push_str("    fi\n");
+    script.push_str("    rm -f /etc/init.d/nuci_rollback /etc/rc.d/S15nuci_rollback\n");
+    script.push_str("fi\n");
+    script.push_str("BOOT_EOF\n");
+    script.push_str("chmod +x /etc/init.d/nuci_rollback\n");
+    script.push_str("ln -sf /etc/init.d/nuci_rollback /etc/rc.d/S15nuci_rollback\n");
 
     // 4. UCI commands (piped from compile)
     script.push_str(uci_commands);
     script.push('\n');
 
-    // 5. Rollback watchdog — restore backup + targeted reload on timeout
+    // 5. Rollback watchdog — restore persistent backup + targeted reload on timeout
     let watchdog_timeout =
         std::env::var("NUCI_WATCHDOG_TIMEOUT").unwrap_or_else(|_| "60".to_string());
     let reload_cmds = reload_commands(modified_configs);
     script.push_str(&format!(
-        "( sleep {watchdog_timeout}; cp -a /tmp/.uci-rollback-backup/* /etc/config/; \
-          {reload_cmds} \
-          rm -rf /tmp/.uci-rollback-backup /tmp/.uci-watchdog-pid \
+        "( sleep {watchdog_timeout}; \
+          if [ -d /etc/.uci-rollback-backup ]; then \
+              cp -a /etc/.uci-rollback-backup/* /etc/config/; \
+              {reload_cmds} \
+          fi; \
+          rm -rf /etc/.uci-rollback-backup /etc/init.d/nuci_rollback /etc/rc.d/S15nuci_rollback /tmp/.uci-watchdog-pid \
         ) >/dev/null 2>&1 </dev/null & \
           echo $! > /tmp/.uci-watchdog-pid\n"
     ));
@@ -309,10 +327,10 @@ pub(crate) fn run(
         ));
     }
 
-    // 5. Cleanup
+    // 5. Cleanup — remove persistent backup, boot hook, and watchdog PID
     let _ = ssh_exec(
         target,
-        "rm -rf /tmp/.uci-rollback-backup /tmp/.uci-watchdog-pid",
+        "rm -rf /etc/.uci-rollback-backup /etc/init.d/nuci_rollback /etc/rc.d/S15nuci_rollback /tmp/.uci-watchdog-pid",
         None,
         config,
     );

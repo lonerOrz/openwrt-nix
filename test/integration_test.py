@@ -1338,11 +1338,17 @@ class TestSmartReloadFallback:
             for _ in range(15):
                 time.sleep(2)
                 try:
-                    result = ssh_cmd(SSH_CONFIG_PATH, "openwrt-test", "echo ok", timeout=3)
+                    result = ssh_cmd(
+                        SSH_CONFIG_PATH, "openwrt-test", "echo ok", timeout=3
+                    )
                     if result == "ok":
                         reconnected = True
                         break
-                except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+                except (
+                    subprocess.CalledProcessError,
+                    subprocess.TimeoutExpired,
+                    OSError,
+                ):
                     continue
             assert reconnected, "SSH did not reconnect after fallback reload"
 
@@ -1371,3 +1377,170 @@ class TestSmartReloadFallback:
             for svc in ("dropbear", "network", "firewall", "dnsmasq", "system"):
                 podman_exec(CONTAINER_NAME, f"rm -f /etc/init.d/{svc}", check=False)
             podman_exec(CONTAINER_NAME, "rm -f /tmp/reload_history", check=False)
+
+
+class TestPersistentWatchdog:
+    """Verify persistent rollback hook + self-destructing boot script.
+
+    The deployer completes in <2s on a warm cache — too fast to race with
+    kill-dropbear. Instead, deploy normally, then manually recreate the
+    exact state that would exist after a mid-deploy power loss:
+    persistent backup + boot hook on disk. Test the rollback mechanism
+    and self-destruct cycle directly.
+    """
+
+    def test_power_cycle_rollback_recovery(self, test_json_opkg: Path):
+        env = os.environ.copy()
+        env["SOPS_AGE_KEY_FILE"] = str(SOPS_KEY_DIR / "keys.txt")
+
+        try:
+            # 1. Deploy — hostname becomes 'rauter', deployer cleans up after itself
+            r = run(
+                [
+                    "cargo",
+                    "run",
+                    "--",
+                    "deploy",
+                    str(test_json_opkg),
+                    "--target",
+                    "root@127.0.0.1",
+                    "--port",
+                    str(MAIN_SSH_PORT),
+                    "--identity",
+                    str(SSH_KEY_PATH),
+                ],
+                check=False,
+                env=env,
+                timeout=120,
+            )
+            assert r.returncode == 0, f"deploy failed:\n{r.stderr}\n{r.stdout}"
+
+            hostname = podman_exec(CONTAINER_NAME, "uci get system.@system[0].hostname")
+            assert hostname == "rauter", f"Deploy did not set hostname: {hostname}"
+
+            # 2. Simulate post-failure state: create persistent backup + boot hook
+            #    (what deploy.rs would leave behind if the deployer crashed before cleanup)
+            #    Deploy may leave artifacts behind (overlay fs, cleanup race). Clean first.
+            engine(
+                "exec",
+                CONTAINER_NAME,
+                "sh",
+                "-c",
+                "rm -rf /etc/.uci-rollback-backup /etc/init.d/nuci_rollback /etc/rc.d/S15nuci_rollback",
+                check=False,
+            )
+            podman_exec(CONTAINER_NAME, "cp -a /etc/config /etc/.uci-rollback-backup")
+
+            # Write the exact boot hook that deploy.rs generates
+            podman_exec(
+                CONTAINER_NAME,
+                "cat > /etc/init.d/nuci_rollback <<'BOOT_EOF'\n"
+                "#!/bin/sh\n"
+                'if [ "$1" = "boot" ] || [ "$1" = "start" ] || [ "$1" = "" ]; then\n'
+                "    if [ -d /etc/.uci-rollback-backup ]; then\n"
+                "        cp -a /etc/.uci-rollback-backup/* /etc/config/\n"
+                "        rm -rf /etc/.uci-rollback-backup\n"
+                "    fi\n"
+                "    rm -f /etc/init.d/nuci_rollback /etc/rc.d/S15nuci_rollback\n"
+                "fi\n"
+                "BOOT_EOF\n"
+                "chmod +x /etc/init.d/nuci_rollback",
+            )
+            podman_exec(
+                CONTAINER_NAME,
+                "ln -sf /etc/init.d/nuci_rollback /etc/rc.d/S15nuci_rollback",
+            )
+
+            # Verify artifacts exist on "flash"
+            assert (
+                engine(
+                    "exec",
+                    CONTAINER_NAME,
+                    "test",
+                    "-d",
+                    "/etc/.uci-rollback-backup",
+                    check=False,
+                ).returncode
+                == 0
+            ), "Persistent backup not created"
+            assert (
+                engine(
+                    "exec",
+                    CONTAINER_NAME,
+                    "test",
+                    "-f",
+                    "/etc/init.d/nuci_rollback",
+                    check=False,
+                ).returncode
+                == 0
+            ), "Boot hook script not created"
+            assert (
+                engine(
+                    "exec",
+                    CONTAINER_NAME,
+                    "test",
+                    "-h",
+                    "/etc/rc.d/S15nuci_rollback",
+                    check=False,
+                ).returncode
+                == 0
+            ), "Boot symlink not created"
+
+            # 3. Corrupt config — simulate bad config after power loss
+            podman_exec(
+                CONTAINER_NAME,
+                "uci set system.@system[0].hostname='corrupted' && uci commit system",
+            )
+            hostname = podman_exec(CONTAINER_NAME, "uci get system.@system[0].hostname")
+            assert hostname == "corrupted", f"Setup failed: hostname is '{hostname}'"
+
+            # 4. Simulate power-cycle: boot hook restores backup
+            podman_exec(CONTAINER_NAME, "/etc/init.d/nuci_rollback boot")
+
+            # 5. Backup restored hostname to 'rauter' (from backup)
+            hostname = podman_exec(CONTAINER_NAME, "uci get system.@system[0].hostname")
+            assert hostname == "rauter", f"Rollback failed! Hostname is '{hostname}'"
+
+            # 6. Self-destruct: all artifacts must be gone
+            assert (
+                engine(
+                    "exec",
+                    CONTAINER_NAME,
+                    "test",
+                    "-d",
+                    "/etc/.uci-rollback-backup",
+                    check=False,
+                ).returncode
+                != 0
+            ), "Backup not self-deleted"
+            assert (
+                engine(
+                    "exec",
+                    CONTAINER_NAME,
+                    "test",
+                    "-f",
+                    "/etc/init.d/nuci_rollback",
+                    check=False,
+                ).returncode
+                != 0
+            ), "Boot hook not self-deleted"
+            assert (
+                engine(
+                    "exec",
+                    CONTAINER_NAME,
+                    "test",
+                    "-h",
+                    "/etc/rc.d/S15nuci_rollback",
+                    check=False,
+                ).returncode
+                != 0
+            ), "Symlink not self-deleted"
+
+        finally:
+            podman_exec(CONTAINER_NAME, "killall sleep 2>/dev/null", check=False)
+            podman_exec(
+                CONTAINER_NAME,
+                "rm -rf /etc/.uci-rollback-backup /etc/init.d/nuci_rollback"
+                " /etc/rc.d/S15nuci_rollback /tmp/.uci-watchdog-pid",
+                check=False,
+            )
