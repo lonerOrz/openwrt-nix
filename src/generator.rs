@@ -1,9 +1,9 @@
 use crate::error::ConfigError;
 use crate::helpers::{escape_single_quotes, extract_package_name, iter_options};
 use crate::models::{PackageSources, PkgBackend, Section};
+use indexmap::IndexMap;
 use serde_json::Value;
 use std::borrow::Cow;
-use std::collections::BTreeMap;
 use std::fmt::Write as FmtWrite;
 use std::path::Path;
 
@@ -22,13 +22,8 @@ fn serialize_option_val(writer: &mut String, key: &str, val: &Value) -> Result<(
             .unwrap();
         }
         Value::Bool(b) => {
-            writeln!(
-                writer,
-                "set {}='{}'",
-                key,
-                escape_single_quotes(&b.to_string())
-            )
-            .unwrap();
+            let bool_str = if *b { "1" } else { "0" };
+            writeln!(writer, "set {}='{}'", key, escape_single_quotes(bool_str)).unwrap();
         }
         Value::Array(arr) => {
             for item in arr {
@@ -58,7 +53,7 @@ fn serialize_option_val(writer: &mut String, key: &str, val: &Value) -> Result<(
 
 pub(crate) fn serialize_uci(
     writer: &mut String,
-    configs: &BTreeMap<String, BTreeMap<String, Section>>,
+    configs: &IndexMap<String, IndexMap<String, Section>>,
 ) -> Result<(), ConfigError> {
     for (config_name, sections) in configs {
         let mut shell_cmds = String::new();
@@ -276,7 +271,14 @@ mod tests {
     fn serialize_bool_val() {
         let mut w = String::new();
         serialize_option_val(&mut w, "wifi.enabled", &Value::Bool(true)).unwrap();
-        assert_eq!(w, "set wifi.enabled='true'\n");
+        assert_eq!(w, "set wifi.enabled='1'\n");
+    }
+
+    #[test]
+    fn serialize_bool_false_val() {
+        let mut w = String::new();
+        serialize_option_val(&mut w, "wifi.enabled", &Value::Bool(false)).unwrap();
+        assert_eq!(w, "set wifi.enabled='0'\n");
     }
 
     #[test]
@@ -321,8 +323,8 @@ mod tests {
 
     #[test]
     fn serialize_named_section() {
-        let mut configs = BTreeMap::new();
-        let mut sections = BTreeMap::new();
+        let mut configs = IndexMap::new();
+        let mut sections = IndexMap::new();
         let mut obj = Map::new();
         obj.insert("_type".into(), Value::String("interface".into()));
         obj.insert("proto".into(), Value::String("static".into()));
@@ -342,8 +344,8 @@ mod tests {
 
     #[test]
     fn serialize_list_section() {
-        let mut configs = BTreeMap::new();
-        let mut sections = BTreeMap::new();
+        let mut configs = IndexMap::new();
+        let mut sections = IndexMap::new();
         let mut item = Map::new();
         item.insert("_type".into(), Value::String("dropbear".into()));
         item.insert("Port".into(), Value::String("22".into()));
@@ -362,8 +364,8 @@ mod tests {
 
     #[test]
     fn serialize_named_section_missing_type_errors() {
-        let mut configs = BTreeMap::new();
-        let mut sections = BTreeMap::new();
+        let mut configs = IndexMap::new();
+        let mut sections = IndexMap::new();
         let mut obj = Map::new();
         obj.insert("proto".into(), Value::String("static".into()));
         sections.insert("lan".into(), Section::Named(obj));
@@ -376,8 +378,8 @@ mod tests {
 
     #[test]
     fn serialize_list_section_missing_type_errors() {
-        let mut configs = BTreeMap::new();
-        let mut sections = BTreeMap::new();
+        let mut configs = IndexMap::new();
+        let mut sections = IndexMap::new();
         let mut item = Map::new();
         item.insert("Port".into(), Value::String("22".into()));
         sections.insert("dropbear".into(), Section::List(vec![item]));
@@ -390,8 +392,8 @@ mod tests {
 
     #[test]
     fn serialize_multiple_list_items() {
-        let mut configs = BTreeMap::new();
-        let mut sections = BTreeMap::new();
+        let mut configs = IndexMap::new();
+        let mut sections = IndexMap::new();
         let mut item1 = Map::new();
         item1.insert("_type".into(), Value::String("dropbear".into()));
         item1.insert("Port".into(), Value::String("22".into()));
@@ -411,8 +413,8 @@ mod tests {
 
     #[test]
     fn serialize_list_section_type_mismatch() {
-        let mut configs = BTreeMap::new();
-        let mut sections = BTreeMap::new();
+        let mut configs = IndexMap::new();
+        let mut sections = IndexMap::new();
         let mut item = Map::new();
         item.insert("_type".into(), Value::String("interface".into()));
         item.insert("proto".into(), Value::String("static".into()));

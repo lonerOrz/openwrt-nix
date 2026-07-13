@@ -1,14 +1,14 @@
+use indexmap::IndexMap;
 use serde::Deserialize;
 use serde_json::Map;
 use serde_json::Value;
-use std::collections::BTreeMap;
 
 #[derive(Deserialize, Debug)]
 pub(crate) struct Root {
     #[serde(default = "default_package_manager")]
     #[serde(rename = "packageManager")]
     pub(crate) package_manager: String,
-    pub(crate) settings: BTreeMap<String, BTreeMap<String, Section>>,
+    pub(crate) settings: IndexMap<String, IndexMap<String, Section>>,
     pub(crate) packages: Option<Vec<String>>,
     #[serde(rename = "packageSources")]
     pub(crate) package_sources: Option<PackageSources>,

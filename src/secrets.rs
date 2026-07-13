@@ -209,8 +209,8 @@ pub(crate) fn decrypt_sops_mem(root: &Root) -> Result<HashMap<String, String>, C
 mod tests {
     use super::*;
     use crate::models::PackageSources;
+    use indexmap::IndexMap;
     use serde_json::Map;
-    use std::collections::BTreeMap;
     use std::fs;
     use tempfile::TempDir;
 
@@ -269,10 +269,10 @@ mod tests {
         obj.insert("_type".into(), Value::String("wifi-iface".into()));
         obj.insert("key".into(), Value::String("@wifi_pass@".into()));
 
-        let mut sections = BTreeMap::new();
+        let mut sections = IndexMap::new();
         sections.insert("radio0".into(), Section::Named(obj));
 
-        let mut settings = BTreeMap::new();
+        let mut settings = IndexMap::new();
         settings.insert("wireless".into(), sections);
 
         let root = Root {
@@ -300,10 +300,10 @@ mod tests {
         obj.insert("_type".into(), Value::String("wifi-iface".into()));
         obj.insert("key".into(), Value::String("@missing_secret@".into()));
 
-        let mut sections = BTreeMap::new();
+        let mut sections = IndexMap::new();
         sections.insert("radio0".into(), Section::Named(obj));
 
-        let mut settings = BTreeMap::new();
+        let mut settings = IndexMap::new();
         settings.insert("wireless".into(), sections);
 
         let root = Root {
@@ -325,10 +325,10 @@ mod tests {
         obj.insert("_type".into(), Value::String("@not_a_secret@".into()));
         obj.insert("key".into(), Value::String("plain".into()));
 
-        let mut sections = BTreeMap::new();
+        let mut sections = IndexMap::new();
         sections.insert("test".into(), Section::Named(obj));
 
-        let mut settings = BTreeMap::new();
+        let mut settings = IndexMap::new();
         settings.insert("config".into(), sections);
 
         let root = Root {
@@ -353,9 +353,9 @@ mod tests {
     fn resolve_secrets_empty_map_shortcircuits() {
         let mut obj = Map::new();
         obj.insert("key".into(), Value::String("@secret@".into()));
-        let mut sections = BTreeMap::new();
+        let mut sections = IndexMap::new();
         sections.insert("s".into(), Section::Named(obj));
-        let mut settings = BTreeMap::new();
+        let mut settings = IndexMap::new();
         settings.insert("c".into(), sections);
         let root = Root {
             package_manager: "opkg".into(),
@@ -379,9 +379,9 @@ mod tests {
         let mut item = Map::new();
         item.insert("_type".into(), Value::String("dropbear".into()));
         item.insert("Port".into(), Value::String("@port@".into()));
-        let mut sections = BTreeMap::new();
+        let mut sections = IndexMap::new();
         sections.insert("dropbear".into(), Section::List(vec![item]));
-        let mut settings = BTreeMap::new();
+        let mut settings = IndexMap::new();
         settings.insert("dropbear".into(), sections);
         let root = Root {
             package_manager: "opkg".into(),
@@ -406,7 +406,7 @@ mod tests {
     fn resolve_secrets_feeds() {
         let root = Root {
             package_manager: "opkg".into(),
-            settings: BTreeMap::new(),
+            settings: IndexMap::new(),
             packages: None,
             package_sources: Some(PackageSources {
                 feeds: Some(vec!["src/gz @repo_name@ https://example.com".into()]),

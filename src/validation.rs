@@ -6,8 +6,7 @@ use serde_json::Value;
 fn is_valid_uci_identifier(s: &str) -> bool {
     !s.is_empty()
         && !s.as_bytes()[0].is_ascii_digit()
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 fn is_valid_uci_type(s: &str) -> bool {
@@ -99,20 +98,21 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use indexmap::IndexMap;
     use serde_json::Map;
-    use std::collections::BTreeMap;
 
     #[test]
-    fn validate_allows_hyphen_in_config_name() {
+    fn validate_rejects_hyphen_in_config_name() {
         let root = Root {
             package_manager: "opkg".into(),
-            settings: BTreeMap::from([("network-config".into(), BTreeMap::new())]),
+            settings: IndexMap::from([("network-config".into(), IndexMap::new())]),
             packages: None,
             package_sources: None,
             ssh_keys: vec![],
             secrets: None,
         };
-        assert!(validate_root(&root).is_ok());
+        let err = validate_root(&root).unwrap_err();
+        assert!(err.0.contains("Invalid config name"));
     }
 
     #[test]
@@ -121,9 +121,9 @@ mod tests {
         obj.insert("_type".into(), Value::String("wifi-iface".into()));
         let root = Root {
             package_manager: "opkg".into(),
-            settings: BTreeMap::from([(
+            settings: IndexMap::from([(
                 "wireless".into(),
-                BTreeMap::from([("radio0".into(), Section::Named(obj))]),
+                IndexMap::from([("radio0".into(), Section::Named(obj))]),
             )]),
             packages: None,
             package_sources: None,
@@ -134,40 +134,42 @@ mod tests {
     }
 
     #[test]
-    fn validate_allows_hyphen_in_option_name() {
+    fn validate_rejects_hyphen_in_option_name() {
         let mut obj = Map::new();
         obj.insert("_type".into(), Value::String("interface".into()));
         obj.insert("ip-address".into(), Value::String("192.168.1.1".into()));
         let root = Root {
             package_manager: "opkg".into(),
-            settings: BTreeMap::from([(
+            settings: IndexMap::from([(
                 "network".into(),
-                BTreeMap::from([("lan".into(), Section::Named(obj))]),
+                IndexMap::from([("lan".into(), Section::Named(obj))]),
             )]),
             packages: None,
             package_sources: None,
             ssh_keys: vec![],
             secrets: None,
         };
-        assert!(validate_root(&root).is_ok());
+        let err = validate_root(&root).unwrap_err();
+        assert!(err.0.contains("Invalid option"));
     }
 
     #[test]
-    fn validate_allows_hyphen_in_section_name() {
+    fn validate_rejects_hyphen_in_section_name() {
         let mut obj = Map::new();
         obj.insert("_type".into(), Value::String("interface".into()));
         let root = Root {
             package_manager: "opkg".into(),
-            settings: BTreeMap::from([(
+            settings: IndexMap::from([(
                 "network".into(),
-                BTreeMap::from([("my-section".into(), Section::Named(obj))]),
+                IndexMap::from([("my-section".into(), Section::Named(obj))]),
             )]),
             packages: None,
             package_sources: None,
             ssh_keys: vec![],
             secrets: None,
         };
-        assert!(validate_root(&root).is_ok());
+        let err = validate_root(&root).unwrap_err();
+        assert!(err.0.contains("Invalid section"));
     }
 
     #[test]
@@ -177,9 +179,9 @@ mod tests {
         obj.insert("proto".into(), Value::Null);
         let root = Root {
             package_manager: "opkg".into(),
-            settings: BTreeMap::from([(
+            settings: IndexMap::from([(
                 "network".into(),
-                BTreeMap::from([("lan".into(), Section::Named(obj))]),
+                IndexMap::from([("lan".into(), Section::Named(obj))]),
             )]),
             packages: None,
             package_sources: None,
@@ -196,9 +198,9 @@ mod tests {
         obj.insert("proto".into(), Value::String("static".into()));
         let root = Root {
             package_manager: "opkg".into(),
-            settings: BTreeMap::from([(
+            settings: IndexMap::from([(
                 "network".into(),
-                BTreeMap::from([("lan".into(), Section::Named(obj))]),
+                IndexMap::from([("lan".into(), Section::Named(obj))]),
             )]),
             packages: None,
             package_sources: None,
@@ -215,9 +217,9 @@ mod tests {
         item.insert("Port".into(), Value::String("22".into()));
         let root = Root {
             package_manager: "opkg".into(),
-            settings: BTreeMap::from([(
+            settings: IndexMap::from([(
                 "dropbear".into(),
-                BTreeMap::from([("dropbear".into(), Section::List(vec![item]))]),
+                IndexMap::from([("dropbear".into(), Section::List(vec![item]))]),
             )]),
             packages: None,
             package_sources: None,
@@ -232,9 +234,9 @@ mod tests {
     fn validate_rejects_empty_list_section() {
         let root = Root {
             package_manager: "opkg".into(),
-            settings: BTreeMap::from([(
+            settings: IndexMap::from([(
                 "wireless".into(),
-                BTreeMap::from([("wifi-iface".into(), Section::List(vec![]))]),
+                IndexMap::from([("wifi-iface".into(), Section::List(vec![]))]),
             )]),
             packages: None,
             package_sources: None,
@@ -246,29 +248,30 @@ mod tests {
     }
 
     #[test]
-    fn validate_list_allows_hyphen_in_option() {
+    fn validate_list_rejects_hyphen_in_option() {
         let mut item = Map::new();
         item.insert("_type".into(), Value::String("dropbear".into()));
         item.insert("listen-port".into(), Value::String("22".into()));
         let root = Root {
             package_manager: "opkg".into(),
-            settings: BTreeMap::from([(
+            settings: IndexMap::from([(
                 "dropbear".into(),
-                BTreeMap::from([("dropbear".into(), Section::List(vec![item]))]),
+                IndexMap::from([("dropbear".into(), Section::List(vec![item]))]),
             )]),
             packages: None,
             package_sources: None,
             ssh_keys: vec![],
             secrets: None,
         };
-        assert!(validate_root(&root).is_ok());
+        let err = validate_root(&root).unwrap_err();
+        assert!(err.0.contains("Invalid option"));
     }
 
     #[test]
     fn validate_empty_settings_ok() {
         let root = Root {
             package_manager: "opkg".into(),
-            settings: BTreeMap::new(),
+            settings: IndexMap::new(),
             packages: None,
             package_sources: None,
             ssh_keys: vec![],
@@ -281,7 +284,7 @@ mod tests {
     fn validate_rejects_digit_start_in_config_name() {
         let root = Root {
             package_manager: "opkg".into(),
-            settings: BTreeMap::from([("3network".into(), BTreeMap::new())]),
+            settings: IndexMap::from([("3network".into(), IndexMap::new())]),
             packages: None,
             package_sources: None,
             ssh_keys: vec![],
@@ -298,9 +301,9 @@ mod tests {
         obj.insert("0proto".into(), Value::String("static".into()));
         let root = Root {
             package_manager: "opkg".into(),
-            settings: BTreeMap::from([(
+            settings: IndexMap::from([(
                 "network".into(),
-                BTreeMap::from([("lan".into(), Section::Named(obj))]),
+                IndexMap::from([("lan".into(), Section::Named(obj))]),
             )]),
             packages: None,
             package_sources: None,

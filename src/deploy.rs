@@ -162,12 +162,13 @@ fn build_remote_script(
     script.push_str(uci_commands);
     script.push('\n');
 
-    // 5. Rollback watchdog (60s)
+    // 5. Rollback watchdog (60s) — fully detached to avoid SSH hang and SIGHUP cleanup
     script.push_str(
         "( sleep 60; cp -a /tmp/.uci-rollback-backup/* /etc/config/; \
           if [ -x /sbin/reload_config ]; then /sbin/reload_config; \
           else /etc/init.d/network restart; fi || true; \
-          rm -rf /tmp/.uci-rollback-backup /tmp/.uci-watchdog-pid ) & \
+          rm -rf /tmp/.uci-rollback-backup /tmp/.uci-watchdog-pid \
+        ) >/dev/null 2>&1 </dev/null & \
           echo $! > /tmp/.uci-watchdog-pid\n",
     );
 
@@ -237,37 +238,5 @@ pub(crate) fn run(json_path: &Path, target: &str) -> Result<(), ConfigError> {
         None,
     );
 
-    // 8. Setup & sync tinc VPN (if configured)
-    let _ = deploy_tinc_vpn(target);
-
-    Ok(())
-}
-
-fn deploy_tinc_vpn(target: &str) -> Result<(), ConfigError> {
-    let _ = ssh_exec(
-        target,
-        "if [ ! -f /etc/tinc/retiolum/rsa_key.priv ]; then \
-            mkdir -p /etc/tinc/retiolum; \
-            tinc -n retiolum generate-keys; \
-            /etc/init.d/tinc start; \
-        fi",
-        None,
-    );
-
-    let hosts_path = Path::new("/etc/tinc/retiolum/hosts");
-    if hosts_path.exists() && fs::read_dir(hosts_path).is_ok_and(|mut d| d.next().is_some()) {
-        let tar_output = Command::new("tar")
-            .args(["-C", "/etc/tinc/retiolum", "-cf", "-", "hosts"])
-            .output()
-            .map_err(|e| ConfigError(format!("Failed to run tar locally: {e}")))?;
-
-        if tar_output.status.success() && !tar_output.stdout.is_empty() {
-            let _ = ssh_exec(
-                target,
-                "mkdir -p /etc/tinc/retiolum && tar -C /etc/tinc/retiolum -xf -",
-                Some(&tar_output.stdout),
-            );
-        }
-    }
     Ok(())
 }
