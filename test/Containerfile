@@ -5,13 +5,8 @@ RUN mkdir -p /var/lock /var/run /etc/dropbear /etc/opkg /etc/apk/repositories.d
 # Create config files that UCI needs (minimal rootfs doesn't include them)
 RUN touch /etc/config/system /etc/config/wireless /etc/config/network
 
-# Mock opkg — list-installed always returns 1 (not installed) to trigger install paths
-RUN printf '#!/bin/sh\necho "opkg $*" >> /tmp/opkg.log\nif [ "$1" = "list-installed" ]; then exit 1; fi\nexit 0\n' \
-    > /usr/bin/opkg && chmod +x /usr/bin/opkg
-
-# Mock apk — info -e always returns 1 (not installed) to trigger install paths
-RUN printf '#!/bin/sh\necho "apk $*" >> /tmp/apk.log\nif [ "$1" = "info" ] && [ "$2" = "-e" ]; then exit 1; fi\nexit 0\n' \
-    > /usr/bin/apk && chmod +x /usr/bin/apk
+# Ensure opkg/apk config dirs exist (no mocks — real package manager)
+RUN mkdir -p /etc/opkg /etc/apk/repositories.d && touch /etc/opkg/customfeeds.conf
 
 # Set root password for container access (BusyBox passwd accepts piped input)
 RUN printf 'root\nroot\n' | passwd root

@@ -538,10 +538,6 @@ class TestDeployment:
             "[OPKG] customfeeds.conf missing or incorrect"
         )
 
-        log = podman_exec(CONTAINER_NAME, "cat /tmp/opkg.log")
-        assert "list-installed" in log, "[OPKG] list-installed was not called"
-        assert "update" in log, "[OPKG] update was not called"
-
     def test_apk_syntax_check(self, nuci_output_apk: str):
         """APK deployment script passes sh -n syntax check."""
         r = run(["sh", "-n"], input=nuci_output_apk, check=False)
@@ -570,10 +566,6 @@ class TestDeployment:
         )
         check_uci_section(CONTAINER_NAME, "wireless.default_radio0", "[APK] wireless")
         check_uci_section(CONTAINER_NAME, "network.lan", "[APK] network")
-
-        log = podman_exec(CONTAINER_NAME, "cat /tmp/apk.log")
-        assert "info -e" in log, "[APK] info -e was not called"
-        assert "add" in log, "[APK] add was not called"
 
 
 class TestJsonArtifact:
@@ -606,6 +598,70 @@ class TestJsonArtifact:
         ]
         for expr, label in checks:
             check_json_field(test_json_apk, expr, label, "APK")
+
+
+class TestRealPackageManager:
+    """Test real opkg/apk package installation from local HTTP server."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def detect_gateway(self):
+        """Detect container gateway IP (host running package-server)."""
+        r = engine(
+            "exec",
+            CONTAINER_NAME,
+            "ip",
+            "route",
+            "show",
+            "default",
+            check=False,
+        )
+        match = re.search(r"via\s+(\S+)", r.stdout)
+        assert match, f"Cannot detect gateway: {r.stdout}"
+        self.gateway = match.group(1)
+
+    def test_opkg_real_install(self):
+        """Install a real .ipk package via opkg from local feed."""
+        gateway = self.gateway
+        podman_exec(
+            CONTAINER_NAME,
+            f"""
+            printf '' > /etc/opkg/customfeeds.conf
+            echo "src/gz test-pkgs http://{gateway}:8080" >> /etc/opkg/customfeeds.conf
+            opkg update
+            opkg install test-pkg-a
+        """,
+        )
+        r = engine(
+            "exec",
+            CONTAINER_NAME,
+            "opkg",
+            "list-installed",
+            "test-pkg-a",
+            check=False,
+        )
+        assert "test-pkg-a" in r.stdout, f"Package not installed: {r.stdout}"
+
+    def test_apk_real_install(self):
+        """Install a real .apk package via apk from local feed."""
+        gateway = self.gateway
+        podman_exec(
+            CONTAINER_NAME,
+            f"""
+            echo "http://{gateway}:8080" > /etc/apk/repositories.d/test.list
+            apk update
+            apk add test-pkg-a
+        """,
+        )
+        r = engine(
+            "exec",
+            CONTAINER_NAME,
+            "apk",
+            "info",
+            "-e",
+            "test-pkg-a",
+            check=False,
+        )
+        assert r.returncode == 0, f"apk package not installed: {r.stderr}"
 
 
 class TestServiceState:
