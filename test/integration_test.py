@@ -1570,7 +1570,9 @@ class TestUnifiedLifecycle:
         if r.returncode != 0 and "hash mismatch" in (r.stderr or ""):
             pytest.skip("Upstream imagebuilder cache hashes are stale — not our bug")
         assert r.returncode == 0, f"Firmware derivation evaluation failed:\n{r.stderr}"
-        assert "openwrt-" in r.stdout, f"Expected firmware store path in output:\n{r.stdout}"
+        assert "openwrt-" in r.stdout, (
+            f"Expected firmware store path in output:\n{r.stdout}"
+        )
 
     def test_sops_validation_on_bootstrap(self):
         """Verify that compiling a configuration with raw placeholders fails in --no-sops mode."""
