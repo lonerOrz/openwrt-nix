@@ -280,7 +280,7 @@ pub(crate) fn run(
     config: &DeployConfig,
     secrets_dir: Option<&Path>,
 ) -> Result<(), ConfigError> {
-    let compiled = compile_config(json_path, secrets_dir)?;
+    let compiled = compile_config(json_path, secrets_dir, false)?;
 
     let managed_configs: Vec<String> = compiled.resolved_root.settings.keys().cloned().collect();
     let managed_refs: Vec<&str> = managed_configs.iter().map(|s| s.as_str()).collect();

@@ -15,12 +15,17 @@ pub(crate) struct CompiledConfig {
 pub(crate) fn compile_config(
     json_path: &Path,
     secrets_dir: Option<&Path>,
+    skip_sops: bool,
 ) -> Result<CompiledConfig, ConfigError> {
     let file = std::fs::File::open(json_path)?;
     let root: Root = serde_json::from_reader(std::io::BufReader::new(file))?;
     validate_root(&root)?;
 
-    let mut secrets = decrypt_sops_mem(&root)?;
+    let mut secrets = if skip_sops {
+        HashMap::new()
+    } else {
+        decrypt_sops_mem(&root)?
+    };
 
     if let Some(dir) = secrets_dir {
         secrets.extend(load_secrets_dir(dir.to_str().ok_or_else(|| {

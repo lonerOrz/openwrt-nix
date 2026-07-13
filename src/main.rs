@@ -33,6 +33,10 @@ enum Command {
 
         /// Optional directory containing secrets files
         secrets_dir: Option<PathBuf>,
+
+        /// Skip SOPS decryption (secrets must be in secrets_dir as plain JSON)
+        #[arg(long)]
+        no_sops: bool,
     },
 
     /// Deploy configuration to a remote OpenWrt device via SSH
@@ -82,8 +86,12 @@ enum Command {
     },
 }
 
-fn compile(path: &Path, secrets_dir: Option<&Path>) -> Result<String, ConfigError> {
-    let config = compile_config(path, secrets_dir)?;
+fn compile(
+    path: &Path,
+    secrets_dir: Option<&Path>,
+    skip_sops: bool,
+) -> Result<String, ConfigError> {
+    let config = compile_config(path, secrets_dir, skip_sops)?;
     Ok(config.uci_batch)
 }
 
@@ -91,8 +99,12 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Command::Compile { json, secrets_dir }) => {
-            run_compile(&json, secrets_dir.as_deref());
+        Some(Command::Compile {
+            json,
+            secrets_dir,
+            no_sops,
+        }) => {
+            run_compile(&json, secrets_dir.as_deref(), no_sops);
         }
         Some(Command::Deploy {
             json,
@@ -138,8 +150,8 @@ fn main() {
     }
 }
 
-fn run_compile(json_path: &Path, secrets_dir: Option<&Path>) {
-    match compile(json_path, secrets_dir) {
+fn run_compile(json_path: &Path, secrets_dir: Option<&Path>, skip_sops: bool) {
+    match compile(json_path, secrets_dir, skip_sops) {
         Ok(output) => print!("{output}"),
         Err(e) => {
             eprintln!("{e}");
@@ -170,7 +182,7 @@ mod tests {
         }"#,
         )
         .unwrap();
-        let output = compile(&json_path, None).unwrap();
+        let output = compile(&json_path, None, false).unwrap();
         assert!(output.contains("delete system.system"));
         assert!(output.contains("set system.system.hostname='test'"));
         assert!(output.contains("commit system"));
@@ -195,13 +207,13 @@ mod tests {
         )
         .unwrap();
         fs::write(secrets_path.join("s.json"), r#"{"wifi_pass": "secret123"}"#).unwrap();
-        let output = compile(&json_path, Some(&secrets_path)).unwrap();
+        let output = compile(&json_path, Some(&secrets_path), false).unwrap();
         assert!(output.contains("set wifi.radio0.key='secret123'"));
     }
 
     #[test]
     fn convert_file_missing_file() {
-        let err = compile(&PathBuf::from("/tmp/nonexistent_xyz.json"), None).unwrap_err();
+        let err = compile(&PathBuf::from("/tmp/nonexistent_xyz.json"), None, false).unwrap_err();
         assert!(format!("{err}").contains("No such file"));
     }
 
@@ -210,7 +222,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let json_path = dir.path().join("bad.json");
         fs::write(&json_path, "not json").unwrap();
-        let err = compile(&json_path, None).unwrap_err();
+        let err = compile(&json_path, None, false).unwrap_err();
         assert!(format!("{err}").contains("Failed to parse JSON"));
     }
 
@@ -227,7 +239,7 @@ mod tests {
         }"#,
         )
         .unwrap();
-        let output = compile(&json_path, None).unwrap();
+        let output = compile(&json_path, None, false).unwrap();
         assert!(output.contains("printf '' > /etc/opkg/customfeeds.conf"));
         assert!(output.contains("src/gz custom https://example.com/repo"));
     }
@@ -245,7 +257,7 @@ mod tests {
         }"#,
         )
         .unwrap();
-        let output = compile(&json_path, None).unwrap();
+        let output = compile(&json_path, None, false).unwrap();
         assert!(output.contains("for pkg in luci tcpdump"));
         assert!(output.contains("opkg update && opkg install luci tcpdump"));
     }
@@ -263,7 +275,7 @@ mod tests {
         }"#,
         )
         .unwrap();
-        let output = compile(&json_path, None).unwrap();
+        let output = compile(&json_path, None, false).unwrap();
         assert!(output.contains("opkg list-installed \"foo\""));
         assert!(output.contains("opkg install /tmp/foo_1.0.ipk"));
     }
@@ -281,7 +293,7 @@ mod tests {
         }"#,
         )
         .unwrap();
-        let output = compile(&json_path, None).unwrap();
+        let output = compile(&json_path, None, false).unwrap();
         assert!(output.contains("'\\''"));
     }
 
@@ -302,7 +314,7 @@ mod tests {
         }"#,
         )
         .unwrap();
-        let output = compile(&json_path, None).unwrap();
+        let output = compile(&json_path, None, false).unwrap();
         assert!(output.contains("/etc/apk/repositories.d/customfeeds.list"));
         assert!(output.contains("apk -U add"));
         assert!(output.contains("apk add --allow-untrusted /tmp/foo_1.0_all.apk"));

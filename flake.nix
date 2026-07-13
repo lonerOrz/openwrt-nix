@@ -8,6 +8,10 @@
       url = "github:numtide/treefmt-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    openwrt-imagebuilder = {
+      url = "github:astro/nix-openwrt-imagebuilder";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -16,6 +20,7 @@
       nixpkgs,
       flake-parts,
       treefmt-nix,
+      openwrt-imagebuilder,
       ...
     }:
     flake-parts.lib.mkFlake { inherit inputs; } {
@@ -35,10 +40,14 @@
           ...
         }:
         let
-          uci = pkgs.callPackage ./nix { };
+          uci = pkgs.callPackage ./nix { inherit openwrt-imagebuilder; };
           uciConfig = uci.writeUci ./example.nix;
           testConfig = uci.writeUci ./test/test_config.nix;
           testConfigApk = uci.writeUci ./test/test_config_apk.nix;
+          exampleFirmware = uci.buildFirmware {
+            configuration = ./example.nix;
+            profile = "linksys_e8450-ubi";
+          };
         in
         {
           treefmt = {
@@ -70,6 +79,7 @@
             example-json = uciConfig.json;
             test-json = testConfig.json;
             test-json-apk = testConfigApk.json;
+            firmware = exampleFirmware;
           };
 
           apps = {

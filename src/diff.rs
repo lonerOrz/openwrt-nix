@@ -140,7 +140,7 @@ pub(crate) fn run(
     config: &DeployConfig,
     secrets_dir: Option<&Path>,
 ) -> Result<(), ConfigError> {
-    let compiled = compile_config(json_path, secrets_dir)?;
+    let compiled = compile_config(json_path, secrets_dir, false)?;
     let desired = extract_desired_map(&compiled.resolved_root.settings);
 
     let managed: Vec<&str> = compiled

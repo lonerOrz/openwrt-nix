@@ -4,9 +4,13 @@
   writeShellScript,
   pkgs,
   sops,
+  openwrt-imagebuilder,
 }:
 let
   nuci = pkgs.callPackage ./nuci.nix { };
+  firmware = pkgs.callPackage ./firmware.nix {
+    inherit openwrt-imagebuilder nuci;
+  };
 in
 {
   writeUci =
@@ -52,4 +56,5 @@ in
       '';
     };
   inherit nuci;
+  inherit (firmware) buildFirmware;
 }
