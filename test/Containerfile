@@ -23,6 +23,10 @@ RUN uci set dropbear.@dropbear[0].PasswordAuth='off' && \
 
 EXPOSE 22
 
+# Mock reload_config — procd not running, route to dropbear restart
+RUN printf '#!/bin/sh\nkillall dropbear || true\nsleep 1\n/usr/sbin/dropbear -F -E -p 22 -R &\n' \
+    > /sbin/reload_config && chmod +x /sbin/reload_config
+
 # Wrapper: start dropbear directly (init.d needs procd which isn't running)
 RUN printf '#!/bin/sh\n/usr/sbin/dropbear -F -E -p 22 -R\nexec sleep infinity\n' \
     > /start.sh && chmod +x /start.sh
