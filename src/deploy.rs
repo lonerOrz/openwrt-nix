@@ -197,15 +197,17 @@ fn build_remote_script(
     script.push_str(uci_commands);
     script.push('\n');
 
-    // 5. Rollback watchdog (60s) — fully detached to avoid SSH hang and SIGHUP cleanup
-    script.push_str(
-        "( sleep 60; cp -a /tmp/.uci-rollback-backup/* /etc/config/; \
+    // 5. Rollback watchdog — fully detached to avoid SSH hang and SIGHUP cleanup
+    let watchdog_timeout =
+        std::env::var("NUCI_WATCHDOG_TIMEOUT").unwrap_or_else(|_| "60".to_string());
+    script.push_str(&format!(
+        "( sleep {watchdog_timeout}; cp -a /tmp/.uci-rollback-backup/* /etc/config/; \
           if [ -x /sbin/reload_config ]; then /sbin/reload_config; \
           else /etc/init.d/network restart; fi || true; \
           rm -rf /tmp/.uci-rollback-backup /tmp/.uci-watchdog-pid \
         ) >/dev/null 2>&1 </dev/null & \
-          echo $! > /tmp/.uci-watchdog-pid\n",
-    );
+          echo $! > /tmp/.uci-watchdog-pid\n"
+    ));
 
     // 6. Apply config
     script.push_str("if [ -x /sbin/reload_config ]; then /sbin/reload_config; else /etc/init.d/network restart; fi\n");
