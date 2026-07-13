@@ -149,11 +149,50 @@ fn get_local_deployer_key() -> Option<String> {
         .and_then(|s| s.lines().next().map(String::from))
 }
 
+/// Generate shell reload commands for specific configs.
+/// Fast path: `/sbin/reload_config` if available.
+/// Fallback: targeted reload per changed config.
+fn reload_commands(modified: &[String]) -> String {
+    let mut out = String::with_capacity(512);
+    out.push_str("if [ -x /sbin/reload_config ]; then /sbin/reload_config; else\n");
+
+    let mut network_reloaded = false;
+    for config in modified {
+        match config.as_str() {
+            "network" | "wireless" => {
+                if !network_reloaded {
+                    out.push_str("  [ -x /etc/init.d/network ] && /etc/init.d/network restart\n");
+                    network_reloaded = true;
+                }
+            }
+            "dropbear" => {
+                out.push_str("  [ -x /etc/init.d/dropbear ] && /etc/init.d/dropbear reload\n");
+            }
+            "firewall" => {
+                out.push_str("  [ -x /etc/init.d/firewall ] && /etc/init.d/firewall reload\n");
+            }
+            "dhcp" => {
+                out.push_str("  [ -x /etc/init.d/dnsmasq ] && /etc/init.d/dnsmasq reload\n");
+            }
+            _ => {
+                out.push_str(&format!(
+                    "  [ -x /etc/init.d/{c} ] && /etc/init.d/{c} reload\n",
+                    c = config
+                ));
+            }
+        }
+    }
+
+    out.push_str("fi\n");
+    out
+}
+
 fn build_remote_script(
     root: &Root,
     secrets: &HashMap<String, String>,
     uci_commands: &str,
     deployer_key: Option<&str>,
+    modified_configs: &[String],
 ) -> String {
     let mut script = String::with_capacity(4096);
 
@@ -196,20 +235,20 @@ fn build_remote_script(
     script.push_str(uci_commands);
     script.push('\n');
 
-    // 5. Rollback watchdog — fully detached to avoid SSH hang and SIGHUP cleanup
+    // 5. Rollback watchdog — restore backup + targeted reload on timeout
     let watchdog_timeout =
         std::env::var("NUCI_WATCHDOG_TIMEOUT").unwrap_or_else(|_| "60".to_string());
+    let reload_cmds = reload_commands(modified_configs);
     script.push_str(&format!(
         "( sleep {watchdog_timeout}; cp -a /tmp/.uci-rollback-backup/* /etc/config/; \
-          if [ -x /sbin/reload_config ]; then /sbin/reload_config; \
-          else /etc/init.d/network restart; fi || true; \
+          {reload_cmds} \
           rm -rf /tmp/.uci-rollback-backup /tmp/.uci-watchdog-pid \
         ) >/dev/null 2>&1 </dev/null & \
           echo $! > /tmp/.uci-watchdog-pid\n"
     ));
 
-    // 6. Apply config
-    script.push_str("if [ -x /sbin/reload_config ]; then /sbin/reload_config; else /etc/init.d/network restart; fi\n");
+    // 6. Apply config — targeted service reload
+    script.push_str(&reload_commands(modified_configs));
 
     script
 }
@@ -226,6 +265,9 @@ pub(crate) fn run(
     // 2. Transfer local packages via tar over SSH stdin
     transfer_packages(target, &compiled.resolved_root, config)?;
 
+    // Collect which config files are being modified
+    let modified_configs: Vec<String> = compiled.resolved_root.settings.keys().cloned().collect();
+
     // 3. Build and execute the entire remote deployment script in one SSH call
     let deployer_key = get_local_deployer_key();
     let remote_script = build_remote_script(
@@ -233,6 +275,7 @@ pub(crate) fn run(
         &compiled.secrets,
         &compiled.uci_batch,
         deployer_key.as_deref(),
+        &modified_configs,
     );
     eprintln!("Deploying to {target}...");
     ssh_exec(target, "sh -s", Some(remote_script.as_bytes()), config)?;
