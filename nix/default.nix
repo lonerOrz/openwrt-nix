@@ -38,7 +38,6 @@ in
           sshKeys
           ;
       };
-      sopsFiles = res.config.uci.secrets.sops.files;
     in
     {
       inherit json;
@@ -47,7 +46,6 @@ in
         export PATH="${
           lib.makeBinPath [
             pkgs.openssh
-            pkgs.rsync
             sops
           ]
         }:$PATH"

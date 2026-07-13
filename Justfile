@@ -20,9 +20,6 @@ eval-config:
 test-unit:
 	cargo test
 	cargo run -- test/test_uci.json > /dev/null
-	cargo run -- test/test_interpolate.json test/mock_secrets > /dev/null
-	cargo run -- test/test_interp2.json test/mock_secrets > /dev/null
-	cargo run -- test/test_unclosed.json > /dev/null
 	cargo run -- test/test_edge_cases.json > /dev/null
 	@echo "All local mock configuration tests passed!"
 

@@ -483,4 +483,14 @@ mod tests {
         assert_eq!(result["top_key"], "top_val");
         assert!(!result.contains_key("nested_key"));
     }
+
+    #[test]
+    fn unclosed_marker_passthrough() {
+        // @ in middle of string without matching closing @ → treated as plain text
+        let s = interpolate_secrets("my@unclosed", &HashMap::new()).unwrap();
+        assert_eq!(s.as_ref(), "my@unclosed");
+
+        let s = interpolate_secrets("has@in@middle@here", &HashMap::new()).unwrap();
+        assert_eq!(s.as_ref(), "has@in@middle@here");
+    }
 }

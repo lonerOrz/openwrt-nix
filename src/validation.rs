@@ -4,7 +4,10 @@ use crate::models::{Root, Section};
 use serde_json::Value;
 
 fn is_valid_uci_identifier(s: &str) -> bool {
-    !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    !s.is_empty()
+        && !s.as_bytes()[0].is_ascii_digit()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 fn is_valid_uci_type(s: &str) -> bool {
@@ -17,7 +20,7 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), ConfigError> {
     for (config_name, sections) in &root.settings {
         if !is_valid_uci_identifier(config_name) {
             return Err(ConfigError(format!(
-                "Invalid config name '{}': only [a-zA-Z0-9_] allowed",
+                "Invalid config name '{}': only [a-zA-Z0-9_-] allowed",
                 config_name
             )));
         }
@@ -56,7 +59,7 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), ConfigError> {
                         for (opt_name, opt_val) in iter_options(item) {
                             if !is_valid_uci_identifier(opt_name) {
                                 return Err(ConfigError(format!(
-                                    "Invalid option '{}' in {}.@{}[{}]: only [a-zA-Z0-9_] allowed",
+                                    "Invalid option '{}' in {}.@{}[{}]: only [a-zA-Z0-9_-] allowed",
                                     opt_name, config_name, section_name, idx
                                 )));
                             }
@@ -66,13 +69,21 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), ConfigError> {
                                     config_name, section_name, idx, opt_name
                                 )));
                             }
+                            if let Value::String(s) = opt_val
+                                && s.is_empty()
+                            {
+                                eprintln!(
+                                    "Warning: {}.{}[{}].{} is empty string — UCI treats '' as unset. Consider omitting it.",
+                                    config_name, section_name, idx, opt_name
+                                );
+                            }
                         }
                     }
                 }
                 Section::Named(map) => {
                     if !is_valid_uci_identifier(section_name) {
                         return Err(ConfigError(format!(
-                            "Invalid section '{}' in config '{}': only [a-zA-Z0-9_] allowed",
+                            "Invalid section '{}' in config '{}': only [a-zA-Z0-9_-] allowed",
                             section_name, config_name
                         )));
                     }
@@ -94,7 +105,7 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), ConfigError> {
                     for (opt_name, opt_val) in iter_options(map) {
                         if !is_valid_uci_identifier(opt_name) {
                             return Err(ConfigError(format!(
-                                "Invalid option '{}' in {}.{}: only [a-zA-Z0-9_] allowed",
+                                "Invalid option '{}' in {}.{}: only [a-zA-Z0-9_-] allowed",
                                 opt_name, config_name, section_name
                             )));
                         }
@@ -103,6 +114,14 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), ConfigError> {
                                 "{}.{}.{} has null value",
                                 config_name, section_name, opt_name
                             )));
+                        }
+                        if let Value::String(s) = opt_val
+                            && s.is_empty()
+                        {
+                            eprintln!(
+                                "Warning: {}.{}.{} is empty string — UCI treats '' as unset. Consider omitting it.",
+                                config_name, section_name, opt_name
+                            );
                         }
                     }
                 }
@@ -119,7 +138,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
-    fn validate_rejects_hyphen_in_config_name() {
+    fn validate_allows_hyphen_in_config_name() {
         let root = Root {
             package_manager: "opkg".into(),
             settings: BTreeMap::from([("network-config".into(), BTreeMap::new())]),
@@ -128,8 +147,7 @@ mod tests {
             ssh_keys: vec![],
             secrets: None,
         };
-        let err = validate_root(&root).unwrap_err();
-        assert!(err.0.contains("Invalid config name"));
+        assert!(validate_root(&root).is_ok());
     }
 
     #[test]
@@ -151,7 +169,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_hyphen_in_option_name() {
+    fn validate_allows_hyphen_in_option_name() {
         let mut obj = Map::new();
         obj.insert("_type".into(), Value::String("interface".into()));
         obj.insert("ip-address".into(), Value::String("192.168.1.1".into()));
@@ -166,12 +184,11 @@ mod tests {
             ssh_keys: vec![],
             secrets: None,
         };
-        let err = validate_root(&root).unwrap_err();
-        assert!(err.0.contains("Invalid option"));
+        assert!(validate_root(&root).is_ok());
     }
 
     #[test]
-    fn validate_rejects_hyphen_in_section_name() {
+    fn validate_allows_hyphen_in_section_name() {
         let mut obj = Map::new();
         obj.insert("_type".into(), Value::String("interface".into()));
         let root = Root {
@@ -185,8 +202,7 @@ mod tests {
             ssh_keys: vec![],
             secrets: None,
         };
-        let err = validate_root(&root).unwrap_err();
-        assert!(err.0.contains("Invalid section"));
+        assert!(validate_root(&root).is_ok());
     }
 
     #[test]
@@ -265,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_list_rejects_hyphen_in_option() {
+    fn validate_list_allows_hyphen_in_option() {
         let mut item = Map::new();
         item.insert("_type".into(), Value::String("dropbear".into()));
         item.insert("listen-port".into(), Value::String("22".into()));
@@ -280,8 +296,7 @@ mod tests {
             ssh_keys: vec![],
             secrets: None,
         };
-        let err = validate_root(&root).unwrap_err();
-        assert!(err.0.contains("Invalid option"));
+        assert!(validate_root(&root).is_ok());
     }
 
     #[test]
@@ -295,5 +310,39 @@ mod tests {
             secrets: None,
         };
         assert!(validate_root(&root).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_digit_start_in_config_name() {
+        let root = Root {
+            package_manager: "opkg".into(),
+            settings: BTreeMap::from([("3network".into(), BTreeMap::new())]),
+            packages: None,
+            opkg: None,
+            ssh_keys: vec![],
+            secrets: None,
+        };
+        let err = validate_root(&root).unwrap_err();
+        assert!(err.0.contains("Invalid config name"));
+    }
+
+    #[test]
+    fn validate_rejects_digit_start_in_option() {
+        let mut obj = Map::new();
+        obj.insert("_type".into(), Value::String("interface".into()));
+        obj.insert("0proto".into(), Value::String("static".into()));
+        let root = Root {
+            package_manager: "opkg".into(),
+            settings: BTreeMap::from([(
+                "network".into(),
+                BTreeMap::from([("lan".into(), Section::Named(obj))]),
+            )]),
+            packages: None,
+            opkg: None,
+            ssh_keys: vec![],
+            secrets: None,
+        };
+        let err = validate_root(&root).unwrap_err();
+        assert!(err.0.contains("Invalid option"));
     }
 }

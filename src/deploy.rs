@@ -88,7 +88,9 @@ pub(crate) fn decrypt_sops_mem(root: &Root) -> Result<HashMap<String, String>, C
 
     for file in sops_files {
         if !Path::new(file).exists() {
-            continue;
+            return Err(ConfigError(format!(
+                "Configured SOPS file not found: {file}"
+            )));
         }
 
         let output = Command::new("sops")
@@ -292,7 +294,7 @@ pub(crate) fn run(json_path: &Path, target: &str) -> Result<(), ConfigError> {
 
     // 9. Sync tinc hosts directory via tar pipe (no rsync dependency)
     let hosts_path = Path::new("/etc/tinc/retiolum/hosts");
-    if hosts_path.exists() {
+    if hosts_path.exists() && fs::read_dir(hosts_path).is_ok_and(|mut d| d.next().is_some()) {
         let tar_output = Command::new("tar")
             .args(["-C", "/etc/tinc/retiolum", "-cf", "-", "hosts"])
             .output()
