@@ -247,7 +247,7 @@ fn build_remote_script(
     script.push_str("BOOT_EOF\n");
     script.push_str("chmod +x /etc/init.d/nuci_rollback\n");
     script.push_str("ln -sf /etc/init.d/nuci_rollback /etc/rc.d/S15nuci_rollback\n");
-    script.push_str("sync\n");
+    script.push_str("timeout 5 sync 2>/dev/null || true\n");
 
     // 4. UCI commands (piped from compile)
     script.push_str(uci_commands);
