@@ -24,7 +24,7 @@ impl Default for DeployConfig {
     }
 }
 
-fn build_ssh_args(config: &DeployConfig) -> Vec<String> {
+fn build_ssh_args(config: &DeployConfig, is_scp: bool) -> Vec<String> {
     let mut args = vec![
         "-o".into(),
         "ControlMaster=auto".into(),
@@ -34,7 +34,9 @@ fn build_ssh_args(config: &DeployConfig) -> Vec<String> {
         "ControlPersist=5m".into(),
     ];
     if config.port != 22 {
-        args.extend(["-p".into(), config.port.to_string()]);
+        // ssh uses -p, scp uses -P
+        let port_flag = if is_scp { "-P" } else { "-p" };
+        args.extend([port_flag.into(), config.port.to_string()]);
     }
     if let Some(ref identity) = config.identity_file {
         args.extend(["-i".into(), identity.clone()]);
@@ -48,7 +50,7 @@ fn ssh_exec(
     stdin_data: Option<&[u8]>,
     config: &DeployConfig,
 ) -> Result<String, ConfigError> {
-    let mut args = build_ssh_args(config);
+    let mut args = build_ssh_args(config, false);
     args.push(target.into());
     args.push(cmd.into());
 
@@ -96,7 +98,7 @@ fn scp_to_target(
         .to_str()
         .ok_or_else(|| ConfigError("Invalid local path".into()))?;
 
-    let mut args = build_ssh_args(config);
+    let mut args = build_ssh_args(config, true);
     args.push(local_str.into());
     args.push(format!("{target}:{remote_path}"));
 
