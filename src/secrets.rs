@@ -13,7 +13,7 @@ pub(crate) fn interpolate_secrets<'a>(
     option_val: &'a str,
     secrets: &HashMap<String, String>,
 ) -> Result<Cow<'a, str>, ConfigError> {
-    if !option_val.contains('@') || secrets.is_empty() {
+    if !option_val.contains('@') {
         return Ok(Cow::Borrowed(option_val));
     }
 
@@ -82,10 +82,6 @@ pub(crate) fn resolve_secrets(
     mut root: Root,
     secrets: &HashMap<String, String>,
 ) -> Result<Root, ConfigError> {
-    if secrets.is_empty() {
-        return Ok(root);
-    }
-
     for sections in root.settings.values_mut() {
         for section in sections.values_mut() {
             match section {
@@ -229,9 +225,9 @@ mod tests {
     }
 
     #[test]
-    fn interpolate_empty_secrets() {
-        let s = interpolate_secrets("@secret@", &HashMap::new()).unwrap();
-        assert_eq!(s.as_ref(), "@secret@");
+    fn interpolate_empty_secrets_errors_on_valid_placeholder() {
+        let err = interpolate_secrets("@secret@", &HashMap::new()).unwrap_err();
+        assert!(format!("{err}").contains("secret"));
     }
 
     #[test]
@@ -352,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_secrets_empty_map_shortcircuits() {
+    fn resolve_secrets_empty_map_errors_on_placeholder() {
         let mut obj = Map::new();
         obj.insert("key".into(), Value::String("@secret@".into()));
         let mut sections = IndexMap::new();
@@ -368,12 +364,8 @@ mod tests {
             secrets: None,
         };
 
-        let resolved = resolve_secrets(root, &HashMap::new()).unwrap();
-        if let Section::Named(map) = &resolved.settings["c"]["s"] {
-            assert_eq!(map["key"], "@secret@");
-        } else {
-            panic!("Expected Section::Named");
-        }
+        let err = resolve_secrets(root, &HashMap::new()).unwrap_err();
+        assert!(format!("{err}").contains("secret"));
     }
 
     #[test]
@@ -537,7 +529,8 @@ mod tests {
         let s = interpolate_secrets("my@unclosed", &HashMap::new()).unwrap();
         assert_eq!(s.as_ref(), "my@unclosed");
 
-        let s = interpolate_secrets("has@in@middle@here", &HashMap::new()).unwrap();
-        assert_eq!(s.as_ref(), "has@in@middle@here");
+        // Odd number of @ but @in@ is a valid placeholder → errors on missing secret
+        let err = interpolate_secrets("has@in@middle@here", &HashMap::new()).unwrap_err();
+        assert!(format!("{err}").contains("in"));
     }
 }

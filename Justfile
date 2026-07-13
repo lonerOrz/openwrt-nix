@@ -20,7 +20,7 @@ eval-config:
 test-unit:
 	cargo test
 	cargo run -- compile test/test_uci.json > /dev/null
-	cargo run -- compile test/test_edge_cases.json > /dev/null
+	cargo run -- compile test/test_edge_cases.json test/test_secrets > /dev/null
 	@echo "All local mock configuration tests passed!"
 
 # Run Podman-based end-to-end integration tests against a real OpenWrt container
