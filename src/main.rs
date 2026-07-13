@@ -6,18 +6,58 @@ mod models;
 mod secrets;
 mod validation;
 
-use std::env;
 use std::fs::File;
 use std::io::BufReader;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use clap::{Parser, Subcommand};
 use error::ConfigError;
 use generator::{serialize_package_management, serialize_uci};
 use models::{PkgBackend, Root};
 use secrets::{load_secrets_dir, resolve_secrets};
 use validation::validate_root;
 
-fn compile(path: &Path, secrets_dir: Option<&str>) -> Result<String, ConfigError> {
+#[derive(Parser)]
+#[command(
+    name = "nuci",
+    about = "Declarative OpenWrt UCI configuration compiler and deployer"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Compile Nix JSON config into UCI batch commands
+    Compile {
+        /// Path to the JSON config file
+        json: PathBuf,
+
+        /// Optional directory containing secrets files
+        secrets_dir: Option<PathBuf>,
+    },
+
+    /// Deploy configuration to a remote OpenWrt device via SSH
+    Deploy {
+        /// Path to the JSON config file
+        json: PathBuf,
+
+        /// SSH target host (user@host)
+        #[arg(short, long)]
+        target: String,
+
+        /// SSH port
+        #[arg(short, long, default_value_t = 22)]
+        port: u16,
+
+        /// Path to SSH identity file
+        #[arg(short, long)]
+        identity: Option<PathBuf>,
+    },
+}
+
+fn compile(path: &PathBuf, secrets_dir: Option<&Path>) -> Result<String, ConfigError> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
 
@@ -28,7 +68,7 @@ fn compile(path: &Path, secrets_dir: Option<&str>) -> Result<String, ConfigError
     let mut secrets = secrets::decrypt_sops_mem(&root)?;
     // Merge with directory-based secrets (if provided)
     if let Some(dir_path) = secrets_dir {
-        secrets.extend(load_secrets_dir(dir_path)?);
+        secrets.extend(load_secrets_dir(dir_path.to_str().unwrap())?);
     }
 
     let resolved_root = resolve_secrets(root, &secrets)?;
@@ -48,51 +88,28 @@ fn compile(path: &Path, secrets_dir: Option<&str>) -> Result<String, ConfigError
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    let args_slice: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let cli = Cli::parse();
 
-    match args_slice.as_slice() {
-        [_, "compile", json, secrets_dir] => run_compile(json, Some(secrets_dir)),
-        [_, "compile", json] => run_compile(json, None),
-        [_, "deploy", json, "--target", host] | [_, "deploy", json, "-t", host] => {
-            let mut port: u16 = 22;
-            let mut identity: Option<String> = None;
-            let remaining: Vec<(&str, &str)> = args_slice[5..]
-                .chunks(2)
-                .filter_map(|c| {
-                    if c.len() == 2 {
-                        Some((c[0], c[1]))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            for (key, val) in &remaining {
-                match *key {
-                    "--port" | "-p" => {
-                        if let Ok(p) = val.parse() {
-                            port = p;
-                        }
-                    }
-                    "--identity" | "-i" => {
-                        identity = Some(val.to_string());
-                    }
-                    _ => {}
-                }
-            }
+    match cli.command {
+        Some(Command::Compile { json, secrets_dir }) => {
+            run_compile(&json, secrets_dir.as_deref());
+        }
+        Some(Command::Deploy {
+            json,
+            target,
+            port,
+            identity,
+        }) => {
             let config = deploy::DeployConfig {
                 port,
-                identity_file: identity,
+                identity_file: identity.map(|p| p.to_string_lossy().into_owned()),
             };
-            if let Err(e) = deploy::run(Path::new(json), host, &config) {
+            if let Err(e) = deploy::run(&json, &target, &config) {
                 eprintln!("{e}");
                 std::process::exit(1);
             }
         }
-        // Backward compat: bare .json path = compile
-        [_, json, secrets_dir] if json.ends_with(".json") => run_compile(json, Some(secrets_dir)),
-        [_, json] if json.ends_with(".json") => run_compile(json, None),
-        _ => {
+        None => {
             eprintln!(
                 "USAGE:\n  nuci compile <JSON_FILE> [SECRETS_DIR]\n  nuci deploy <JSON_FILE> --target <HOST> [--port PORT] [--identity FILE]"
             );
@@ -101,8 +118,8 @@ fn main() {
     }
 }
 
-fn run_compile(json_path: &str, secrets_dir: Option<&str>) {
-    match compile(Path::new(json_path), secrets_dir) {
+fn run_compile(json_path: &PathBuf, secrets_dir: Option<&Path>) {
+    match compile(json_path, secrets_dir) {
         Ok(output) => print!("{output}"),
         Err(e) => {
             eprintln!("{e}");
@@ -158,13 +175,13 @@ mod tests {
         )
         .unwrap();
         fs::write(secrets_path.join("s.json"), r#"{"wifi_pass": "secret123"}"#).unwrap();
-        let output = compile(&json_path, Some(secrets_path.to_str().unwrap())).unwrap();
+        let output = compile(&json_path, Some(&secrets_path)).unwrap();
         assert!(output.contains("set wifi.radio0.key='secret123'"));
     }
 
     #[test]
     fn convert_file_missing_file() {
-        let err = compile(Path::new("/tmp/nonexistent_xyz.json"), None).unwrap_err();
+        let err = compile(&PathBuf::from("/tmp/nonexistent_xyz.json"), None).unwrap_err();
         assert!(err.0.contains("No such file"));
     }
 

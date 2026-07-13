@@ -7,18 +7,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        openwrt-version: ["latest", "23.05", "24.10"]
-        include:
-          - openwrt-version: "latest"
-            test-label: "latest (apk)"
-          - openwrt-version: "23.05"
-            test-label: "23.05 (opkg)"
-          - openwrt-version: "24.10"
-            test-label: "24.10 (opkg)"
-    name: Test (${{ matrix.test-label }})
+    name: Test (opkg + apk)
     steps:
       - uses: actions/checkout@v4
       - name: Install Nix with flake support
@@ -37,8 +26,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Run Rust unit tests
         run: nix develop --command cargo test
-      - name: Run container integration tests (OpenWrt ${{ matrix.openwrt-version }})
+      - name: Run integration tests (opkg + apk)
         env:
           CONTAINER_ENGINE: docker
-          OPENWRT_VERSION: ${{ matrix.openwrt-version }}
         run: nix develop --command python3 -m pytest test/integration_test.py -v --tb=short

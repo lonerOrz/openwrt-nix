@@ -27,6 +27,14 @@ impl Default for DeployConfig {
 fn build_ssh_args(config: &DeployConfig, is_scp: bool) -> Vec<String> {
     let mut args = vec![
         "-o".into(),
+        "StrictHostKeyChecking=no".into(),
+        "-o".into(),
+        "BatchMode=yes".into(),
+        "-o".into(),
+        "IdentitiesOnly=yes".into(),
+        "-o".into(),
+        "UserKnownHostsFile=/dev/null".into(),
+        "-o".into(),
         "ControlMaster=auto".into(),
         "-o".into(),
         "ControlPath=/tmp/ssh-%r@%h:%p".into(),
