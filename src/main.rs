@@ -25,7 +25,7 @@ fn compile(path: &Path, secrets_dir: Option<&str>) -> Result<String, ConfigError
     validate_root(&root)?;
 
     // Decrypt SOPS files embedded in the JSON (if any)
-    let mut secrets = deploy::decrypt_sops_mem(&root)?;
+    let mut secrets = secrets::decrypt_sops_mem(&root)?;
     // Merge with directory-based secrets (if provided)
     if let Some(dir_path) = secrets_dir {
         secrets.extend(load_secrets_dir(dir_path)?);

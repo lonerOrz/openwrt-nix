@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 use crate::error::ConfigError;
 use crate::generator::{serialize_package_management, serialize_uci};
 use crate::models::{PkgBackend, Root};
+use crate::secrets::decrypt_sops_mem;
 use crate::validation::validate_root;
 
 const SSH_OPTS: &[&str] = &[
@@ -76,51 +77,6 @@ fn scp_to_target(target: &str, local_path: &Path, remote_path: &str) -> Result<(
         )));
     }
     Ok(())
-}
-
-/// Decrypt SOPS files in memory — no temp files, no tempfile dependency.
-pub(crate) fn decrypt_sops_mem(root: &Root) -> Result<HashMap<String, String>, ConfigError> {
-    let mut secrets = HashMap::new();
-    let sops_files = match root.secrets.as_ref().and_then(|s| s.sops.as_ref()) {
-        Some(sops) => &sops.files,
-        None => return Ok(secrets),
-    };
-
-    for file in sops_files {
-        if !Path::new(file).exists() {
-            return Err(ConfigError(format!(
-                "Configured SOPS file not found: {file}"
-            )));
-        }
-
-        let output = Command::new("sops")
-            .args(["-d", "--output-type", "json", file])
-            .output()
-            .map_err(|e| ConfigError(format!("Failed to run sops: {e}")))?;
-
-        if !output.status.success() {
-            return Err(ConfigError(format!("Failed to decrypt sops file: {file}")));
-        }
-
-        let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
-            .map_err(|e| ConfigError(format!("Failed to parse decrypted JSON: {e}")))?;
-
-        if let Some(obj) = parsed.as_object() {
-            for (k, v) in obj {
-                if k == "sops" {
-                    continue;
-                }
-                let val = match v {
-                    serde_json::Value::String(s) => s.clone(),
-                    serde_json::Value::Number(n) => n.to_string(),
-                    serde_json::Value::Bool(b) => b.to_string(),
-                    _ => v.to_string(),
-                };
-                secrets.insert(k.clone(), val);
-            }
-        }
-    }
-    Ok(secrets)
 }
 
 fn transfer_packages(target: &str, root: &Root) -> Result<(), ConfigError> {
@@ -281,7 +237,13 @@ pub(crate) fn run(json_path: &Path, target: &str) -> Result<(), ConfigError> {
         None,
     );
 
-    // 8. Setup tinc VPN (if configured)
+    // 8. Setup & sync tinc VPN (if configured)
+    let _ = deploy_tinc_vpn(target);
+
+    Ok(())
+}
+
+fn deploy_tinc_vpn(target: &str) -> Result<(), ConfigError> {
     let _ = ssh_exec(
         target,
         "if [ ! -f /etc/tinc/retiolum/rsa_key.priv ]; then \
@@ -292,7 +254,6 @@ pub(crate) fn run(json_path: &Path, target: &str) -> Result<(), ConfigError> {
         None,
     );
 
-    // 9. Sync tinc hosts directory via tar pipe (no rsync dependency)
     let hosts_path = Path::new("/etc/tinc/retiolum/hosts");
     if hosts_path.exists() && fs::read_dir(hosts_path).is_ok_and(|mut d| d.next().is_some()) {
         let tar_output = Command::new("tar")
@@ -308,6 +269,5 @@ pub(crate) fn run(json_path: &Path, target: &str) -> Result<(), ConfigError> {
             );
         }
     }
-
     Ok(())
 }

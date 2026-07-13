@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
+use std::process::Command;
 
 pub(crate) fn interpolate_secrets<'a>(
     option_val: &'a str,
@@ -154,6 +155,50 @@ pub(crate) fn load_secrets_dir(dir_path: &str) -> Result<HashMap<String, String>
                         )));
                     }
                 }
+            }
+        }
+    }
+    Ok(secrets)
+}
+
+pub(crate) fn decrypt_sops_mem(root: &Root) -> Result<HashMap<String, String>, ConfigError> {
+    let mut secrets = HashMap::new();
+    let sops_files = match root.secrets.as_ref().and_then(|s| s.sops.as_ref()) {
+        Some(sops) => &sops.files,
+        None => return Ok(secrets),
+    };
+
+    for file in sops_files {
+        if !Path::new(file).exists() {
+            return Err(ConfigError(format!(
+                "Configured SOPS file not found: {file}"
+            )));
+        }
+
+        let output = Command::new("sops")
+            .args(["-d", "--output-type", "json", file])
+            .output()
+            .map_err(|e| ConfigError(format!("Failed to run sops: {e}")))?;
+
+        if !output.status.success() {
+            return Err(ConfigError(format!("Failed to decrypt sops file: {file}")));
+        }
+
+        let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .map_err(|e| ConfigError(format!("Failed to parse decrypted JSON: {e}")))?;
+
+        if let Some(obj) = parsed.as_object() {
+            for (k, v) in obj {
+                if k == "sops" {
+                    continue;
+                }
+                let val = match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::Bool(b) => b.to_string(),
+                    _ => v.to_string(),
+                };
+                secrets.insert(k.clone(), val);
             }
         }
     }

@@ -6,12 +6,7 @@
   sops,
 }:
 let
-  nuci = pkgs.callPackage ./nuci.nix {
-    rustPlatform = pkgs.makeRustPlatform {
-      cargo = pkgs.cargo;
-      rustc = pkgs.rustc;
-    };
-  };
+  nuci = pkgs.callPackage ./nuci.nix { };
 in
 {
   writeUci =

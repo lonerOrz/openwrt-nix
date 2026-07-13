@@ -16,12 +16,50 @@ fn is_valid_uci_type(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
+fn validate_section_map(
+    map: &serde_json::Map<String, Value>,
+    config_name: &str,
+    section_path: &str,
+) -> Result<(), ConfigError> {
+    let ty = map.get("_type").and_then(|v| v.as_str()).ok_or_else(|| {
+        ConfigError(format!(
+            "{config_name}.{section_path} missing required '_type'"
+        ))
+    })?;
+
+    if !is_valid_uci_type(ty) {
+        return Err(ConfigError(format!(
+            "Invalid type '{ty}' in {config_name}.{section_path}: only [a-zA-Z0-9_-] allowed"
+        )));
+    }
+
+    for (opt_name, opt_val) in iter_options(map) {
+        if !is_valid_uci_identifier(opt_name) {
+            return Err(ConfigError(format!(
+                "Invalid option '{opt_name}' in {config_name}.{section_path}: only [a-zA-Z0-9_-] allowed"
+            )));
+        }
+        if matches!(opt_val, Value::Null) {
+            return Err(ConfigError(format!(
+                "{config_name}.{section_path}.{opt_name} has null value"
+            )));
+        }
+        if let Value::String(s) = opt_val
+            && s.is_empty()
+        {
+            eprintln!(
+                "Warning: {config_name}.{section_path}.{opt_name} is empty string — UCI treats '' as unset. Consider omitting it."
+            );
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_root(root: &Root) -> Result<(), ConfigError> {
     for (config_name, sections) in &root.settings {
         if !is_valid_uci_identifier(config_name) {
             return Err(ConfigError(format!(
-                "Invalid config name '{}': only [a-zA-Z0-9_-] allowed",
-                config_name
+                "Invalid config name '{config_name}': only [a-zA-Z0-9_-] allowed"
             )));
         }
 
@@ -30,100 +68,27 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), ConfigError> {
                 Section::List(arr) => {
                     if arr.is_empty() {
                         return Err(ConfigError(format!(
-                            "Empty list section '{}' in config '{}' is not supported: its UCI type cannot be determined. To remove a section, omit it from your Nix configuration.",
-                            section_name, config_name
+                            "Empty list section '{section_name}' in config '{config_name}' is not supported: its UCI type cannot be determined. To remove a section, omit it from your Nix configuration."
                         )));
                     }
                     if !is_valid_uci_type(section_name) {
                         return Err(ConfigError(format!(
-                            "Invalid list identifier '{}' in config '{}': only [a-zA-Z0-9_-] allowed",
-                            section_name, config_name
+                            "Invalid list identifier '{section_name}' in config '{config_name}': only [a-zA-Z0-9_-] allowed"
                         )));
                     }
 
                     for (idx, item) in arr.iter().enumerate() {
-                        let ty = item.get("_type").and_then(|v| v.as_str()).ok_or_else(|| {
-                            ConfigError(format!(
-                                "{}.@{}[{}] missing required '_type'",
-                                config_name, section_name, idx
-                            ))
-                        })?;
-
-                        if !is_valid_uci_type(ty) {
-                            return Err(ConfigError(format!(
-                                "Invalid type '{}' in {}.@{}[{}]: only [a-zA-Z0-9_-] allowed",
-                                ty, config_name, section_name, idx
-                            )));
-                        }
-
-                        for (opt_name, opt_val) in iter_options(item) {
-                            if !is_valid_uci_identifier(opt_name) {
-                                return Err(ConfigError(format!(
-                                    "Invalid option '{}' in {}.@{}[{}]: only [a-zA-Z0-9_-] allowed",
-                                    opt_name, config_name, section_name, idx
-                                )));
-                            }
-                            if matches!(opt_val, Value::Null) {
-                                return Err(ConfigError(format!(
-                                    "{}.@{}[{}].{} has null value",
-                                    config_name, section_name, idx, opt_name
-                                )));
-                            }
-                            if let Value::String(s) = opt_val
-                                && s.is_empty()
-                            {
-                                eprintln!(
-                                    "Warning: {}.{}[{}].{} is empty string — UCI treats '' as unset. Consider omitting it.",
-                                    config_name, section_name, idx, opt_name
-                                );
-                            }
-                        }
+                        let path = format!("@{section_name}[{idx}]");
+                        validate_section_map(item, config_name, &path)?;
                     }
                 }
                 Section::Named(map) => {
                     if !is_valid_uci_identifier(section_name) {
                         return Err(ConfigError(format!(
-                            "Invalid section '{}' in config '{}': only [a-zA-Z0-9_-] allowed",
-                            section_name, config_name
+                            "Invalid section '{section_name}' in config '{config_name}': only [a-zA-Z0-9_-] allowed"
                         )));
                     }
-
-                    let ty = map.get("_type").and_then(|v| v.as_str()).ok_or_else(|| {
-                        ConfigError(format!(
-                            "{}.{} missing required '_type'",
-                            config_name, section_name
-                        ))
-                    })?;
-
-                    if !is_valid_uci_type(ty) {
-                        return Err(ConfigError(format!(
-                            "Invalid type '{}' in {}.{}: only [a-zA-Z0-9_-] allowed",
-                            ty, config_name, section_name
-                        )));
-                    }
-
-                    for (opt_name, opt_val) in iter_options(map) {
-                        if !is_valid_uci_identifier(opt_name) {
-                            return Err(ConfigError(format!(
-                                "Invalid option '{}' in {}.{}: only [a-zA-Z0-9_-] allowed",
-                                opt_name, config_name, section_name
-                            )));
-                        }
-                        if matches!(opt_val, Value::Null) {
-                            return Err(ConfigError(format!(
-                                "{}.{}.{} has null value",
-                                config_name, section_name, opt_name
-                            )));
-                        }
-                        if let Value::String(s) = opt_val
-                            && s.is_empty()
-                        {
-                            eprintln!(
-                                "Warning: {}.{}.{} is empty string — UCI treats '' as unset. Consider omitting it.",
-                                config_name, section_name, opt_name
-                            );
-                        }
-                    }
+                    validate_section_map(map, config_name, section_name)?;
                 }
             }
         }
