@@ -1546,3 +1546,148 @@ class TestPersistentWatchdog:
                 " /etc/rc.d/S15nuci_rollback /tmp/.uci-watchdog-pid",
                 check=False,
             )
+
+
+class TestUnifiedLifecycle:
+    """Step 15: Verify the complete Day-1 Bootstrap -> Day-2 Deploy lifecycle."""
+
+    def test_firmware_derivation_evaluates(self):
+        """Verify that the firmware package derivation evaluates successfully.
+
+        Uses nix eval to check that our Nix code produces a valid derivation.
+        May fail when upstream OpenWrt package hashes are stale in the
+        nix-openwrt-imagebuilder cache — skip gracefully in that case.
+        """
+        r = run(
+            [
+                "nix",
+                "eval",
+                f"path:{PROJECT_ROOT}#firmware",
+                "--json",
+            ],
+            check=False,
+        )
+        if r.returncode != 0 and "hash mismatch" in (r.stderr or ""):
+            pytest.skip("Upstream imagebuilder cache hashes are stale — not our bug")
+        assert r.returncode == 0, f"Firmware derivation evaluation failed:\n{r.stderr}"
+        assert "openwrt-" in r.stdout, f"Expected firmware store path in output:\n{r.stdout}"
+
+    def test_sops_validation_on_bootstrap(self):
+        """Verify that compiling a configuration with raw placeholders fails in --no-sops mode."""
+        bad_json = Path(f"/tmp/nuci_bad_bootstrap_{SESSION_ID}.json")
+        bad_json.write_text("""{
+          "packageManager": "opkg",
+          "settings": {
+            "wireless": {
+              "default_radio0": {
+                "_type": "wifi-iface",
+                "key": "@wifi_password@"
+              }
+            }
+          }
+        }""")
+
+        try:
+            r = run(
+                [
+                    "cargo",
+                    "run",
+                    "--",
+                    "compile",
+                    str(bad_json),
+                    "--no-sops",
+                ],
+                check=False,
+            )
+            assert r.returncode != 0
+            assert "Tried to use secret wifi_password" in r.stderr
+        finally:
+            bad_json.unlink(missing_ok=True)
+
+    def test_bootstrap_and_deploy_flow(self, test_json_opkg: Path):
+        """Simulate the entire Day-1 (Bootstrap) to Day-2 (Deploy) lifecycle on a clean target."""
+        bootstrap_json = Path(f"/tmp/nuci_bootstrap_{SESSION_ID}.json")
+        bootstrap_json.write_text("""{
+          "packageManager": "opkg",
+          "settings": {
+            "wireless": {
+              "default_radio0": {
+                "_type": "wifi-iface",
+                "device": "radio0",
+                "network": "lan",
+                "mode": "ap",
+                "ssid": "gchq-2.4",
+                "encryption": "sae-mixed",
+                "key": "CHANGE_ME_ON_DEPLOY"
+              }
+            }
+          }
+        }""")
+
+        try:
+            # 1. Day-1: compile a bootstrap config with no secrets
+            r = run(
+                [
+                    "cargo",
+                    "run",
+                    "--",
+                    "compile",
+                    str(bootstrap_json),
+                    "--no-sops",
+                ]
+            )
+            assert r.returncode == 0
+            bootstrap_commands = r.stdout
+            assert "CHANGE_ME_ON_DEPLOY" in bootstrap_commands
+            assert "@wifi_password@" not in bootstrap_commands
+
+            # 2. Simulate first boot: execute uci-defaults bootstrap logic in container
+            bootstrap_script = f"""#!/bin/sh
+uci -q batch <<'UCI'
+{bootstrap_commands}
+UCI
+uci commit
+"""
+            podman_exec(CONTAINER_NAME, bootstrap_script)
+
+            check_uci_value(
+                CONTAINER_NAME,
+                "wireless.default_radio0.key",
+                "CHANGE_ME_ON_DEPLOY",
+                "[Lifecycle Day-1] WiFi Key",
+            )
+
+            # 3. Day-2: deploy with SOPS-decrypted secrets via SSH
+            env = os.environ.copy()
+            env["SOPS_AGE_KEY_FILE"] = str(SOPS_KEY_DIR / "keys.txt")
+            env["NUCI_WATCHDOG_TIMEOUT"] = "10"
+
+            r = run(
+                [
+                    "cargo",
+                    "run",
+                    "--",
+                    "deploy",
+                    str(test_json_opkg),
+                    "--target",
+                    "root@127.0.0.1",
+                    "--port",
+                    str(MAIN_SSH_PORT),
+                    "--identity",
+                    str(SSH_KEY_PATH),
+                    "--force",
+                ],
+                env=env,
+                timeout=120,
+            )
+            assert r.returncode == 0, f"Day-2 deploy failed:\n{r.stderr}\n{r.stdout}"
+
+            check_uci_value(
+                CONTAINER_NAME,
+                "wireless.default_radio0.key",
+                "my-test-password",
+                "[Lifecycle Day-2] WiFi Key",
+            )
+
+        finally:
+            bootstrap_json.unlink(missing_ok=True)
