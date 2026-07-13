@@ -11,6 +11,22 @@ pub(crate) struct Root {
     pub(crate) settings: BTreeMap<String, BTreeMap<String, Section>>,
     pub(crate) packages: Option<Vec<String>>,
     pub(crate) opkg: Option<Opkg>,
+    #[serde(rename = "sshKeys", default)]
+    pub(crate) ssh_keys: Vec<String>,
+    #[serde(default)]
+    pub(crate) secrets: Option<SopsConfig>,
+}
+
+#[derive(Deserialize, Debug, Default)]
+pub(crate) struct SopsConfig {
+    #[serde(default)]
+    pub(crate) sops: Option<SopsFiles>,
+}
+
+#[derive(Deserialize, Debug, Default)]
+pub(crate) struct SopsFiles {
+    #[serde(default)]
+    pub(crate) files: Vec<String>,
 }
 
 fn default_package_manager() -> String {

@@ -1,3 +1,4 @@
+mod deploy;
 mod error;
 mod generator;
 mod helpers;
@@ -5,7 +6,6 @@ mod models;
 mod secrets;
 mod validation;
 
-use std::collections::HashMap;
 use std::env;
 use std::fs::File;
 use std::io::BufReader;
@@ -17,16 +17,18 @@ use models::{PkgBackend, Root};
 use secrets::{load_secrets_dir, resolve_secrets};
 use validation::validate_root;
 
-fn convert_file(path: &Path, secrets_dir: Option<&str>) -> Result<String, ConfigError> {
+fn compile(path: &Path, secrets_dir: Option<&str>) -> Result<String, ConfigError> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
 
     let root: Root = serde_json::from_reader(reader)?;
     validate_root(&root)?;
 
-    let mut secrets = HashMap::new();
+    // Decrypt SOPS files embedded in the JSON (if any)
+    let mut secrets = deploy::decrypt_sops_mem(&root)?;
+    // Merge with directory-based secrets (if provided)
     if let Some(dir_path) = secrets_dir {
-        secrets = load_secrets_dir(dir_path)?;
+        secrets.extend(load_secrets_dir(dir_path)?);
     }
 
     let resolved_root = resolve_secrets(root, &secrets)?;
@@ -47,17 +49,34 @@ fn convert_file(path: &Path, secrets_dir: Option<&str>) -> Result<String, Config
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    if args.len() < 2 {
-        eprintln!("USAGE: {} JSON_FILE [SECRETS_DIR]", args[0]);
-        std::process::exit(1);
+    let args_slice: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+    match args_slice.as_slice() {
+        [_, "compile", json, secrets_dir] => run_compile(json, Some(secrets_dir)),
+        [_, "compile", json] => run_compile(json, None),
+        [_, "deploy", json, "--target", host] | [_, "deploy", json, "-t", host] => {
+            if let Err(e) = deploy::run(Path::new(json), host) {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        // Backward compat: bare .json path = compile
+        [_, json, secrets_dir] if json.ends_with(".json") => run_compile(json, Some(secrets_dir)),
+        [_, json] if json.ends_with(".json") => run_compile(json, None),
+        _ => {
+            eprintln!(
+                "USAGE:\n  nuci compile <JSON_FILE> [SECRETS_DIR]\n  nuci deploy <JSON_FILE> --target <HOST>"
+            );
+            std::process::exit(1);
+        }
     }
+}
 
-    let secrets_dir = args.get(2).map(|s| s.as_str());
-
-    match convert_file(Path::new(&args[1]), secrets_dir) {
-        Ok(output) => print!("{}", output),
+fn run_compile(json_path: &str, secrets_dir: Option<&str>) {
+    match compile(Path::new(json_path), secrets_dir) {
+        Ok(output) => print!("{output}"),
         Err(e) => {
-            eprintln!("{}", e);
+            eprintln!("{e}");
             std::process::exit(1);
         }
     }
@@ -85,7 +104,7 @@ mod tests {
         }"#,
         )
         .unwrap();
-        let output = convert_file(&json_path, None).unwrap();
+        let output = compile(&json_path, None).unwrap();
         assert!(output.contains("delete system.system"));
         assert!(output.contains("set system.system.hostname='test'"));
         assert!(output.contains("commit system"));
@@ -110,13 +129,13 @@ mod tests {
         )
         .unwrap();
         fs::write(secrets_path.join("s.json"), r#"{"wifi_pass": "secret123"}"#).unwrap();
-        let output = convert_file(&json_path, Some(secrets_path.to_str().unwrap())).unwrap();
+        let output = compile(&json_path, Some(secrets_path.to_str().unwrap())).unwrap();
         assert!(output.contains("set wifi.radio0.key='secret123'"));
     }
 
     #[test]
     fn convert_file_missing_file() {
-        let err = convert_file(Path::new("/tmp/nonexistent_xyz.json"), None).unwrap_err();
+        let err = compile(Path::new("/tmp/nonexistent_xyz.json"), None).unwrap_err();
         assert!(err.0.contains("No such file"));
     }
 
@@ -125,7 +144,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let json_path = dir.path().join("bad.json");
         fs::write(&json_path, "not json").unwrap();
-        let err = convert_file(&json_path, None).unwrap_err();
+        let err = compile(&json_path, None).unwrap_err();
         assert!(err.0.contains("Failed to parse JSON"));
     }
 
@@ -142,7 +161,7 @@ mod tests {
         }"#,
         )
         .unwrap();
-        let output = convert_file(&json_path, None).unwrap();
+        let output = compile(&json_path, None).unwrap();
         assert!(output.contains("printf '' > /etc/opkg/customfeeds.conf"));
         assert!(output.contains("src/gz custom https://example.com/repo"));
     }
@@ -160,7 +179,7 @@ mod tests {
         }"#,
         )
         .unwrap();
-        let output = convert_file(&json_path, None).unwrap();
+        let output = compile(&json_path, None).unwrap();
         assert!(output.contains("for pkg in luci tcpdump"));
         assert!(output.contains("opkg update && opkg install luci tcpdump"));
     }
@@ -178,7 +197,7 @@ mod tests {
         }"#,
         )
         .unwrap();
-        let output = convert_file(&json_path, None).unwrap();
+        let output = compile(&json_path, None).unwrap();
         assert!(output.contains("opkg list-installed \"foo\""));
         assert!(output.contains("opkg install /tmp/foo_1.0.ipk"));
     }
@@ -196,7 +215,7 @@ mod tests {
         }"#,
         )
         .unwrap();
-        let output = convert_file(&json_path, None).unwrap();
+        let output = compile(&json_path, None).unwrap();
         assert!(output.contains("'\\''"));
     }
 
@@ -217,7 +236,7 @@ mod tests {
         }"#,
         )
         .unwrap();
-        let output = convert_file(&json_path, None).unwrap();
+        let output = compile(&json_path, None).unwrap();
         assert!(output.contains("/etc/apk/repositories.d/customfeeds.list"));
         assert!(output.contains("apk -U add"));
         assert!(output.contains("apk add --allow-untrusted /tmp/foo_1.0_all.apk"));

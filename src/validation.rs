@@ -125,6 +125,8 @@ mod tests {
             settings: BTreeMap::from([("network-config".into(), BTreeMap::new())]),
             packages: None,
             opkg: None,
+            ssh_keys: vec![],
+            secrets: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(err.0.contains("Invalid config name"));
@@ -142,6 +144,8 @@ mod tests {
             )]),
             packages: None,
             opkg: None,
+            ssh_keys: vec![],
+            secrets: None,
         };
         assert!(validate_root(&root).is_ok());
     }
@@ -159,6 +163,8 @@ mod tests {
             )]),
             packages: None,
             opkg: None,
+            ssh_keys: vec![],
+            secrets: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(err.0.contains("Invalid option"));
@@ -176,6 +182,8 @@ mod tests {
             )]),
             packages: None,
             opkg: None,
+            ssh_keys: vec![],
+            secrets: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(err.0.contains("Invalid section"));
@@ -194,6 +202,8 @@ mod tests {
             )]),
             packages: None,
             opkg: None,
+            ssh_keys: vec![],
+            secrets: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(err.0.contains("null value"));
@@ -211,6 +221,8 @@ mod tests {
             )]),
             packages: None,
             opkg: None,
+            ssh_keys: vec![],
+            secrets: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(err.0.contains("missing required '_type'"));
@@ -228,6 +240,8 @@ mod tests {
             )]),
             packages: None,
             opkg: None,
+            ssh_keys: vec![],
+            secrets: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(err.0.contains("missing required '_type'"));
@@ -243,6 +257,8 @@ mod tests {
             )]),
             packages: None,
             opkg: None,
+            ssh_keys: vec![],
+            secrets: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(err.0.contains("Empty list section"));
@@ -261,6 +277,8 @@ mod tests {
             )]),
             packages: None,
             opkg: None,
+            ssh_keys: vec![],
+            secrets: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(err.0.contains("Invalid option"));
@@ -273,6 +291,8 @@ mod tests {
             settings: BTreeMap::new(),
             packages: None,
             opkg: None,
+            ssh_keys: vec![],
+            secrets: None,
         };
         assert!(validate_root(&root).is_ok());
     }

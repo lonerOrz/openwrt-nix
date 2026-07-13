@@ -235,6 +235,8 @@ mod tests {
             settings,
             packages: None,
             opkg: None,
+            ssh_keys: vec![],
+            secrets: None,
         };
 
         let secs = secrets(&[("wifi_pass", "secret123")]);
@@ -264,6 +266,8 @@ mod tests {
             settings,
             packages: None,
             opkg: None,
+            ssh_keys: vec![],
+            secrets: None,
         };
 
         let err = resolve_secrets(root, &secrets(&[("other", "v")])).unwrap_err();
@@ -287,6 +291,8 @@ mod tests {
             settings,
             packages: None,
             opkg: None,
+            ssh_keys: vec![],
+            secrets: None,
         };
 
         let resolved = resolve_secrets(root, &HashMap::new()).unwrap();
@@ -311,6 +317,8 @@ mod tests {
             settings,
             packages: None,
             opkg: None,
+            ssh_keys: vec![],
+            secrets: None,
         };
 
         let resolved = resolve_secrets(root, &HashMap::new()).unwrap();
@@ -335,6 +343,8 @@ mod tests {
             settings,
             packages: None,
             opkg: None,
+            ssh_keys: vec![],
+            secrets: None,
         };
 
         let secs = secrets(&[("port", "22")]);
@@ -357,6 +367,8 @@ mod tests {
                 feeds: Some(vec!["src/gz @repo_name@ https://example.com".into()]),
                 local_packages: None,
             }),
+            ssh_keys: vec![],
+            secrets: None,
         };
 
         let secs = secrets(&[("repo_name", "custom")]);
