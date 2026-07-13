@@ -10,19 +10,47 @@ use crate::models::{PkgBackend, Root};
 use crate::secrets::decrypt_sops_mem;
 use crate::validation::validate_root;
 
-const SSH_OPTS: &[&str] = &[
-    "-o",
-    "ControlMaster=auto",
-    "-o",
-    "ControlPath=/tmp/ssh-%r@%h:%p",
-    "-o",
-    "ControlPersist=5m",
-];
+pub(crate) struct DeployConfig {
+    pub port: u16,
+    pub identity_file: Option<String>,
+}
 
-fn ssh_exec(target: &str, cmd: &str, stdin_data: Option<&[u8]>) -> Result<String, ConfigError> {
-    let mut args: Vec<&str> = SSH_OPTS.to_vec();
-    args.push(target);
-    args.push(cmd);
+impl Default for DeployConfig {
+    fn default() -> Self {
+        Self {
+            port: 22,
+            identity_file: None,
+        }
+    }
+}
+
+fn build_ssh_args(config: &DeployConfig) -> Vec<String> {
+    let mut args = vec![
+        "-o".into(),
+        "ControlMaster=auto".into(),
+        "-o".into(),
+        "ControlPath=/tmp/ssh-%r@%h:%p".into(),
+        "-o".into(),
+        "ControlPersist=5m".into(),
+    ];
+    if config.port != 22 {
+        args.extend(["-p".into(), config.port.to_string()]);
+    }
+    if let Some(ref identity) = config.identity_file {
+        args.extend(["-i".into(), identity.clone()]);
+    }
+    args
+}
+
+fn ssh_exec(
+    target: &str,
+    cmd: &str,
+    stdin_data: Option<&[u8]>,
+    config: &DeployConfig,
+) -> Result<String, ConfigError> {
+    let mut args = build_ssh_args(config);
+    args.push(target.into());
+    args.push(cmd.into());
 
     let mut child = Command::new("ssh")
         .args(&args)
@@ -58,15 +86,22 @@ fn ssh_exec(target: &str, cmd: &str, stdin_data: Option<&[u8]>) -> Result<String
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn scp_to_target(target: &str, local_path: &Path, remote_path: &str) -> Result<(), ConfigError> {
+fn scp_to_target(
+    target: &str,
+    local_path: &Path,
+    remote_path: &str,
+    config: &DeployConfig,
+) -> Result<(), ConfigError> {
     let local_str = local_path
         .to_str()
         .ok_or_else(|| ConfigError("Invalid local path".into()))?;
 
+    let mut args = build_ssh_args(config);
+    args.push(local_str.into());
+    args.push(format!("{target}:{remote_path}"));
+
     let status = Command::new("scp")
-        .args(SSH_OPTS)
-        .arg(local_str)
-        .arg(format!("{target}:{remote_path}"))
+        .args(&args)
         .status()
         .map_err(|e| ConfigError(format!("Failed to spawn scp: {e}")))?;
 
@@ -79,7 +114,7 @@ fn scp_to_target(target: &str, local_path: &Path, remote_path: &str) -> Result<(
     Ok(())
 }
 
-fn transfer_packages(target: &str, root: &Root) -> Result<(), ConfigError> {
+fn transfer_packages(target: &str, root: &Root, config: &DeployConfig) -> Result<(), ConfigError> {
     let local_pkgs = match &root.package_sources {
         Some(sources) => match &sources.local_packages {
             Some(pkgs) => pkgs,
@@ -95,7 +130,7 @@ fn transfer_packages(target: &str, root: &Root) -> Result<(), ConfigError> {
         }
         let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or(pkg);
         eprintln!("Transferring {filename} to {target}:/tmp/ ...");
-        scp_to_target(target, path, &format!("/tmp/{filename}"))?;
+        scp_to_target(target, path, &format!("/tmp/{filename}"), config)?;
     }
     Ok(())
 }
@@ -178,7 +213,11 @@ fn build_remote_script(
     script
 }
 
-pub(crate) fn run(json_path: &Path, target: &str) -> Result<(), ConfigError> {
+pub(crate) fn run(
+    json_path: &Path,
+    target: &str,
+    config: &DeployConfig,
+) -> Result<(), ConfigError> {
     // 1. Parse config
     let file = fs::File::open(json_path)?;
     let root: Root = serde_json::from_reader(std::io::BufReader::new(file))?;
@@ -200,12 +239,12 @@ pub(crate) fn run(json_path: &Path, target: &str) -> Result<(), ConfigError> {
     )?;
 
     // 4. Transfer local packages (separate SCP, can't do in script)
-    transfer_packages(target, &resolved_root)?;
+    transfer_packages(target, &resolved_root, config)?;
 
     // 5. Build and execute the entire remote deployment script in one SSH call
     let remote_script = build_remote_script(&resolved_root, &secrets, &uci_buffer);
     eprintln!("Deploying to {target}...");
-    ssh_exec(target, "sh -s", Some(remote_script.as_bytes()))?;
+    ssh_exec(target, "sh -s", Some(remote_script.as_bytes()), config)?;
 
     // 6. Wait for target to come back, kill rollback watchdog
     eprintln!("Waiting for target to come back (60s rollback window)...");
@@ -216,6 +255,7 @@ pub(crate) fn run(json_path: &Path, target: &str) -> Result<(), ConfigError> {
             target,
             "kill $(cat /tmp/.uci-watchdog-pid) 2>/dev/null",
             None,
+            config,
         )
         .is_ok()
         {
@@ -236,6 +276,7 @@ pub(crate) fn run(json_path: &Path, target: &str) -> Result<(), ConfigError> {
         target,
         "rm -rf /tmp/.uci-rollback-backup /tmp/.uci-watchdog-pid",
         None,
+        config,
     );
 
     Ok(())

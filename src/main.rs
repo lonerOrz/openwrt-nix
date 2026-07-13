@@ -55,7 +55,36 @@ fn main() {
         [_, "compile", json, secrets_dir] => run_compile(json, Some(secrets_dir)),
         [_, "compile", json] => run_compile(json, None),
         [_, "deploy", json, "--target", host] | [_, "deploy", json, "-t", host] => {
-            if let Err(e) = deploy::run(Path::new(json), host) {
+            let mut port: u16 = 22;
+            let mut identity: Option<String> = None;
+            let remaining: Vec<(&str, &str)> = args_slice[5..]
+                .chunks(2)
+                .filter_map(|c| {
+                    if c.len() == 2 {
+                        Some((c[0], c[1]))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for (key, val) in &remaining {
+                match *key {
+                    "--port" | "-p" => {
+                        if let Ok(p) = val.parse() {
+                            port = p;
+                        }
+                    }
+                    "--identity" | "-i" => {
+                        identity = Some(val.to_string());
+                    }
+                    _ => {}
+                }
+            }
+            let config = deploy::DeployConfig {
+                port,
+                identity_file: identity,
+            };
+            if let Err(e) = deploy::run(Path::new(json), host, &config) {
                 eprintln!("{e}");
                 std::process::exit(1);
             }
@@ -65,7 +94,7 @@ fn main() {
         [_, json] if json.ends_with(".json") => run_compile(json, None),
         _ => {
             eprintln!(
-                "USAGE:\n  nuci compile <JSON_FILE> [SECRETS_DIR]\n  nuci deploy <JSON_FILE> --target <HOST>"
+                "USAGE:\n  nuci compile <JSON_FILE> [SECRETS_DIR]\n  nuci deploy <JSON_FILE> --target <HOST> [--port PORT] [--identity FILE]"
             );
             std::process::exit(1);
         }
