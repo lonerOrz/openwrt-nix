@@ -26,6 +26,6 @@ RUN printf 'root\nroot\n' | passwd root
 
 EXPOSE 22
 
-RUN printf '#!/bin/sh\n/etc/init.d/dropbear start\nexec sleep infinity\n' \
+RUN printf '#!/bin/sh\n/usr/sbin/dropbear -F -E -p 22 -R\nexec sleep infinity\n' \
     > /start.sh && chmod +x /start.sh
 CMD ["/start.sh"]
