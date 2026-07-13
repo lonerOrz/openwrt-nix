@@ -1,4 +1,5 @@
 mod deploy;
+mod diff;
 mod error;
 mod generator;
 mod helpers;
@@ -54,6 +55,27 @@ enum Command {
         /// Optional directory containing secrets files
         secrets_dir: Option<PathBuf>,
     },
+
+    /// Preview differences between target and compiled config (read-only)
+    Diff {
+        /// Path to the JSON config file
+        json: PathBuf,
+
+        /// SSH target host (user@host)
+        #[arg(short, long)]
+        target: String,
+
+        /// SSH port
+        #[arg(short, long, default_value_t = 22)]
+        port: u16,
+
+        /// Path to SSH identity file
+        #[arg(short, long)]
+        identity: Option<PathBuf>,
+
+        /// Optional directory containing secrets files
+        secrets_dir: Option<PathBuf>,
+    },
 }
 
 fn compile(path: &Path, secrets_dir: Option<&Path>) -> Result<String, ConfigError> {
@@ -84,9 +106,25 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some(Command::Diff {
+            json,
+            target,
+            port,
+            identity,
+            secrets_dir,
+        }) => {
+            let config = deploy::DeployConfig {
+                port,
+                identity_file: identity.map(|p| p.to_string_lossy().into_owned()),
+            };
+            if let Err(e) = diff::run(&json, &target, &config, secrets_dir.as_deref()) {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
         None => {
             eprintln!(
-                "USAGE:\n  nuci compile <JSON_FILE> [SECRETS_DIR]\n  nuci deploy <JSON_FILE> --target <HOST> [--port PORT] [--identity FILE]"
+                "USAGE:\n  nuci compile <JSON_FILE> [SECRETS_DIR]\n  nuci diff <JSON_FILE> --target <HOST> [--port PORT] [--identity FILE]\n  nuci deploy <JSON_FILE> --target <HOST> [--port PORT] [--identity FILE]"
             );
             std::process::exit(1);
         }

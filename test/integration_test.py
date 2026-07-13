@@ -1013,6 +1013,58 @@ class TestRealDeploy:
             check=False,
         )
 
+    def test_nuci_diff_after_deploy(self, test_json_opkg: Path):
+        """Deploy config, then verify nuci diff shows no pending changes."""
+        env = os.environ.copy()
+        env["SOPS_AGE_KEY_FILE"] = str(SOPS_KEY_DIR / "keys.txt")
+        env["NUCI_WATCHDOG_TIMEOUT"] = "10"
+
+        # Deploy first (self-contained — doesn't depend on prior test)
+        r = run(
+            [
+                "cargo",
+                "run",
+                "--",
+                "deploy",
+                str(test_json_opkg),
+                "--target",
+                "root@127.0.0.1",
+                "--port",
+                str(MAIN_SSH_PORT),
+                "--identity",
+                str(SSH_KEY_PATH),
+            ],
+            check=False,
+            env=env,
+            timeout=120,
+        )
+        assert r.returncode == 0, f"nuci deploy (setup) failed:\n{r.stderr}\n{r.stdout}"
+
+        # Now diff — should show 0 changes
+        r = run(
+            [
+                "cargo",
+                "run",
+                "--",
+                "diff",
+                str(test_json_opkg),
+                "--target",
+                "root@127.0.0.1",
+                "--port",
+                str(MAIN_SSH_PORT),
+                "--identity",
+                str(SSH_KEY_PATH),
+            ],
+            check=False,
+            env=env,
+            timeout=60,
+        )
+        assert r.returncode == 0, f"nuci diff failed:\n{r.stderr}\n{r.stdout}"
+        assert "Summary:" in r.stdout, f"Missing summary in diff output:\n{r.stdout}"
+        assert "0 to add" in r.stdout, f"Expected 0 additions:\n{r.stdout}"
+        assert "0 to remove" in r.stdout, f"Expected 0 removals:\n{r.stdout}"
+        assert "0 to change" in r.stdout, f"Expected 0 changes:\n{r.stdout}"
+
 
 class TestWatchdogRollback:
     """Step 13: Test watchdog rollback."""

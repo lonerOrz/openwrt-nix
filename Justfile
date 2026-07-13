@@ -53,8 +53,7 @@ ssh +command:
 
 # Dry-run: Preview UCI changes on the router without applying them
 dry-run:
-	@echo "🔍 Simulating configuration changes on root@{{host}}..."
-	@(just eval-config | sed 's/uci commit/uci changes/' && echo "uci revert") | just ssh 'sh -s'
+	cargo run -- diff example.nix --target "root@{{host}}"
 
 # Apply configuration to router (SSH keys, password, packages, UCI, tinc — all hermetic)
 apply:

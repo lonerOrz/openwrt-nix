@@ -39,7 +39,7 @@ fn build_ssh_args(config: &DeployConfig, is_scp: bool) -> Vec<String> {
     args
 }
 
-fn ssh_exec(
+pub(crate) fn ssh_exec(
     target: &str,
     cmd: &str,
     stdin_data: Option<&[u8]>,
