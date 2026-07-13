@@ -212,7 +212,8 @@ fn build_remote_script(
         }
 
         script.push_str(&format!(
-            "mkdir -p /etc/dropbear/ && umask 177 && cat > /etc/dropbear/authorized_keys <<'SSHKEYS'\n{keys}\nSSHKEYS\n"
+            "mkdir -p /etc/dropbear/ && umask 177 && cat > /etc/dropbear/authorized_keys <<'SSHKEYS'\n{keys}\nSSHKEYS\n\
+             chmod 700 /etc/dropbear && chmod 600 /etc/dropbear/authorized_keys\n"
         ));
     }
 
@@ -220,7 +221,13 @@ fn build_remote_script(
     if let Some(pwd) = secrets.get("root_password")
         && !pwd.is_empty()
     {
-        script.push_str(&format!("chpasswd <<'CHPWD'\nroot:{pwd}\nCHPWD\n"));
+        script.push_str(&format!(
+            "if command -v chpasswd >/dev/null 2>&1; then\n\
+             chpasswd <<'CHPWD'\nroot:{pwd}\nCHPWD\n\
+             else\n\
+             printf '{pwd}\\n{pwd}\\n' | passwd root >/dev/null 2>&1\n\
+             fi\n"
+        ));
     }
 
     // 3. Persistent backup + boot-time self-destructing rollback hook
@@ -240,6 +247,7 @@ fn build_remote_script(
     script.push_str("BOOT_EOF\n");
     script.push_str("chmod +x /etc/init.d/nuci_rollback\n");
     script.push_str("ln -sf /etc/init.d/nuci_rollback /etc/rc.d/S15nuci_rollback\n");
+    script.push_str("sync\n");
 
     // 4. UCI commands (piped from compile)
     script.push_str(uci_commands);
@@ -250,7 +258,7 @@ fn build_remote_script(
         std::env::var("NUCI_WATCHDOG_TIMEOUT").unwrap_or_else(|_| "60".to_string());
     let reload_cmds = reload_commands(modified_configs, service_map);
     script.push_str(&format!(
-        "( sleep {watchdog_timeout}; \
+        "( trap '' HUP; sleep {watchdog_timeout}; \
           if [ -d /etc/.uci-rollback-backup ]; then \
               cp -a /etc/.uci-rollback-backup/* /etc/config/; \
               {reload_cmds} \
