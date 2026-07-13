@@ -25,7 +25,7 @@ fn build_ssh_args(config: &DeployConfig) -> Vec<String> {
         "-o".into(),
         "ControlMaster=auto".into(),
         "-o".into(),
-        "ControlPath=/tmp/ssh-%r@%h:%p".into(),
+        "ControlPath=/tmp/ssh-%C".into(),
         "-o".into(),
         "ControlPersist=5m".into(),
     ];
@@ -300,7 +300,12 @@ pub(crate) fn run(
         &modified_configs,
     );
     eprintln!("Deploying to {target}...");
-    ssh_exec(target, "sh -s", Some(remote_script.as_bytes()), config)?;
+    ssh_exec(
+        target,
+        "cat > /tmp/deploy.sh && sh /tmp/deploy.sh",
+        Some(remote_script.as_bytes()),
+        config,
+    )?;
 
     // 4. Wait for target to come back, kill rollback watchdog
     eprintln!("Waiting for target to come back (60s rollback window)...");
@@ -330,7 +335,7 @@ pub(crate) fn run(
     // 5. Cleanup — remove persistent backup, boot hook, and watchdog PID
     let _ = ssh_exec(
         target,
-        "rm -rf /etc/.uci-rollback-backup /etc/init.d/nuci_rollback /etc/rc.d/S15nuci_rollback /tmp/.uci-watchdog-pid",
+        "rm -rf /etc/.uci-rollback-backup /etc/init.d/nuci_rollback /etc/rc.d/S15nuci_rollback /tmp/.uci-watchdog-pid /tmp/deploy.sh",
         None,
         config,
     );
