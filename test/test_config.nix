@@ -31,7 +31,7 @@
     "luci"
     "tcpdump"
   ];
-  uci.opkg = {
+  uci.packageSources = {
     feeds = [
       "src/gz custom https://example.com/packages"
     ];

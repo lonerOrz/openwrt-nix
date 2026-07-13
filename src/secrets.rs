@@ -104,8 +104,8 @@ pub(crate) fn resolve_secrets(
         }
     }
 
-    if let Some(opkg) = &mut root.opkg
-        && let Some(feeds) = &mut opkg.feeds
+    if let Some(sources) = &mut root.package_sources
+        && let Some(feeds) = &mut sources.feeds
     {
         for feed in feeds {
             let interpolated = interpolate_secrets(feed, secrets)?;
@@ -163,7 +163,7 @@ pub(crate) fn load_secrets_dir(dir_path: &str) -> Result<HashMap<String, String>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::Opkg;
+    use crate::models::PackageSources;
     use serde_json::Map;
     use std::collections::BTreeMap;
     use std::fs;
@@ -234,7 +234,7 @@ mod tests {
             package_manager: "opkg".into(),
             settings,
             packages: None,
-            opkg: None,
+            package_sources: None,
             ssh_keys: vec![],
             secrets: None,
         };
@@ -265,7 +265,7 @@ mod tests {
             package_manager: "opkg".into(),
             settings,
             packages: None,
-            opkg: None,
+            package_sources: None,
             ssh_keys: vec![],
             secrets: None,
         };
@@ -290,7 +290,7 @@ mod tests {
             package_manager: "opkg".into(),
             settings,
             packages: None,
-            opkg: None,
+            package_sources: None,
             ssh_keys: vec![],
             secrets: None,
         };
@@ -316,7 +316,7 @@ mod tests {
             package_manager: "opkg".into(),
             settings,
             packages: None,
-            opkg: None,
+            package_sources: None,
             ssh_keys: vec![],
             secrets: None,
         };
@@ -342,7 +342,7 @@ mod tests {
             package_manager: "opkg".into(),
             settings,
             packages: None,
-            opkg: None,
+            package_sources: None,
             ssh_keys: vec![],
             secrets: None,
         };
@@ -363,7 +363,7 @@ mod tests {
             package_manager: "opkg".into(),
             settings: BTreeMap::new(),
             packages: None,
-            opkg: Some(Opkg {
+            package_sources: Some(PackageSources {
                 feeds: Some(vec!["src/gz @repo_name@ https://example.com".into()]),
                 local_packages: None,
             }),
@@ -373,7 +373,7 @@ mod tests {
 
         let secs = secrets(&[("repo_name", "custom")]);
         let resolved = resolve_secrets(root, &secs).unwrap();
-        let feeds = resolved.opkg.unwrap().feeds.unwrap();
+        let feeds = resolved.package_sources.unwrap().feeds.unwrap();
         assert_eq!(feeds[0], "src/gz custom https://example.com");
     }
 

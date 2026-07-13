@@ -12,7 +12,7 @@ use std::io::BufReader;
 use std::path::Path;
 
 use error::ConfigError;
-use generator::{serialize_opkg, serialize_uci};
+use generator::{serialize_package_management, serialize_uci};
 use models::{PkgBackend, Root};
 use secrets::{load_secrets_dir, resolve_secrets};
 use validation::validate_root;
@@ -37,10 +37,10 @@ fn compile(path: &Path, secrets_dir: Option<&str>) -> Result<String, ConfigError
     serialize_uci(&mut output_buffer, &resolved_root.settings)?;
 
     let backend = PkgBackend::from_str(&resolved_root.package_manager);
-    serialize_opkg(
+    serialize_package_management(
         &mut output_buffer,
         backend,
-        resolved_root.opkg.as_ref(),
+        resolved_root.package_sources.as_ref(),
         resolved_root.packages.as_deref(),
     )?;
 
@@ -157,7 +157,7 @@ mod tests {
             r#"{
             "packageManager": "opkg",
             "settings": {},
-            "opkg": { "feeds": ["src/gz custom https://example.com/repo"] }
+            "packageSources": { "feeds": ["src/gz custom https://example.com/repo"] }
         }"#,
         )
         .unwrap();
@@ -193,7 +193,7 @@ mod tests {
             r#"{
             "packageManager": "opkg",
             "settings": {},
-            "opkg": { "localPackages": ["./pkg/foo_1.0.ipk"] }
+            "packageSources": { "localPackages": ["./pkg/foo_1.0.ipk"] }
         }"#,
         )
         .unwrap();
@@ -211,7 +211,7 @@ mod tests {
             r#"{
             "packageManager": "opkg",
             "settings": {},
-            "opkg": { "feeds": ["src/gz test it's a feed"] }
+            "packageSources": { "feeds": ["src/gz test it's a feed"] }
         }"#,
         )
         .unwrap();
@@ -229,7 +229,7 @@ mod tests {
             "packageManager": "apk",
             "settings": {},
             "packages": ["luci"],
-            "opkg": {
+            "packageSources": {
                 "feeds": ["https://example.com/packages"],
                 "localPackages": ["./pkg/foo_1.0_all.apk"]
             }

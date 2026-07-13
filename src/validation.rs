@@ -143,7 +143,7 @@ mod tests {
             package_manager: "opkg".into(),
             settings: BTreeMap::from([("network-config".into(), BTreeMap::new())]),
             packages: None,
-            opkg: None,
+            package_sources: None,
             ssh_keys: vec![],
             secrets: None,
         };
@@ -161,7 +161,7 @@ mod tests {
                 BTreeMap::from([("radio0".into(), Section::Named(obj))]),
             )]),
             packages: None,
-            opkg: None,
+            package_sources: None,
             ssh_keys: vec![],
             secrets: None,
         };
@@ -180,7 +180,7 @@ mod tests {
                 BTreeMap::from([("lan".into(), Section::Named(obj))]),
             )]),
             packages: None,
-            opkg: None,
+            package_sources: None,
             ssh_keys: vec![],
             secrets: None,
         };
@@ -198,7 +198,7 @@ mod tests {
                 BTreeMap::from([("my-section".into(), Section::Named(obj))]),
             )]),
             packages: None,
-            opkg: None,
+            package_sources: None,
             ssh_keys: vec![],
             secrets: None,
         };
@@ -217,7 +217,7 @@ mod tests {
                 BTreeMap::from([("lan".into(), Section::Named(obj))]),
             )]),
             packages: None,
-            opkg: None,
+            package_sources: None,
             ssh_keys: vec![],
             secrets: None,
         };
@@ -236,7 +236,7 @@ mod tests {
                 BTreeMap::from([("lan".into(), Section::Named(obj))]),
             )]),
             packages: None,
-            opkg: None,
+            package_sources: None,
             ssh_keys: vec![],
             secrets: None,
         };
@@ -255,7 +255,7 @@ mod tests {
                 BTreeMap::from([("dropbear".into(), Section::List(vec![item]))]),
             )]),
             packages: None,
-            opkg: None,
+            package_sources: None,
             ssh_keys: vec![],
             secrets: None,
         };
@@ -272,7 +272,7 @@ mod tests {
                 BTreeMap::from([("wifi-iface".into(), Section::List(vec![]))]),
             )]),
             packages: None,
-            opkg: None,
+            package_sources: None,
             ssh_keys: vec![],
             secrets: None,
         };
@@ -292,7 +292,7 @@ mod tests {
                 BTreeMap::from([("dropbear".into(), Section::List(vec![item]))]),
             )]),
             packages: None,
-            opkg: None,
+            package_sources: None,
             ssh_keys: vec![],
             secrets: None,
         };
@@ -305,7 +305,7 @@ mod tests {
             package_manager: "opkg".into(),
             settings: BTreeMap::new(),
             packages: None,
-            opkg: None,
+            package_sources: None,
             ssh_keys: vec![],
             secrets: None,
         };
@@ -318,7 +318,7 @@ mod tests {
             package_manager: "opkg".into(),
             settings: BTreeMap::from([("3network".into(), BTreeMap::new())]),
             packages: None,
-            opkg: None,
+            package_sources: None,
             ssh_keys: vec![],
             secrets: None,
         };
@@ -338,7 +338,7 @@ mod tests {
                 BTreeMap::from([("lan".into(), Section::Named(obj))]),
             )]),
             packages: None,
-            opkg: None,
+            package_sources: None,
             ssh_keys: vec![],
             secrets: None,
         };

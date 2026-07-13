@@ -300,14 +300,14 @@ check_json_apk() {
 check_json_opkg '.packages | length == 2' "packages: 2 defined"
 check_json_opkg '.packages | index("luci") != null' "packages: 'luci' present"
 check_json_opkg '.packages | index("tcpdump") != null' "packages: 'tcpdump' present"
-check_json_opkg '.opkg.feeds | length == 1' "feeds: 1 defined"
+check_json_opkg '.packageSources.feeds | length == 1' "feeds: 1 defined"
 check_json_opkg '.sshKeys | length == 1' "sshKeys: 1 defined"
 check_json_opkg '.sshKeys[0] | startswith("ssh-ed25519")' "sshKeys: key type correct"
 check_json_opkg '.settings.wireless.default_radio0.ssid == "gchq-2.4"' "json: ssid in settings"
 check_json_opkg '.packageManager == "opkg"' "packageManager metadata is 'opkg'"
 
 check_json_apk '.packages | length == 2' "packages: 2 defined"
-check_json_apk '.opkg.feeds | length == 1' "feeds: 1 defined"
+check_json_apk '.packageSources.feeds | length == 1' "feeds: 1 defined"
 check_json_apk '.packageManager == "apk"' "packageManager metadata is 'apk'"
 
 # ── 10. Test watchdog rollback ──

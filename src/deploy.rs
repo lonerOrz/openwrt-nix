@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::error::ConfigError;
-use crate::generator::{serialize_opkg, serialize_uci};
+use crate::generator::{serialize_package_management, serialize_uci};
 use crate::models::{PkgBackend, Root};
 use crate::validation::validate_root;
 
@@ -124,8 +124,8 @@ pub(crate) fn decrypt_sops_mem(root: &Root) -> Result<HashMap<String, String>, C
 }
 
 fn transfer_packages(target: &str, root: &Root) -> Result<(), ConfigError> {
-    let local_pkgs = match &root.opkg {
-        Some(opkg) => match &opkg.local_packages {
+    let local_pkgs = match &root.package_sources {
+        Some(sources) => match &sources.local_packages {
             Some(pkgs) => pkgs,
             None => return Ok(()),
         },
@@ -235,10 +235,10 @@ pub(crate) fn run(json_path: &Path, target: &str) -> Result<(), ConfigError> {
     let mut uci_buffer = String::with_capacity(4096);
     serialize_uci(&mut uci_buffer, &resolved_root.settings)?;
     let backend = PkgBackend::from_str(&resolved_root.package_manager);
-    serialize_opkg(
+    serialize_package_management(
         &mut uci_buffer,
         backend,
-        resolved_root.opkg.as_ref(),
+        resolved_root.package_sources.as_ref(),
         resolved_root.packages.as_deref(),
     )?;
 

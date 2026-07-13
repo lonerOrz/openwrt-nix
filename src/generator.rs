@@ -1,6 +1,6 @@
 use crate::error::ConfigError;
 use crate::helpers::{escape_single_quotes, extract_package_name, iter_options};
-use crate::models::{Opkg, PkgBackend, Section};
+use crate::models::{PackageSources, PkgBackend, Section};
 use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -132,14 +132,14 @@ pub(crate) fn serialize_uci(
     Ok(())
 }
 
-pub(crate) fn serialize_opkg(
+pub(crate) fn serialize_package_management(
     writer: &mut String,
     backend: PkgBackend,
-    opkg: Option<&Opkg>,
+    sources: Option<&PackageSources>,
     packages: Option<&[String]>,
 ) -> Result<(), ConfigError> {
-    if let Some(opkg_val) = opkg
-        && let Some(feeds) = &opkg_val.feeds
+    if let Some(src_val) = sources
+        && let Some(feeds) = &src_val.feeds
         && !feeds.is_empty()
     {
         match backend {
@@ -216,8 +216,8 @@ pub(crate) fn serialize_opkg(
         }
     }
 
-    if let Some(opkg_val) = opkg
-        && let Some(local_pkgs) = &opkg_val.local_packages
+    if let Some(src_val) = sources
+        && let Some(local_pkgs) = &src_val.local_packages
     {
         for ipk_path_str in local_pkgs {
             let ipk_path = Path::new(ipk_path_str);
@@ -430,18 +430,18 @@ mod tests {
     #[test]
     fn test_serialize_opkg_empty() {
         let mut w = String::new();
-        serialize_opkg(&mut w, PkgBackend::Opkg, None, None).unwrap();
+        serialize_package_management(&mut w, PkgBackend::Opkg, None, None).unwrap();
         assert!(w.is_empty());
     }
 
     #[test]
     fn test_serialize_opkg_feeds_opkg() {
         let mut w = String::new();
-        let opkg = Opkg {
+        let sources = PackageSources {
             feeds: Some(vec!["src/gz custom 'test' https://example.com".into()]),
             local_packages: None,
         };
-        serialize_opkg(&mut w, PkgBackend::Opkg, Some(&opkg), None).unwrap();
+        serialize_package_management(&mut w, PkgBackend::Opkg, Some(&sources), None).unwrap();
         assert!(w.contains("/etc/opkg/customfeeds.conf"));
         assert!(w.contains("printf '%s\\n' 'src/gz custom '\\''test'\\'' https://example.com'"));
     }
@@ -449,11 +449,11 @@ mod tests {
     #[test]
     fn test_serialize_opkg_feeds_apk() {
         let mut w = String::new();
-        let opkg = Opkg {
+        let sources = PackageSources {
             feeds: Some(vec!["https://example.com/packages".into()]),
             local_packages: None,
         };
-        serialize_opkg(&mut w, PkgBackend::Apk, Some(&opkg), None).unwrap();
+        serialize_package_management(&mut w, PkgBackend::Apk, Some(&sources), None).unwrap();
         assert!(w.contains("/etc/apk/repositories.d/customfeeds.list"));
         assert!(w.contains("printf '%s\\n' 'https://example.com/packages'"));
     }
@@ -462,7 +462,7 @@ mod tests {
     fn test_serialize_opkg_packages_opkg() {
         let mut w = String::new();
         let pkgs = vec!["luci".into(), "tcpdump".into()];
-        serialize_opkg(&mut w, PkgBackend::Opkg, None, Some(&pkgs)).unwrap();
+        serialize_package_management(&mut w, PkgBackend::Opkg, None, Some(&pkgs)).unwrap();
         assert!(w.contains("NEED_INSTALL=false"));
         assert!(w.contains("opkg list-installed"));
         assert!(w.contains("opkg update && opkg install luci tcpdump"));
@@ -472,7 +472,7 @@ mod tests {
     fn test_serialize_opkg_packages_apk() {
         let mut w = String::new();
         let pkgs = vec!["luci".into(), "tcpdump".into()];
-        serialize_opkg(&mut w, PkgBackend::Apk, None, Some(&pkgs)).unwrap();
+        serialize_package_management(&mut w, PkgBackend::Apk, None, Some(&pkgs)).unwrap();
         assert!(w.contains("NEED_INSTALL=false"));
         assert!(w.contains("apk info -e"));
         assert!(w.contains("apk -U add luci tcpdump"));
@@ -481,11 +481,11 @@ mod tests {
     #[test]
     fn test_serialize_opkg_local_packages_opkg() {
         let mut w = String::new();
-        let opkg = Opkg {
+        let sources = PackageSources {
             feeds: None,
             local_packages: Some(vec!["./packages/test_1.0_all.ipk".into()]),
         };
-        serialize_opkg(&mut w, PkgBackend::Opkg, Some(&opkg), None).unwrap();
+        serialize_package_management(&mut w, PkgBackend::Opkg, Some(&sources), None).unwrap();
         assert!(w.contains("opkg list-installed \"test\""));
         assert!(w.contains("opkg install /tmp/test_1.0_all.ipk"));
     }
@@ -493,11 +493,11 @@ mod tests {
     #[test]
     fn test_serialize_opkg_local_packages_apk() {
         let mut w = String::new();
-        let opkg = Opkg {
+        let sources = PackageSources {
             feeds: None,
             local_packages: Some(vec!["./packages/test_1.0_all.apk".into()]),
         };
-        serialize_opkg(&mut w, PkgBackend::Apk, Some(&opkg), None).unwrap();
+        serialize_package_management(&mut w, PkgBackend::Apk, Some(&sources), None).unwrap();
         assert!(w.contains("apk info -e \"test\""));
         assert!(w.contains("apk add --allow-untrusted /tmp/test_1.0_all.apk"));
     }

@@ -181,7 +181,7 @@
     "rsync"
     "htop"
   ];
-  uci.opkg = {
+  uci.packageSources = {
     feeds = [
       "src/gz kiddin9 https://dl.openwrt.ai/packages/aarch64_cortex-a53/kiddin9"
     ];

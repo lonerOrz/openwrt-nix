@@ -10,7 +10,8 @@ pub(crate) struct Root {
     pub(crate) package_manager: String,
     pub(crate) settings: BTreeMap<String, BTreeMap<String, Section>>,
     pub(crate) packages: Option<Vec<String>>,
-    pub(crate) opkg: Option<Opkg>,
+    #[serde(rename = "packageSources")]
+    pub(crate) package_sources: Option<PackageSources>,
     #[serde(rename = "sshKeys", default)]
     pub(crate) ssh_keys: Vec<String>,
     #[serde(default)]
@@ -49,7 +50,7 @@ impl PkgBackend {
 }
 
 #[derive(Deserialize, Debug)]
-pub(crate) struct Opkg {
+pub(crate) struct PackageSources {
     pub(crate) feeds: Option<Vec<String>>,
     #[serde(rename = "localPackages")]
     pub(crate) local_packages: Option<Vec<String>>,

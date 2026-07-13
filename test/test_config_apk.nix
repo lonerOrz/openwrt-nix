@@ -32,7 +32,7 @@
     "luci"
     "tcpdump"
   ];
-  uci.opkg = {
+  uci.packageSources = {
     feeds = [
       "https://example.com/packages"
     ];

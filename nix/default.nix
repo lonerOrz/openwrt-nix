@@ -34,7 +34,7 @@ in
           settings
           secrets
           packages
-          opkg
+          packageSources
           sshKeys
           ;
       };
