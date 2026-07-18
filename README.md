@@ -88,14 +88,6 @@ apk latest) — no physical router required. They cover compile output, real
 deploys, idempotent list ordering, section deletion, diff accuracy, SSH-key
 lockout prevention, watchdog rollback, and targeted service reloads.
 
-## Layout
-
-```
-src/            Rust: CLI, compile pipeline, deploy, diff, UCI serialization, validation, secrets
-test/           pytest integration suite + container harness + real OpenWrt Containerfiles
-nix/            Nix module options, uci writer, firmware + package builds
-```
-
 ## License
 
 MIT
