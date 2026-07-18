@@ -14,6 +14,23 @@ pub(crate) const SERVICE_SEPARATOR: &str = "===NUCI_SERVICES===";
 pub(crate) const STATE_SEPARATOR: &str = "===NUCI_STATE===";
 
 /// Build a single SSH command that fetches UCI state + discovers init.d service mappings.
+///
+/// NOTE (audit #9): the third branch below greps `/etc/init.d/*` for
+/// `config_load <config>` to guess the owning service. This is a community
+/// heuristic, NOT an official OpenWrt API. OpenWrt has no central
+/// `config -> service` map; each init script declares its own dependencies via
+/// `service_triggers()` / `procd_add_reload_trigger` (see
+/// https://openwrt.org/docs/guide-developer/procd-init-scripts and
+/// `package/system/procd/files/procd.sh`). The official reload mechanism is
+/// `reload_config`, which asks procd (via ubus) to reload only the services
+/// that declared a trigger for the changed config. The grep is a best-effort
+/// last-resort for arbitrary services; common cases (network, wireless) are
+/// handled exactly by the first two branches, and `reload_commands` in
+/// deploy.rs still falls back to `/etc/init.d/<config> reload` when discovery
+/// finds nothing. Per ADR-0010 we intentionally do NOT replace this heuristic
+/// with another one: there is no official inverse lookup to use. Recorded in
+/// the architecture-review audit (candidate #9, Speculative) as a known
+/// tradeoff rather than a defect.
 pub(crate) fn build_discovery_command(managed: &[&str]) -> String {
     format!(
         "for c in {configs}; do uci -q show \"$c\" 2>/dev/null; done; \
