@@ -214,6 +214,34 @@ fn reload_commands(modified: &[String], service_map: &BTreeMap<String, String>) 
     out
 }
 
+/// The boot-time rollback hook: a procd-style init script installed as
+/// `S15nuci_rollback` that, on the next boot, restores `/etc/config` from the
+/// pre-deploy backup and then self-deletes. This is the safety net for a
+/// device that reboots *during* the watchdog window (the watchdog itself only
+/// covers a still-running device). Firing on boot requires procd as PID 1,
+/// which the test harness does not run (see test/containers.py); the hook's
+/// shell logic is unit-tested in isolation via `boot_rollback_hook_restores`.
+fn boot_rollback_hook() -> String {
+    let mut s = String::from("cp -a /etc/config /etc/.uci-rollback-backup\n");
+    s.push_str("mkdir -p /etc/init.d /etc/rc.d\n");
+    s.push_str("cat > /etc/init.d/nuci_rollback <<'BOOT_EOF'\n");
+    s.push_str("#!/bin/sh\n");
+    s.push_str(
+        "if [ \"$1\" = \"boot\" ] || [ \"$1\" = \"start\" ] || [ \"$1\" = \"\" ]; then\n",
+    );
+    s.push_str("    if [ -d /etc/.uci-rollback-backup ]; then\n");
+    s.push_str("        cp -a /etc/.uci-rollback-backup/* /etc/config/\n");
+    s.push_str("        rm -rf /etc/.uci-rollback-backup\n");
+    s.push_str("    fi\n");
+    s.push_str("    rm -f /etc/init.d/nuci_rollback /etc/rc.d/S15nuci_rollback\n");
+    s.push_str("fi\n");
+    s.push_str("BOOT_EOF\n");
+    s.push_str("chmod +x /etc/init.d/nuci_rollback\n");
+    s.push_str("ln -sf /etc/init.d/nuci_rollback /etc/rc.d/S15nuci_rollback\n");
+    s.push_str("timeout 5 sync 2>/dev/null || true\n");
+    s
+}
+
 fn build_remote_script(
     root: &Root,
     secrets: &HashMap<String, String>,
@@ -264,23 +292,7 @@ fn build_remote_script(
     }
 
     // 3. Persistent backup + boot-time self-destructing rollback hook
-    script.push_str("cp -a /etc/config /etc/.uci-rollback-backup\n");
-    script.push_str("mkdir -p /etc/init.d /etc/rc.d\n");
-    script.push_str("cat > /etc/init.d/nuci_rollback <<'BOOT_EOF'\n");
-    script.push_str("#!/bin/sh\n");
-    script.push_str(
-        "if [ \"$1\" = \"boot\" ] || [ \"$1\" = \"start\" ] || [ \"$1\" = \"\" ]; then\n",
-    );
-    script.push_str("    if [ -d /etc/.uci-rollback-backup ]; then\n");
-    script.push_str("        cp -a /etc/.uci-rollback-backup/* /etc/config/\n");
-    script.push_str("        rm -rf /etc/.uci-rollback-backup\n");
-    script.push_str("    fi\n");
-    script.push_str("    rm -f /etc/init.d/nuci_rollback /etc/rc.d/S15nuci_rollback\n");
-    script.push_str("fi\n");
-    script.push_str("BOOT_EOF\n");
-    script.push_str("chmod +x /etc/init.d/nuci_rollback\n");
-    script.push_str("ln -sf /etc/init.d/nuci_rollback /etc/rc.d/S15nuci_rollback\n");
-    script.push_str("timeout 5 sync 2>/dev/null || true\n");
+    script.push_str(&boot_rollback_hook());
 
     // 4. UCI commands (piped from compile)
     script.push_str(uci_commands);
@@ -604,5 +616,63 @@ mod tests {
         // Watchdog kill + cleanup must both have been issued.
         assert!(calls[2].0.contains("kill $(cat /tmp/.uci-watchdog-pid)"));
         assert!(calls[3].0.contains("rm -rf /etc/.uci-rollback-backup"));
+    }
+
+    #[test]
+    fn boot_rollback_hook_restores_and_self_deletes() {
+        use std::fs;
+        use std::process::Command;
+
+        // The harness runs without procd as PID 1, so the hook cannot be
+        // exercised across a real reboot. Instead we run its init-script body
+        // directly (the `if [ "$1" = boot ] ...` block) against a fake /etc
+        // tree, asserting it restores the pre-deploy backup and removes itself.
+        let hook = boot_rollback_hook();
+        let start = hook.find("if [ \"$1\"").expect("hook has boot guard");
+        let end = hook.find("BOOT_EOF\n").expect("hook has heredoc terminator");
+        let body = &hook[start..end];
+
+        let dir = tempfile::tempdir().unwrap();
+        let etc = dir.path().join("etc");
+        fs::create_dir_all(etc.join("config")).unwrap();
+        fs::create_dir_all(etc.join("init.d")).unwrap();
+        fs::create_dir_all(etc.join("rc.d")).unwrap();
+        // Pre-deploy backup with the "good" hostname.
+        fs::create_dir_all(etc.join(".uci-rollback-backup")).unwrap();
+        fs::write(
+            etc.join(".uci-rollback-backup").join("system"),
+            "config system\n\toption hostname 'good'\n",
+        )
+        .unwrap();
+        // Live config corrupted during deploy.
+        fs::write(
+            etc.join("config").join("system"),
+            "config system\n\toption hostname 'CORRUPTED'\n",
+        )
+        .unwrap();
+
+        // Run the hook body with /etc rewritten to our temp root.
+        let script = body.replace("/etc", &etc.to_string_lossy());
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(format!("{script}\n"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "hook body failed: {:?}", out);
+
+        // Backup restored into live config.
+        let restored = fs::read_to_string(etc.join("config").join("system")).unwrap();
+        assert!(restored.contains("good"), "config not restored: {restored}");
+        // Backup consumed.
+        assert!(!etc.join(".uci-rollback-backup").exists(), "backup not removed");
+        // Hook self-deleted.
+        assert!(
+            !etc.join("init.d").join("nuci_rollback").exists(),
+            "init script not removed"
+        );
+        assert!(
+            !etc.join("rc.d").join("S15nuci_rollback").exists(),
+            "rc.d symlink not removed"
+        );
     }
 }
