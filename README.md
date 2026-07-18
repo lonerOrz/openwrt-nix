@@ -1,165 +1,99 @@
 # nuci
 
-Declarative config management for OpenWrt. Define everything in Nix, compile with Rust, deploy over SSH.
+Declarative OpenWrt config: write it in Nix, compile to UCI with Rust, deploy over SSH.
 
 ```
-Nix ──► uci.json ──► nuci ──► SSH pipe ──► Router
-                         │
-                    validates, resolves
-                    secrets, serializes
-                    UCI batch commands
+Nix ──► uci.json ──► nuci ──► SSH ──► Router
 ```
 
-## Why?
+The router only runs a small shell script. All the thinking — validation,
+secret decryption, UCI serialization — happens on your machine.
 
-- Web UI config = no version control, no reproducibility
-- Ansible on a 128MB router = painful
-- Running Nix on the router itself = impossible
+## Why
 
-**nuci** does all the heavy lifting locally. The router just runs a small shell script.
+- LUCI config isn't version-controlled or reproducible.
+- Ansible on a 128MB router is miserable.
+- You can't run Nix on the router itself.
 
-## How it works
+nuci keeps your config in Nix and ships a plain `uci batch` script to the device.
 
-1. You write Nix config with `@placeholder@` for secrets
-2. `nuci compile` → validates, decrypts SOPS, outputs `uci batch` script
-3. `nuci diff` → read-only preview of what would change, including which services would be reloaded
-4. `nuci deploy` → SSHes the script to the router, with rollback safety
+## Workflow
 
-### Deploy pipeline
-
-```
-1. Compile Nix → UCI batch        (local)
-2. Idempotency check              (SSH read-only — skip if unchanged)
-3. Service discovery               (scan target's /etc/init.d/* for config_load bindings)
-4. Transfer local packages         (tar-over-SSH stdin, no SCP dependency)
-5. Persistent backup + watchdog    (/etc/.uci-rollback-backup + boot hook)
-6. Apply UCI changes               (targeted reload, not blanket restart)
-7. Confirm connectivity            (cancel watchdog on success)
-```
-
-### Rollback & self-healing
-
-Before applying changes, nuci saves a persistent backup to `/etc/.uci-rollback-backup` and installs a self-destructing boot hook (`/etc/init.d/nuci_rollback`). If SSH dies mid-deploy:
-
-- **Within 60s**: the watchdog timer fires, restores the backup, and reloads services.
-- **Power cycle**: the boot hook runs on next startup, restores the backup, and deletes itself.
-
-Either way, the router recovers without manual intervention.
-
-### Dynamic service reload
-
-Instead of hardcoding which init.d script handles each UCI config, nuci scans the target device at deploy time:
-
-1. `/etc/init.d/<config>` exists → use it directly
-2. Special case: `wireless` → `/sbin/wifi reload` (non-destructive)
-3. Generic: `grep config_load <name> /etc/init.d/*` → finds the right script (e.g. `dhcp` → `dnsmasq`)
-
-This means custom services and non-standard OpenWrt variants work out of the box.
-
-### Declarative ownership (read this before mixing manual edits)
-
-nuci defines the **end state** of your config, not a delta. To keep UCI
-state deterministic it uses two distinct strategies:
-
-- **Named sections** (e.g. `network.lan`): nuci only deletes a named section
-  if it was declared in Nix and is later removed. Hand-added named sections
-  that nuci does not manage are left untouched.
-- **Anonymous lists** (e.g. `system.@system[0]`, `dropbear.@dropbear[0]`):
-  nuci uses a full-rebuild strategy — it clears _every_ anonymous section of a
-  type it owns (`while uci -q delete <cfg>.@<type>[0]; do :; done`) and then
-  re-adds exactly the items from your Nix config.
-
-Consequence: **do not manually add anonymous sections of a type that nuci
-manages** — they will be wiped on the next `nuci deploy`. Named sections are
-safe to manage outside nuci; anonymous ones are not.
-
-## Quick start
+1. Write Nix config; mark secrets with `@placeholder@`.
+2. `nuci compile` — validates, decrypts SOPS, prints a `uci batch` script.
+3. `nuci diff --target root@router` — read-only preview of changes and which services reload.
+4. `nuci deploy --target root@router` — pipes the script over SSH, with rollback safety.
 
 ```bash
-# Setup
-age-keygen -o age.key
-sops test/secrets.enc.json     # add wifi_password, root_password, etc.
-
-# Edit config
-vim example.nix                 # use @wifi_password@ for secrets
-
-# Deploy
-export ROUTER_HOST=192.168.1.1
-just apply                      # full deploy
-just dry-run                    # preview diff only
+just apply       # full deploy to $ROUTER_HOST
+just dry-run     # diff only
 ```
+
+## How a deploy stays safe
+
+Before touching anything, nuci saves `/etc/.uci-rollback-backup` and installs a
+self-deleting boot hook (`/etc/init.d/nuci_rollback`). If the connection drops:
+
+- **Within ~60s** — a watchdog restores the backup and reloads services.
+- **On reboot** — the boot hook restores the backup on next start, then removes itself.
+
+No manual recovery needed either way.
+
+## Service reloads
+
+Rather than hardcode which init script owns each config, nuci discovers it on
+the target at deploy time:
+
+1. `/etc/init.d/<config>` exists → reload it.
+2. `wireless` → `/sbin/wifi reload` (or `network restart`).
+3. Otherwise it greps `config_load <config>` in `/etc/init.d/*` as a best-effort
+   guess for arbitrary services. The canonical OpenWrt reload path is
+   `reload_config`/procd, which nuci uses when available; this grep is a known
+   heuristic, not an official API.
+
+Reloads are targeted — only services tied to changed configs restart, not the
+whole box.
+
+## Declarative ownership
+
+nuci describes the **end state**, not a diff:
+
+- **Named sections** (`network.lan`): left alone unless you declare and later
+  remove them in Nix. Safe to edit by hand.
+- **Anonymous sections** (`system.@system[0]`): fully rebuilt on each deploy.
+  nuci clears every anonymous section of a type it owns and re-adds yours.
+
+So: don't hand-add anonymous sections of a type nuci manages — they get wiped.
 
 ## CLI
 
 ```
-nuci compile <json> [secrets_dir]
-    Compile Nix JSON config into UCI batch commands (stdout).
-
-nuci deploy <json> --target <user@host> [options]
-    --port <port>                 SSH port (default: 22)
-    --identity <key_file>         SSH identity file
-    --secrets_dir <dir>           Directory containing SOPS secrets
-    --force                       Skip idempotency check, deploy even if unchanged
-
-nuci diff <json> --target <user@host> [options]
-    --port <port>                 SSH port (default: 22)
-    --identity <key_file>         SSH identity file
-    --secrets_dir <dir>           Directory containing SOPS secrets
-
-    Shows colored diff of UCI state + lists which services would be
-    reloaded (auto-discovered from the target's init.d scripts).
+nuci compile <json> [secrets_dir] [--no-sops]
+nuci deploy <json> --target <user@host> [--port PORT] [--identity FILE] [--force]
+nuci diff   <json> --target <user@host> [--port PORT] [--identity FILE]
 ```
+
+`--force` skips the idempotency check and applies regardless.
 
 ## Testing
 
 ```bash
-just test-all      # cargo unit tests + Podman integration suite (per-class isolated real OpenWrt containers)
-just test-unit     # cargo test + mock JSON
+just test-unit          # cargo unit tests
+just test-integration   # real OpenWrt containers via Podman
+just test-all           # both
 ```
 
-Integration tests run real OpenWrt containers via Podman — no physical router needed.
+Integration tests spin up isolated real OpenWrt containers (opkg 23.05.5 and
+apk latest) — no physical router required. They cover compile output, real
+deploys, idempotent list ordering, section deletion, diff accuracy, SSH-key
+lockout prevention, watchdog rollback, and targeted service reloads.
 
-| Test class                  | What it verifies                                  |
-| --------------------------- | ------------------------------------------------- |
-| `TestCommandGeneration`     | UCI batch syntax (opkg + apk)                     |
-| `TestDeployment`            | Deploy + UCI state verification                   |
-| `TestWatchdogRollback`      | Auto-restore after config break                   |
-| `TestPersistentWatchdog`    | Power-cycle recovery via boot hook                |
-| `TestNetworkFaultInjection` | Watchdog under packet loss / blackout             |
-| `TestAgentLockout`          | SSH key lockout prevention                        |
-| `TestRealDeploy`            | End-to-end `nuci deploy` + `nuci diff` binary     |
-| `TestSmartReloadFallback`   | Targeted reload when `/sbin/reload_config` absent |
-
-Each test run gets unique UUID-based container names and dynamic ports — run multiple suites in parallel safely.
-
-## Structure
+## Layout
 
 ```
-src/
-├── main.rs          # CLI (clap), compile, deploy, diff
-├── pipeline.rs      # Shared compile pipeline (parse → validate → decrypt → resolve)
-├── deploy.rs        # SSH transport, tar-over-SSH, watchdog, service discovery
-├── diff.rs          # Read-only diff + dynamic service scanning
-├── generator.rs     # UCI batch serialization
-├── validation.rs    # UCI spec validation
-├── secrets.rs       # SOPS decryption + @placeholder@ resolution
-├── models.rs        # JSON config models
-├── helpers.rs       # Utilities
-└── error.rs         # Structured error enum (Io, Json, Validation, Sops, Deploy)
-
-test/
-├── integration_test.py      # pytest suite (per-class isolated real OpenWrt containers)
-├── containers.py            # Container harness seam (spawn/exec/ssh/teardown)
-├── Containerfile.opkg       # Real OpenWrt 23.05.5 x86-64 (opkg, OpenSSH) target
-├── Containerfile.apk        # Real OpenWrt latest (apk) target
-├── Containerfile.agent-test # Fresh-device (PasswordAuth on, no keys) target
-├── test_config.nix          # opkg test fixture
-└── test_config_apk.nix      # apk test fixture
-
-nix/
-├── default.nix      # writeUci + deployment script
-├── module-options.nix
-└── nuci.nix         # Rust package build
+src/            Rust: CLI, compile pipeline, deploy, diff, UCI serialization, validation, secrets
+test/           pytest integration suite + container harness + real OpenWrt Containerfiles
+nix/            Nix module options, uci writer, firmware + package builds
 ```
 
 ## License
