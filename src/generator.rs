@@ -136,41 +136,11 @@ pub(crate) fn serialize_package_management(
     sources: Option<&PackageSources>,
     packages: Option<&[String]>,
 ) -> Result<(), ConfigError> {
-    if let Some(src_val) = sources
-        && let Some(feeds) = &src_val.feeds
-        && !feeds.is_empty()
-    {
-        match backend {
-            PkgBackend::Opkg => {
-                writeln!(writer, "\nprintf '' > /etc/opkg/customfeeds.conf").unwrap();
-                for feed in feeds {
-                    writeln!(
-                        writer,
-                        "printf '%s\\n' '{}' >> /etc/opkg/customfeeds.conf",
-                        escape_single_quotes(feed)
-                    )
-                    .unwrap();
-                }
-            }
-            PkgBackend::Apk => {
-                writeln!(writer, "\nmkdir -p /etc/apk/repositories.d").unwrap();
-                writeln!(
-                    writer,
-                    "printf '' > /etc/apk/repositories.d/customfeeds.list"
-                )
-                .unwrap();
-                for feed in feeds {
-                    writeln!(
-                        writer,
-                        "printf '%s\\n' '{}' >> /etc/apk/repositories.d/customfeeds.list",
-                        escape_single_quotes(feed)
-                    )
-                    .unwrap();
-                }
-            }
-        }
-    }
-
+    // Install packages BEFORE injecting custom feeds. Package installs only
+    // need the default repos; a dead/example custom feed must not poison the
+    // `apk -U` cache refresh that precedes the install (apk updates every
+    // configured repository, so writing the feed first makes repo installs
+    // flaky when the feed is unreachable).
     if let Some(pkgs) = packages
         && !pkgs.is_empty()
     {
@@ -243,6 +213,41 @@ pub(crate) fn serialize_package_management(
                             .unwrap();
                         writeln!(writer, "fi").unwrap();
                     }
+                }
+            }
+        }
+    }
+
+    if let Some(src_val) = sources
+        && let Some(feeds) = &src_val.feeds
+        && !feeds.is_empty()
+    {
+        match backend {
+            PkgBackend::Opkg => {
+                writeln!(writer, "\nprintf '' > /etc/opkg/customfeeds.conf").unwrap();
+                for feed in feeds {
+                    writeln!(
+                        writer,
+                        "printf '%s\\n' '{}' >> /etc/opkg/customfeeds.conf",
+                        escape_single_quotes(feed)
+                    )
+                    .unwrap();
+                }
+            }
+            PkgBackend::Apk => {
+                writeln!(writer, "\nmkdir -p /etc/apk/repositories.d").unwrap();
+                writeln!(
+                    writer,
+                    "printf '' > /etc/apk/repositories.d/customfeeds.list"
+                )
+                .unwrap();
+                for feed in feeds {
+                    writeln!(
+                        writer,
+                        "printf '%s\\n' '{}' >> /etc/apk/repositories.d/customfeeds.list",
+                        escape_single_quotes(feed)
+                    )
+                    .unwrap();
                 }
             }
         }
