@@ -150,8 +150,7 @@ src/
 test/
 ├── integration_test.py      # pytest suite (per-class isolated real OpenWrt containers)
 ├── containers.py            # Container harness seam (spawn/exec/ssh/teardown)
-├── package-server.py        # .ipk/.apk builder
-├── Containerfile.opkg       # Real OpenWrt 22.03.x (opkg) target
+├── Containerfile.opkg       # Real OpenWrt 23.05.5 x86-64 (opkg, OpenSSH) target
 ├── Containerfile.apk        # Real OpenWrt latest (apk) target
 ├── Containerfile.agent-test # Fresh-device (PasswordAuth on, no keys) target
 ├── test_config.nix          # opkg test fixture

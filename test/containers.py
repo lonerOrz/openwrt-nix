@@ -224,26 +224,11 @@ def _ssh_config_text(ssh_key: Path, port: int) -> str:
 
 
 def _build_test_packages(pkg_dir: Path) -> None:
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location(
-        "package_server", str(PROJECT_ROOT / "test" / "package-server.py")
-    )
-    ps = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(ps)
-
-    for name, ver, deps in [
-        ("test-pkg-a", "1.0-r1", ""),
-        ("test-pkg-b", "2.0-r1", "test-pkg-a"),
-        ("luci-app-test", "0.1-r1", "test-pkg-a"),
-    ]:
-        (pkg_dir / f"{name}_{ver}_all.ipk").write_bytes(
-            ps.build_ipk(name, ver, description=f"Test package {name}", depends=deps)
-        )
-    (pkg_dir / "test-package_1.0_all.ipk").write_bytes(
-        ps.build_ipk("test-package", "1.0", description="Mock test-package")
-    )
-    ps.generate_index_opkg(pkg_dir)
+    # opkg local packages: fetch a real official .ipk from the repo inside a
+    # throwaway opkg container (hand-built .ipk is unnecessary — opkg installs
+    # compliant real packages fine, and using the real repo keeps the test
+    # honest). See _fetch_real_opk.
+    _fetch_real_opk(pkg_dir, "tcpdump", "tcpdump.ipk")
 
     # A real, valid v3 .apk must come from a live apk repo — apk-tools 3.x
     # rejects hand-built packages. Fetch one inside a transient apk container
@@ -253,12 +238,44 @@ def _build_test_packages(pkg_dir: Path) -> None:
     _fetch_real_apk(pkg_dir, "libuci20250120", "libuci20250120.apk")
 
 
+def _fetch_real_opk(pkg_dir: Path, pkg: str, out_name: str) -> None:
+    """Pull a real .ipk from the repo inside a throwaway opkg container.
+
+    opkg installs compliant packages regardless of origin, but fetching the
+    real package from downloads.openwrt.org keeps the local-package deploy
+    path exercised against a genuinely installable artifact.
+    """
+    import uuid as _uuid
+
+    cname = f"nuci-opkfetch-{_uuid.uuid4().hex[:6]}"
+    engine("run", "-d", "--name", cname, "openwrt-test-opkg-env", check=True)
+    try:
+        engine(
+            "exec",
+            cname,
+            "sh",
+            "-c",
+            f"opkg update >/dev/null 2>&1; cd /tmp && opkg download {pkg}",
+            check=True,
+        )
+        inside = (
+            f"f=$(ls /tmp/{pkg}_*.ipk 2>/dev/null | head -n1); "
+            f"[ -n \"$f\" ] && mv \"$f\" /tmp/{out_name} && echo OK"
+        )
+        renamed = engine("exec", cname, "sh", "-c", inside, check=True).stdout.strip()
+        if renamed != "OK":
+            raise RuntimeError(f"opkg download produced no {pkg}_*.ipk in {cname}")
+        engine("cp", f"{cname}:/tmp/{out_name}", str(pkg_dir / out_name), check=True)
+    finally:
+        engine("rm", "-f", cname, check=False)
+
+
 def _fetch_real_apk(pkg_dir: Path, pkg: str, out_name: str) -> None:
     """Pull a real v3 .apk from the repo inside a throwaway apk container.
 
     apk-tools 3.x only installs valid v3 packages; those can't be produced by
-    the in-repo package-server (it emits v2-style archives). The only compliant
-    source is the official repo, reachable from inside the apk container.
+    hand-rolled archives. The only compliant source is the official repo,
+    reachable from inside the apk container.
     """
     import uuid as _uuid
 
@@ -267,7 +284,6 @@ def _fetch_real_apk(pkg_dir: Path, pkg: str, out_name: str) -> None:
     try:
         engine(
             "exec",
-            "-i",
             cname,
             "sh",
             "-c",
@@ -281,7 +297,7 @@ def _fetch_real_apk(pkg_dir: Path, pkg: str, out_name: str) -> None:
             f'[ -n "$f" ] && mv "$f" {out_name} && echo OK'
         )
         renamed = engine(
-            "exec", "-i", cname, "sh", "-c", inside, check=True
+            "exec", cname, "sh", "-c", inside, check=True
         ).stdout.strip()
         if renamed != "OK":
             raise RuntimeError(f"apk fetch produced no {pkg}-*.apk in {cname}")

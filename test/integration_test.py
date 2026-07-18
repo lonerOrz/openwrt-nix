@@ -106,8 +106,8 @@ class TestCommandGeneration:
         assert "add system system" in out
         assert "set system.@system[0].hostname='rauter'" in out
         assert "set wireless.default_radio0.key='my-test-password'" in out
-        assert "opkg update && opkg install luci tcpdump" in out
-        assert "opkg install /tmp/test-package_1.0_all.ipk" in out
+        assert "opkg update && opkg install luci" in out
+        assert "opkg install /tmp/tcpdump.ipk" in out
         assert "set system.@system[0]=system" not in out  # no redundant type set
 
     def test_apk_stream(self):
@@ -131,9 +131,8 @@ class TestDeploy:
         assert opkg_target.uci_get("wireless.default_radio0.key") == "my-test-password"
         assert opkg_target.uci_get("network.lan.proto") == "static"
         # Result-level: packages were actually installed on the target.
-        assert opkg_target.sh_ok("opkg list-installed luci")
-        assert opkg_target.sh_ok("opkg list-installed tcpdump")
-        assert opkg_target.sh_ok("opkg list-installed test-package")
+        assert opkg_target.sh_ok("opkg list-installed luci")  # repo package
+        assert opkg_target.sh_ok("opkg list-installed tcpdump")  # local .ipk (real pkg)
         # Result-level: custom feed was injected with the right content.
         feeds = opkg_target.sh("cat /etc/opkg/customfeeds.conf", check=False)
         assert "src/gz custom https://example.com/packages" in feeds
