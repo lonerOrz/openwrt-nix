@@ -425,6 +425,35 @@ class TestSmartReloadFallback:
             opkg_target.sh("rm -f /tmp/reload_history", check=False)
 
 
+class TestSmartReloadPrimary:
+    """The primary `reload_config` branch is the path real OpenWrt devices
+    take (they ship procd's /sbin/reload_config). The fallback test above
+    deletes it to force the init.d path, so this test exercises the primary
+    branch on the apk container, which keeps reload_config intact.
+
+    We overwrite /sbin/reload_config with a marker script: if the primary
+    `then` branch executes it, the marker appears; if instead the `else`
+    (per-service init.d) branch ran, nothing touches the marker. This proves
+    which branch the deployed script actually took on a device with procd."""
+
+    def test_primary_reload_config_runs(self, apkg_target: Target):
+        apkg_target.sh(
+            "printf '#!/bin/sh\\ntouch /tmp/.reload_config_primary\\n' "
+            "> /sbin/reload_config && chmod +x /sbin/reload_config"
+        )
+        apkg_target.sh("rm -f /tmp/.reload_config_primary")
+        try:
+            r = apkg_target.nuci("deploy", APK_JSON, "--force")
+            assert r.returncode == 0, r.stderr
+            assert apkg_target.wait_reconnect()
+            # Primary branch ran reload_config (not the init.d fallback).
+            assert apkg_target.sh_ok("test -f /tmp/.reload_config_primary"), (
+                "/sbin/reload_config primary branch was not executed"
+            )
+        finally:
+            apkg_target.sh("rm -f /tmp/.reload_config_primary", check=False)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # 10. Day-1 bootstrap -> Day-2 deploy lifecycle
 # ══════════════════════════════════════════════════════════════════════════
