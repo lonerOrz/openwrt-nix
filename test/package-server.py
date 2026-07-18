@@ -99,48 +99,6 @@ def build_ipk(
 
 
 # ---------------------------------------------------------------------------
-# .apk builder (Alpine package format: tar.gz with .PKGINFO + data.tar.gz)
-# ---------------------------------------------------------------------------
-
-
-def build_apk(package: str, version: str, description: str = "") -> bytes:
-    """Build a minimal .apk (Alpine/OpenWrt package) in memory."""
-    pkginfo = (
-        f"pkgname = {package}\n"
-        f"pkgver = {version}\n"
-        f"arch = noarch\n"
-        f"size = 0\n"
-        f"url = http://localhost\n"
-        f"license = MIT\n"
-        f"description = {description or package}\n"
-    )
-
-    with tempfile.NamedTemporaryFile(suffix=".apk", delete=False) as tmp:
-        with tarfile.open(tmp.name, "w:gz", format=tarfile.GNU_FORMAT) as tf:
-            # .PKGINFO
-            info = tarfile.TarInfo(name=".PKGINFO")
-            data = pkginfo.encode()
-            info.size = len(data)
-            tf.addfile(info, io.BytesIO(data))
-
-            # data.tar (empty)
-            data_tar_buf = io.BytesIO()
-            with tarfile.open(
-                fileobj=data_tar_buf, mode="w:", format=tarfile.GNU_FORMAT
-            ) as _:
-                pass  # empty data
-            dt_info = tarfile.TarInfo(name="data.tar")
-            dt_bytes = data_tar_buf.getvalue()
-            dt_info.size = len(dt_bytes)
-            tf.addfile(dt_info, io.BytesIO(dt_bytes))
-
-        with open(tmp.name, "rb") as f:
-            result = f.read()
-        os.unlink(tmp.name)
-    return result
-
-
-# ---------------------------------------------------------------------------
 # Package index generator
 # ---------------------------------------------------------------------------
 
@@ -173,12 +131,6 @@ def generate_index_opkg(pkg_dir: Path) -> None:
     index_content = "\n".join(lines).encode()
     with gzip.open(pkg_dir / "Packages.gz", "wb") as gz:
         gz.write(index_content)
-
-
-def generate_index_apk(pkg_dir: Path) -> None:
-    """Generate apk index."""
-    for apk_file in sorted(pkg_dir.glob("*.apk")):
-        pass  # apk discovers packages by scanning the directory
 
 
 # ---------------------------------------------------------------------------
@@ -239,14 +191,6 @@ def main():
         ]:
             ipk = build_ipk(name, ver, description=f"Test package {name}", depends=deps)
             (pkg_dir / f"{name}_{ver}_all.ipk").write_bytes(ipk)
-
-        # apk packages
-        for name, ver in [
-            ("test-pkg-a", "1.0-r1"),
-            ("test-pkg-b", "2.0-r1"),
-        ]:
-            apk = build_apk(name, ver, description=f"Test package {name}")
-            (pkg_dir / f"{name}-{ver}.apk").write_bytes(apk)
 
         # Generate indices
         generate_index_opkg(pkg_dir)

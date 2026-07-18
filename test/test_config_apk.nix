@@ -29,7 +29,6 @@
     };
   };
   uci.packages = [
-    "luci"
     "tcpdump"
   ];
   uci.packageSources = {
@@ -37,12 +36,12 @@
       "https://example.com/packages"
     ];
     localPackages = [
-      "./packages/test-package_1.0_all.apk"
+      "./packages/libuci20250120.apk"
     ];
   };
   uci.secrets =
     if builtins.pathExists ./secrets.enc.json then { sops.files = [ ./secrets.enc.json ]; } else { };
   uci.sshKeys = [
-    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKey test@host"
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH7Ewu71EOwgtr9yyjNQiorri3c1hTCWGvR+JFEBDK1z openwrt-test"
   ];
 }

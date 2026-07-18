@@ -4,10 +4,11 @@ use std::path::Path;
 use crate::deploy::{DeployConfig, ssh_exec};
 use crate::error::ConfigError;
 use crate::helpers::iter_options;
-use crate::models::Section;
+use crate::models::{PkgBackend, Section};
 use crate::pipeline::compile_config;
 
 pub(crate) const SERVICE_SEPARATOR: &str = "===NUCI_SERVICES===";
+pub(crate) const STATE_SEPARATOR: &str = "===NUCI_STATE===";
 
 /// Build a single SSH command that fetches UCI state + discovers init.d service mappings.
 pub(crate) fn build_discovery_command(managed: &[&str]) -> String {
@@ -30,6 +31,42 @@ pub(crate) fn build_discovery_command(managed: &[&str]) -> String {
         configs = managed.join(" "),
         sep = SERVICE_SEPARATOR,
     )
+}
+
+/// Build a single SSH command that probes the live target for package/key/password
+/// state, so `nuci diff` can mark what is already deployed vs what will change.
+pub(crate) fn build_state_command(packages: &[String], backend: PkgBackend) -> String {
+    let probe = match backend {
+        PkgBackend::Opkg => "opkg list-installed",
+        PkgBackend::Apk => "apk info -e",
+    };
+    let mut cmd = String::new();
+    if !packages.is_empty() {
+        cmd.push_str(&format!(
+            "for p in {}; do {} \"$p\" >/dev/null 2>&1 && echo \"$p:yes\" || echo \"$p:no\"; done; ",
+            packages.join(" "),
+            probe
+        ));
+    }
+    cmd.push_str(&format!(
+        "echo '{sep}'; cat /etc/dropbear/authorized_keys 2>/dev/null; \
+         echo '{sep}'; grep '^root:' /etc/shadow 2>/dev/null | cut -d: -f2",
+        sep = STATE_SEPARATOR
+    ));
+    cmd
+}
+
+/// Parse the `pkg:yes|no` lines into a per-package installed map.
+pub(crate) fn parse_package_state(output: &str) -> BTreeMap<String, bool> {
+    let mut map = BTreeMap::new();
+    for line in output.lines() {
+        if let Some((pkg, st)) = line.trim().split_once(':')
+            && (st == "yes" || st == "no")
+        {
+            map.insert(pkg.to_string(), st == "yes");
+        }
+    }
+    map
 }
 
 /// Parse the service discovery portion of a combined SSH output into `config -> reload command`.
@@ -166,6 +203,27 @@ pub(crate) fn run(
     let remote = parse_uci_show(uci_output);
     let service_map = parse_services(services_output);
 
+    // Probe live target state (packages / keys / password) in one round-trip.
+    let backend = PkgBackend::from_str(&compiled.resolved_root.package_manager);
+    let packages = compiled.resolved_root.packages.clone().unwrap_or_default();
+    let state_cmd = build_state_command(&packages, backend);
+    let state_output = ssh_exec(target, &state_cmd, None, config)?;
+    let state_blocks: Vec<&str> = state_output.split(STATE_SEPARATOR).collect();
+    let pkg_state = parse_package_state(state_blocks.first().copied().unwrap_or(""));
+    let remote_keys = state_blocks
+        .get(1)
+        .map(|s| {
+            s.lines()
+                .filter(|l| !l.trim().is_empty())
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let remote_shadow = state_blocks
+        .get(2)
+        .and_then(|s| s.lines().next())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
     let all_keys: BTreeSet<&String> = remote.keys().chain(desired.keys()).collect();
 
     let (mut adds, mut dels, mut mods, mut same) = (0u32, 0u32, 0u32, 0u32);
@@ -212,6 +270,63 @@ pub(crate) fn run(
                 Some(cmd) => println!("  {cfg} \u{2192} {cmd}"),
                 None => println!("  {cfg} \u{2192} /etc/init.d/{cfg} reload"),
             }
+        }
+    }
+
+    // High-risk changes beyond UCI — surface them so `diff` is a real preview,
+    // marked against the live target state.
+    if let Some(packages) = &compiled.resolved_root.packages {
+        if !packages.is_empty() {
+            println!("\n\x1b[1;35m[Packages]\x1b[0m");
+            for pkg in packages {
+                match pkg_state.get(pkg) {
+                    Some(true) => println!("  \x1b[90m{pkg}  (Installed)\x1b[0m"),
+                    Some(false) => println!("  \x1b[32m+ {pkg}  (To Install)\x1b[0m"),
+                    None => println!("  \x1b[32m+ {pkg}  (To Install)\x1b[0m"),
+                }
+            }
+        }
+    }
+
+    let ssh_keys = &compiled.resolved_root.ssh_keys;
+    if !ssh_keys.is_empty() {
+        let desired_keys: BTreeSet<String> = ssh_keys
+            .iter()
+            .map(|k| {
+                // Take only <keytype> <base64>; ignore the trailing comment.
+                // The comment is non-identifying, so a comment edit alone
+                // won't falsely register as a key change.
+                k.split_whitespace()
+                    .take(2)
+                    .collect::<Vec<&str>>()
+                    .join(" ")
+            })
+            .collect();
+        let missing: Vec<&String> = desired_keys
+            .iter()
+            .filter(|k| !remote_keys.contains(k.as_str()))
+            .collect();
+        println!("\n\x1b[1;35m[SSH Keys] ({} desired)\x1b[0m", ssh_keys.len());
+        if missing.is_empty() {
+            println!(
+                "  \x1b[90mAll {} key(s) already synced\x1b[0m",
+                ssh_keys.len()
+            );
+        } else {
+            println!(
+                "  \x1b[32m+ {}/{} key(s) to deploy\x1b[0m",
+                missing.len(),
+                ssh_keys.len()
+            );
+        }
+    }
+
+    if compiled.secrets.contains_key("root_password") {
+        println!("\n\x1b[1;35m[Root Password]\x1b[0m");
+        if remote_shadow.is_empty() {
+            println!("  \x1b[32mWill be set (target has no root password)\x1b[0m");
+        } else {
+            println!("  \x1b[90mManaged (target root password already set)\x1b[0m");
         }
     }
 
@@ -303,5 +418,29 @@ mod tests {
         assert!(cmd.contains(SERVICE_SEPARATOR));
         assert!(cmd.contains("uci -q show"));
         assert!(cmd.contains("config_load"));
+    }
+
+    #[test]
+    fn build_state_command_opkg_probes_packages() {
+        let cmd = build_state_command(&["luci".into(), "tcpdump".into()], PkgBackend::Opkg);
+        assert!(cmd.contains("opkg list-installed"));
+        assert!(cmd.contains("luci"));
+        assert!(cmd.contains(STATE_SEPARATOR));
+        assert!(cmd.contains("authorized_keys"));
+        assert!(cmd.contains("/etc/shadow"));
+    }
+
+    #[test]
+    fn build_state_command_apk_probes_packages() {
+        let cmd = build_state_command(&["luci".into()], PkgBackend::Apk);
+        assert!(cmd.contains("apk info -e"));
+    }
+
+    #[test]
+    fn parse_package_state_marks_installed() {
+        let out = "luci:yes\ntcpdump:no\n";
+        let map = parse_package_state(out);
+        assert_eq!(map.get("luci"), Some(&true));
+        assert_eq!(map.get("tcpdump"), Some(&false));
     }
 }

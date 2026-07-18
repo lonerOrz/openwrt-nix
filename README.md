@@ -56,6 +56,23 @@ Instead of hardcoding which init.d script handles each UCI config, nuci scans th
 
 This means custom services and non-standard OpenWrt variants work out of the box.
 
+### Declarative ownership (read this before mixing manual edits)
+
+nuci defines the **end state** of your config, not a delta. To keep UCI
+state deterministic it uses two distinct strategies:
+
+- **Named sections** (e.g. `network.lan`): nuci only deletes a named section
+  if it was declared in Nix and is later removed. Hand-added named sections
+  that nuci does not manage are left untouched.
+- **Anonymous lists** (e.g. `system.@system[0]`, `dropbear.@dropbear[0]`):
+  nuci uses a full-rebuild strategy — it clears _every_ anonymous section of a
+  type it owns (`while uci -q delete <cfg>.@<type>[0]; do :; done`) and then
+  re-adds exactly the items from your Nix config.
+
+Consequence: **do not manually add anonymous sections of a type that nuci
+manages** — they will be wiped on the next `nuci deploy`. Named sections are
+safe to manage outside nuci; anonymous ones are not.
+
 ## Quick start
 
 ```bash
@@ -96,7 +113,7 @@ nuci diff <json> --target <user@host> [options]
 ## Testing
 
 ```bash
-just test-all      # 88 unit + 28 integration = 116 tests
+just test-all      # cargo unit tests + Podman integration suite (per-class isolated real OpenWrt containers)
 just test-unit     # cargo test + mock JSON
 ```
 
@@ -131,10 +148,14 @@ src/
 └── error.rs         # Structured error enum (Io, Json, Validation, Sops, Deploy)
 
 test/
-├── integration_test.py      # 28 pytest tests (UUID isolation, dynamic ports)
+├── integration_test.py      # pytest suite (per-class isolated real OpenWrt containers)
+├── containers.py            # Container harness seam (spawn/exec/ssh/teardown)
 ├── package-server.py        # .ipk/.apk builder
-├── Containerfile            # OpenWrt sandbox
-└── test_config.nix          # Test fixture
+├── Containerfile.opkg       # Real OpenWrt 22.03.x (opkg) target
+├── Containerfile.apk        # Real OpenWrt latest (apk) target
+├── Containerfile.agent-test # Fresh-device (PasswordAuth on, no keys) target
+├── test_config.nix          # opkg test fixture
+└── test_config_apk.nix      # apk test fixture
 
 nix/
 ├── default.nix      # writeUci + deployment script

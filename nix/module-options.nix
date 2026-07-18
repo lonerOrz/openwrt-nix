@@ -7,7 +7,7 @@
         "opkg"
         "apk"
       ];
-      description = "Package manager backend: opkg (OpenWrt ≤24.10) or apk (OpenWrt ≥25.12).";
+      description = "Package manager backend: opkg (OpenWrt ≤23.05) or apk (OpenWrt 24.10+).";
     };
     settings = lib.mkOption {
       default = { };

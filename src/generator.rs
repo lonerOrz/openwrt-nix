@@ -506,4 +506,24 @@ mod tests {
         assert!(w.contains("apk info -e \"test\""));
         assert!(w.contains("apk add --allow-untrusted /tmp/test_1.0_all.apk"));
     }
+
+    #[test]
+    fn serialize_list_rebuilds_every_item() {
+        // Every list section emits a `delete @type[0]` clear loop, so removing an
+        // item from the Nix config makes it disappear on the target (full rebuild).
+        let mut configs = IndexMap::new();
+        let mut sections = IndexMap::new();
+        let mut item = Map::new();
+        item.insert("_type".into(), Value::String("dropbear".into()));
+        item.insert("Port".into(), Value::String("22".into()));
+        sections.insert("dropbear".into(), Section::List(vec![item]));
+        configs.insert("dropbear".into(), sections);
+
+        let mut w = String::new();
+        serialize_uci(&mut w, &configs).unwrap();
+
+        assert!(w.contains("while uci -q delete dropbear.@dropbear[0]; do :; done"));
+        let add_count = w.matches("add dropbear dropbear").count();
+        assert_eq!(add_count, 1);
+    }
 }

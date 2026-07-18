@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -7,8 +7,9 @@ use crate::diff::{
     SERVICE_SEPARATOR, build_discovery_command, extract_desired_map, parse_services, parse_uci_show,
 };
 use crate::error::ConfigError;
-use crate::models::Root;
+use crate::models::{Root, Section};
 use crate::pipeline::compile_config;
+use indexmap::IndexMap;
 
 pub(crate) struct DeployConfig {
     pub port: u16,
@@ -274,6 +275,36 @@ fn build_remote_script(
     script
 }
 
+/// Emit `uci delete` for named sections that exist on the target but are no
+/// longer declared in the Nix config. Anonymous list sections are skipped —
+/// they have no stable identity to match against across redeploys.
+fn orphan_delete_commands(
+    remote: &BTreeMap<String, String>,
+    desired: &IndexMap<String, IndexMap<String, Section>>,
+) -> String {
+    let desired_named: HashSet<String> = desired
+        .iter()
+        .flat_map(|(config, sections)| {
+            sections.iter().filter_map(move |(name, section)| {
+                matches!(section, Section::Named(_)).then(|| format!("{config}.{name}"))
+            })
+        })
+        .collect();
+
+    let mut out = String::new();
+    for key in remote.keys() {
+        // A named-section root key from `uci show` looks like `config.name`
+        // (exactly one dot, no '@' anonymous marker, no '[index]').
+        if key.contains('@') || key.contains('[') || key.matches('.').count() != 1 {
+            continue;
+        }
+        if !desired_named.contains(key) {
+            out.push_str(&format!("uci -q delete {key}\n"));
+        }
+    }
+    out
+}
+
 pub(crate) fn run(
     json_path: &Path,
     target: &str,
@@ -287,8 +318,8 @@ pub(crate) fn run(
 
     // Combined idempotency check + service discovery (single SSH round-trip)
     let mut service_map = BTreeMap::new();
+    let mut remote_map: BTreeMap<String, String> = BTreeMap::new();
 
-    // Combined idempotency check + service discovery (single SSH round-trip)
     if !managed_refs.is_empty() {
         let discovery_cmd = build_discovery_command(&managed_refs);
         if let Ok(remote_output) = ssh_exec(target, &discovery_cmd, None, config) {
@@ -297,19 +328,23 @@ pub(crate) fn run(
             let services_output = parts.next().unwrap_or("");
 
             service_map = parse_services(services_output);
-
-            if !config.force {
-                let remote_map = parse_uci_show(uci_output);
-                let desired_map = extract_desired_map(&compiled.resolved_root.settings);
-                if remote_map == desired_map {
-                    eprintln!(
-                        "Configuration on {target} is already up-to-date. Skipping deployment."
-                    );
-                    return Ok(());
-                }
-            }
+            remote_map = parse_uci_show(uci_output);
         }
     }
+
+    let desired_map = extract_desired_map(&compiled.resolved_root.settings);
+    // Sections present on the target but removed from the Nix config must be
+    // cleared, so "delete from Nix" actually deletes on the router.
+    let orphan_cmds = orphan_delete_commands(&remote_map, &compiled.resolved_root.settings);
+    let has_orphans = !orphan_cmds.is_empty();
+
+    if !config.force && !has_orphans && remote_map == desired_map {
+        eprintln!("Configuration on {target} is already up-to-date. Skipping deployment.");
+        return Ok(());
+    }
+
+    // Prepend orphan-section deletions so removed Nix sections are cleared on target.
+    let uci_commands = format!("{orphan_cmds}{}", compiled.uci_batch);
 
     transfer_packages(target, &compiled.resolved_root, config)?;
 
@@ -317,7 +352,7 @@ pub(crate) fn run(
     let remote_script = build_remote_script(
         &compiled.resolved_root,
         &compiled.secrets,
-        &compiled.uci_batch,
+        &uci_commands,
         deployer_key.as_deref(),
         &managed_configs,
         &service_map,
@@ -409,5 +444,54 @@ mod tests {
     fn reload_fallback_to_generic_initd() {
         let out = reload_commands(&["custom-svc".into()], &BTreeMap::new());
         assert!(out.contains("/etc/init.d/custom-svc reload"));
+    }
+
+    #[test]
+    fn orphan_deletes_unmanaged_named_sections() {
+        use indexmap::IndexMap;
+        use serde_json::Map;
+
+        let mut obj = Map::new();
+        obj.insert(
+            "_type".into(),
+            serde_json::Value::String("interface".into()),
+        );
+        let mut sections = IndexMap::new();
+        sections.insert("lan".into(), Section::Named(obj));
+        let mut settings = IndexMap::new();
+        settings.insert("network".into(), sections);
+
+        // Remote has network.lan (declared) + network.guest (not declared).
+        let mut remote = BTreeMap::new();
+        remote.insert("network.lan".into(), "interface".into());
+        remote.insert("network.guest".into(), "interface".into());
+        remote.insert("network.lan.proto".into(), "static".into());
+        remote.insert("network.@interface[0]".into(), "interface".into());
+
+        let cmds = orphan_delete_commands(&remote, &settings);
+        assert!(cmds.contains("uci -q delete network.guest"));
+        assert!(!cmds.contains("uci -q delete network.lan"));
+        // Anonymous sections must never be deleted by this path.
+        assert!(!cmds.contains("uci -q delete network.@interface"));
+    }
+
+    #[test]
+    fn orphan_empty_when_all_declared() {
+        use indexmap::IndexMap;
+        use serde_json::Map;
+
+        let mut obj = Map::new();
+        obj.insert(
+            "_type".into(),
+            serde_json::Value::String("interface".into()),
+        );
+        let mut sections = IndexMap::new();
+        sections.insert("lan".into(), Section::Named(obj));
+        let mut settings = IndexMap::new();
+        settings.insert("network".into(), sections);
+
+        let mut remote = BTreeMap::new();
+        remote.insert("network.lan".into(), "interface".into());
+        assert!(orphan_delete_commands(&remote, &settings).is_empty());
     }
 }
