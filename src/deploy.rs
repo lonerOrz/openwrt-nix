@@ -289,6 +289,27 @@ fn build_remote_script(
         ));
     }
 
+    // 2.5. Custom files
+    if let Some(files) = &root.files {
+        for (i, file) in files.iter().enumerate() {
+            let dest = &file.path;
+            let dir = Path::new(dest).parent().unwrap_or(Path::new("/"));
+            let dir_str = dir.to_string_lossy();
+            script.push_str(&format!("mkdir -p '{dir_str}'\n"));
+            script.push_str(&format!("cat > '{dest}' <<'NUCI_FILE_{i}_EOF'\n"));
+            script.push_str(&file.content);
+            if !file.content.ends_with('\n') {
+                script.push('\n');
+            }
+            script.push_str(&format!("NUCI_FILE_{i}_EOF\n"));
+            if file.executable {
+                script.push_str(&format!("chmod 755 '{dest}'\n"));
+            } else {
+                script.push_str(&format!("chmod 644 '{dest}'\n"));
+            }
+        }
+    }
+
     // 3. Persistent backup + boot-time self-destructing rollback hook
     script.push_str(&boot_rollback_hook());
 
@@ -676,5 +697,51 @@ mod tests {
             !etc.join("rc.d").join("S15nuci_rollback").exists(),
             "rc.d symlink not removed"
         );
+    }
+
+    #[test]
+    fn build_remote_script_includes_custom_files() {
+        use std::io::Write;
+
+        let json_text = r##"{
+            "packageManager": "opkg",
+            "settings": {},
+            "files": [
+                {
+                    "path": "/etc/rc.local",
+                    "content": "#!/bin/sh\necho hello\n",
+                    "executable": true
+                },
+                {
+                    "path": "/etc/custom/config.txt",
+                    "content": "key=value\n"
+                }
+            ]
+        }"##;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(json_text.as_bytes()).unwrap();
+
+        let config = DeployConfig {
+            port: 22,
+            identity_file: None,
+            force: true,
+        };
+        let ssh = FakeSsh {
+            calls: std::cell::RefCell::new(Vec::new()),
+        };
+
+        run(f.path(), "root@127.0.0.1", &config, None, &ssh).unwrap();
+
+        let calls = ssh.calls.borrow();
+        let deploy_stdin = &calls[0].1.as_ref().unwrap();
+        let script = String::from_utf8_lossy(deploy_stdin);
+
+        assert!(script.contains("mkdir -p '/etc/custom'"));
+        assert!(script.contains("cat > '/etc/rc.local'"));
+        assert!(script.contains("#!/bin/sh"));
+        assert!(script.contains("echo hello"));
+        assert!(script.contains("chmod 755 '/etc/rc.local'"));
+        assert!(script.contains("cat > '/etc/custom/config.txt'"));
+        assert!(script.contains("chmod 644 '/etc/custom/config.txt'"));
     }
 }

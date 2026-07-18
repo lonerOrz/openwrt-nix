@@ -1,6 +1,6 @@
 use crate::error::ConfigError;
 use crate::helpers::iter_options;
-use crate::models::{Root, Section};
+use crate::models::{File, Root, Section};
 use serde_json::Value;
 
 fn is_valid_uci_identifier(s: &str) -> bool {
@@ -106,6 +106,28 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), ConfigError> {
             }
         }
     }
+
+    if let Some(files) = &root.files {
+        for (i, file) in files.iter().enumerate() {
+            let path = &file.path;
+            if !path.starts_with('/') {
+                return Err(ConfigError::Validation(format!(
+                    "files[{i}].path must be absolute, got: {path}"
+                )));
+            }
+            if path.contains("..") {
+                return Err(ConfigError::Validation(format!(
+                    "files[{i}].path must not contain '..': {path}"
+                )));
+            }
+            if file.content.is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "files[{i}].path={path} has empty content"
+                )));
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -125,6 +147,7 @@ mod tests {
             ssh_keys: vec![],
             secrets: None,
             raw_uci: None,
+            files: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(format!("{err}").contains("Invalid config name"));
@@ -145,6 +168,7 @@ mod tests {
             ssh_keys: vec![],
             secrets: None,
             raw_uci: None,
+            files: None,
         };
         assert!(validate_root(&root).is_ok());
     }
@@ -165,6 +189,7 @@ mod tests {
             ssh_keys: vec![],
             secrets: None,
             raw_uci: None,
+            files: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(format!("{err}").contains("Invalid option"));
@@ -185,6 +210,7 @@ mod tests {
             ssh_keys: vec![],
             secrets: None,
             raw_uci: None,
+            files: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(format!("{err}").contains("Invalid section"));
@@ -206,6 +232,7 @@ mod tests {
             ssh_keys: vec![],
             secrets: None,
             raw_uci: None,
+            files: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(format!("{err}").contains("null value"));
@@ -226,6 +253,7 @@ mod tests {
             ssh_keys: vec![],
             secrets: None,
             raw_uci: None,
+            files: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(format!("{err}").contains("missing required '_type'"));
@@ -246,6 +274,7 @@ mod tests {
             ssh_keys: vec![],
             secrets: None,
             raw_uci: None,
+            files: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(format!("{err}").contains("missing required '_type'"));
@@ -264,6 +293,7 @@ mod tests {
             ssh_keys: vec![],
             secrets: None,
             raw_uci: None,
+            files: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(format!("{err}").contains("Empty list section"));
@@ -285,6 +315,7 @@ mod tests {
             ssh_keys: vec![],
             secrets: None,
             raw_uci: None,
+            files: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(format!("{err}").contains("Invalid option"));
@@ -300,6 +331,7 @@ mod tests {
             ssh_keys: vec![],
             secrets: None,
             raw_uci: None,
+            files: None,
         };
         assert!(validate_root(&root).is_ok());
     }
@@ -314,6 +346,7 @@ mod tests {
             ssh_keys: vec![],
             secrets: None,
             raw_uci: None,
+            files: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(format!("{err}").contains("Invalid config name"));
@@ -335,6 +368,7 @@ mod tests {
             ssh_keys: vec![],
             secrets: None,
             raw_uci: None,
+            files: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(format!("{err}").contains("Invalid option"));
@@ -350,6 +384,7 @@ mod tests {
             ssh_keys: vec![],
             secrets: None,
             raw_uci: Some(vec!["rm -rf /".into()]),
+            files: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(format!("{err}").contains("must be a 'uci' command"));
@@ -365,6 +400,7 @@ mod tests {
             ssh_keys: vec![],
             secrets: None,
             raw_uci: Some(vec!["uci rename network.lan=lan2".into()]),
+            files: None,
         };
         assert!(validate_root(&root).is_ok());
     }

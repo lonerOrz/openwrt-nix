@@ -508,3 +508,108 @@ class TestUnifiedLifecycle:
         assert r.returncode == 0, r.stderr
         assert opkg_target.uci_get("wireless.default_radio0.key") == "my-test-password"
         os.unlink(boot.name)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 11. Custom files (non-UCI file writing)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class TestCustomFiles:
+    def test_opkg_custom_file_written(self, opkg_target: Target):
+        import json
+        import subprocess as sp
+        import tempfile
+
+        json_data = {
+            "packageManager": "opkg",
+            "settings": {},
+            "files": [
+                {
+                    "path": "/tmp/nuci_test_custom.txt",
+                    "content": "hello from nuci custom files\n",
+                    "executable": False,
+                }
+            ],
+        }
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False
+        ) as f:
+            json.dump(json_data, f)
+            f.flush()
+            fpath = f.name
+        try:
+            r = sp.run(
+                [
+                    "cargo",
+                    "run",
+                    "--",
+                    "deploy",
+                    fpath,
+                    "--target",
+                    "root@127.0.0.1",
+                    "--port",
+                    str(opkg_target.port),
+                    "--identity",
+                    str(ART.ssh_key),
+                    "--force",
+                ],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "NUCI_WATCHDOG_TIMEOUT": "5"},
+                timeout=120,
+            )
+            assert r.returncode == 0, r.stderr
+            content = opkg_target.sh("cat /tmp/nuci_test_custom.txt")
+            assert content == "hello from nuci custom files"
+        finally:
+            os.unlink(fpath)
+
+    def test_apk_custom_file_written(self, apkg_target: Target):
+        import json
+        import subprocess as sp
+        import tempfile
+
+        json_data = {
+            "packageManager": "apk",
+            "settings": {},
+            "files": [
+                {
+                    "path": "/tmp/nuci_test_apk.txt",
+                    "content": "apk custom file works\n",
+                    "executable": False,
+                }
+            ],
+        }
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False
+        ) as f:
+            json.dump(json_data, f)
+            f.flush()
+            fpath = f.name
+        try:
+            r = sp.run(
+                [
+                    "cargo",
+                    "run",
+                    "--",
+                    "deploy",
+                    fpath,
+                    "--target",
+                    "root@127.0.0.1",
+                    "--port",
+                    str(apkg_target.port),
+                    "--identity",
+                    str(ART.ssh_key),
+                    "--force",
+                ],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "NUCI_WATCHDOG_TIMEOUT": "5"},
+                timeout=120,
+            )
+            assert r.returncode == 0, r.stderr
+            content = apkg_target.sh("cat /tmp/nuci_test_apk.txt")
+            assert content == "apk custom file works"
+        finally:
+            os.unlink(fpath)

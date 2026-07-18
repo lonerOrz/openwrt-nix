@@ -43,5 +43,26 @@
       type = lib.types.listOf lib.types.str;
       description = "Verbatim `uci` commands for anything the typed model can't express (rename, reorder, deletes). Must each start with 'uci '.";
     };
+    files = lib.mkOption {
+      default = [ ];
+      type = lib.types.listOf (lib.types.submodule {
+        options = {
+          path = lib.mkOption {
+            type = lib.types.str;
+            description = "Absolute destination path on the target device.";
+          };
+          content = lib.mkOption {
+            type = lib.types.str;
+            description = "File content to write.";
+          };
+          executable = lib.mkOption {
+            default = false;
+            type = lib.types.bool;
+            description = "Whether to make the file executable (chmod 755). Default: 644.";
+          };
+        };
+      });
+      description = "Arbitrary files to write on the target device.";
+    };
   };
 }

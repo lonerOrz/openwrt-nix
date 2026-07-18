@@ -22,6 +22,11 @@ pub(crate) struct Root {
     /// `uci ...` command; this is the one place raw shell reaches the target.
     #[serde(default, rename = "rawUci")]
     pub(crate) raw_uci: Option<Vec<String>>,
+    /// Arbitrary files to write on the target. Each entry specifies a
+    /// destination path and content; an optional `executable` flag makes
+    /// the file mode 0755 instead of 0644.
+    #[serde(default, rename = "files")]
+    pub(crate) files: Option<Vec<File>>,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -67,4 +72,16 @@ pub(crate) struct PackageSources {
 pub(crate) enum Section {
     List(Vec<Map<String, Value>>),
     Named(Map<String, Value>),
+}
+
+/// A file to write on the target device.
+#[derive(Deserialize, Debug, Default)]
+pub(crate) struct File {
+    /// Absolute path on the target, e.g. `/etc/rc.local`.
+    pub(crate) path: String,
+    /// File content (text).
+    pub(crate) content: String,
+    /// Whether to make the file executable (default: false, mode 0644).
+    #[serde(default)]
+    pub(crate) executable: bool,
 }

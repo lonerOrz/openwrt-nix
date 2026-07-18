@@ -281,6 +281,7 @@ mod tests {
             ssh_keys: vec![],
             secrets: None,
             raw_uci: None,
+            files: None,
         };
 
         let secs = secrets(&[("wifi_pass", "secret123")]);
@@ -313,6 +314,7 @@ mod tests {
             ssh_keys: vec![],
             secrets: None,
             raw_uci: None,
+            files: None,
         };
 
         let err = resolve_secrets(root, &secrets(&[("other", "v")])).unwrap_err();
@@ -339,6 +341,7 @@ mod tests {
             ssh_keys: vec![],
             secrets: None,
             raw_uci: None,
+            files: None,
         };
 
         let resolved = resolve_secrets(root, &HashMap::new()).unwrap();
@@ -366,6 +369,7 @@ mod tests {
             ssh_keys: vec![],
             secrets: None,
             raw_uci: None,
+            files: None,
         };
 
         let err = resolve_secrets(root, &HashMap::new()).unwrap_err();
@@ -389,6 +393,7 @@ mod tests {
             ssh_keys: vec![],
             secrets: None,
             raw_uci: None,
+            files: None,
         };
 
         let secs = secrets(&[("port", "22")]);
@@ -414,6 +419,7 @@ mod tests {
             ssh_keys: vec![],
             secrets: None,
             raw_uci: None,
+            files: None,
         };
 
         let secs = secrets(&[("repo_name", "custom")]);

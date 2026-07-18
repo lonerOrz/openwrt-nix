@@ -36,6 +36,7 @@ in
           packageSources
           sshKeys
           rawUci
+          files
           ;
       };
     in
