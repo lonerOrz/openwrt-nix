@@ -152,6 +152,26 @@ class TestDeploy:
         )
         assert "https://example.com/packages" in feeds
 
+
+class TestRawUciEscapeHatch:
+    """Audit candidate #1: rawUci lines must run verbatim on the target.
+
+    The typed model can't express `uci set` of an arbitrary config, so rawUci
+    is the escape hatch. We assert a rawUci command actually mutates router
+    state on a real OpenWrt container (opkg + apk)."""
+
+    def test_opkg_raw_uci_applies(self, opkg_target: Target):
+        r = opkg_target.nuci("deploy", OPKG_JSON, "--force")
+        assert r.returncode == 0, r.stderr
+        assert opkg_target.wait_reconnect()
+        assert opkg_target.uci_get("nuci_test.marker") == "escaped"
+
+    def test_apk_raw_uci_applies(self, apkg_target: Target):
+        r = apkg_target.nuci("deploy", APK_JSON, "--force")
+        assert r.returncode == 0, r.stderr
+        assert apkg_target.wait_reconnect()
+        assert apkg_target.uci_get("nuci_test.marker") == "escaped"
+
     def test_password_synced(self, opkg_target: Target):
         shadow = opkg_target.sh("grep '^root:' /etc/shadow")
         assert any(m in shadow for m in ["$1$", "$5$", "$6$"])

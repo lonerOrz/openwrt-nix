@@ -178,6 +178,16 @@ def bootstrap_session() -> SessionArtifacts:
         # Replace any pre-existing sshKeys entry so the harness key is the one
         # nuci deploys (the placeholder above may already have been swapped).
         new = _replace_sshkeys(new, pub_key)
+        # Inject a rawUci escape-hatch entry (audit candidate #1) so the
+        # realistic test can verify verbatim `uci` commands actually apply on a
+        # real container. Idempotent: strip any prior injection first.
+        import re as _re
+
+        new = _re.sub(r"\n  uci\.rawUci = \[[^\]]*\];", "", new)
+        new = new.replace(
+            "uci.sshKeys = [",
+            'uci.rawUci = [ "uci set nuci_test.marker=escaped" "uci commit nuci_test" ];\n  uci.sshKeys = [',
+        )
         p.write_text(new)
 
     ssh_config.write_text(_ssh_config_text(ssh_key, 0))  # port patched per target

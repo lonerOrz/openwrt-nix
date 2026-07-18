@@ -38,5 +38,10 @@
       type = lib.types.listOf lib.types.str;
       description = "List of SSH authorized keys to deploy to the router";
     };
+    rawUci = lib.mkOption {
+      default = [ ];
+      type = lib.types.listOf lib.types.str;
+      description = "Verbatim `uci` commands for anything the typed model can't express (rename, reorder, deletes). Must each start with 'uci '.";
+    };
   };
 }

@@ -110,7 +110,13 @@ fn main() {
                 identity_file: identity.map(|p| p.to_string_lossy().into_owned()),
                 force,
             };
-            if let Err(e) = deploy::run(&json, &target, &config, secrets_dir.as_deref(), &deploy::RealSsh) {
+            if let Err(e) = deploy::run(
+                &json,
+                &target,
+                &config,
+                secrets_dir.as_deref(),
+                &deploy::RealSsh,
+            ) {
                 eprintln!("{e}");
                 std::process::exit(1);
             }
@@ -173,7 +179,9 @@ mod tests {
         }"#,
         )
         .unwrap();
-        let output = compile_config(&json_path, None, false).map(|c| c.uci_batch).unwrap();
+        let output = compile_config(&json_path, None, false)
+            .map(|c| c.uci_batch)
+            .unwrap();
         assert!(output.contains("delete system.system"));
         assert!(output.contains("set system.system.hostname='test'"));
         assert!(output.contains("commit system"));
@@ -198,13 +206,17 @@ mod tests {
         )
         .unwrap();
         fs::write(secrets_path.join("s.json"), r#"{"wifi_pass": "secret123"}"#).unwrap();
-        let output = compile_config(&json_path, Some(&secrets_path), false).map(|c| c.uci_batch).unwrap();
+        let output = compile_config(&json_path, Some(&secrets_path), false)
+            .map(|c| c.uci_batch)
+            .unwrap();
         assert!(output.contains("set wifi.radio0.key='secret123'"));
     }
 
     #[test]
     fn convert_file_missing_file() {
-        let err = compile_config(&PathBuf::from("/tmp/nonexistent_xyz.json"), None, false).map(|c| c.uci_batch).unwrap_err();
+        let err = compile_config(&PathBuf::from("/tmp/nonexistent_xyz.json"), None, false)
+            .map(|c| c.uci_batch)
+            .unwrap_err();
         assert!(format!("{err}").contains("No such file"));
     }
 
@@ -213,7 +225,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let json_path = dir.path().join("bad.json");
         fs::write(&json_path, "not json").unwrap();
-        let err = compile_config(&json_path, None, false).map(|c| c.uci_batch).unwrap_err();
+        let err = compile_config(&json_path, None, false)
+            .map(|c| c.uci_batch)
+            .unwrap_err();
         assert!(format!("{err}").contains("Failed to parse JSON"));
     }
 
@@ -230,7 +244,9 @@ mod tests {
         }"#,
         )
         .unwrap();
-        let output = compile_config(&json_path, None, false).map(|c| c.uci_batch).unwrap();
+        let output = compile_config(&json_path, None, false)
+            .map(|c| c.uci_batch)
+            .unwrap();
         assert!(output.contains("printf '' > /etc/opkg/customfeeds.conf"));
         assert!(output.contains("src/gz custom https://example.com/repo"));
     }
@@ -248,7 +264,9 @@ mod tests {
         }"#,
         )
         .unwrap();
-        let output = compile_config(&json_path, None, false).map(|c| c.uci_batch).unwrap();
+        let output = compile_config(&json_path, None, false)
+            .map(|c| c.uci_batch)
+            .unwrap();
         assert!(output.contains("for pkg in luci tcpdump"));
         assert!(output.contains("opkg update && opkg install luci tcpdump"));
     }
@@ -266,7 +284,9 @@ mod tests {
         }"#,
         )
         .unwrap();
-        let output = compile_config(&json_path, None, false).map(|c| c.uci_batch).unwrap();
+        let output = compile_config(&json_path, None, false)
+            .map(|c| c.uci_batch)
+            .unwrap();
         assert!(output.contains("opkg list-installed \"foo\""));
         assert!(output.contains("opkg install /tmp/foo_1.0.ipk"));
     }
@@ -284,7 +304,9 @@ mod tests {
         }"#,
         )
         .unwrap();
-        let output = compile_config(&json_path, None, false).map(|c| c.uci_batch).unwrap();
+        let output = compile_config(&json_path, None, false)
+            .map(|c| c.uci_batch)
+            .unwrap();
         assert!(output.contains("'\\''"));
     }
 
@@ -305,7 +327,9 @@ mod tests {
         }"#,
         )
         .unwrap();
-        let output = compile_config(&json_path, None, false).map(|c| c.uci_batch).unwrap();
+        let output = compile_config(&json_path, None, false)
+            .map(|c| c.uci_batch)
+            .unwrap();
         assert!(output.contains("/etc/apk/repositories.d/customfeeds.list"));
         assert!(output.contains("apk -U add"));
         assert!(output.contains("apk add --allow-untrusted /tmp/foo_1.0_all.apk"));

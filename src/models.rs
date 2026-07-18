@@ -16,6 +16,12 @@ pub(crate) struct Root {
     pub(crate) ssh_keys: Vec<String>,
     #[serde(default)]
     pub(crate) secrets: Option<SopsConfig>,
+    /// Escape hatch: verbatim `uci` command lines emitted as-is, for UCI
+    /// directives the typed `Section` model cannot express (rename, reorder,
+    /// deleting a single option, exotic types). Each entry must be a complete
+    /// `uci ...` command; this is the one place raw shell reaches the target.
+    #[serde(default, rename = "rawUci")]
+    pub(crate) raw_uci: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Debug, Default)]

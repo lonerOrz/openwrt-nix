@@ -226,9 +226,7 @@ fn boot_rollback_hook() -> String {
     s.push_str("mkdir -p /etc/init.d /etc/rc.d\n");
     s.push_str("cat > /etc/init.d/nuci_rollback <<'BOOT_EOF'\n");
     s.push_str("#!/bin/sh\n");
-    s.push_str(
-        "if [ \"$1\" = \"boot\" ] || [ \"$1\" = \"start\" ] || [ \"$1\" = \"\" ]; then\n",
-    );
+    s.push_str("if [ \"$1\" = \"boot\" ] || [ \"$1\" = \"start\" ] || [ \"$1\" = \"\" ]; then\n");
     s.push_str("    if [ -d /etc/.uci-rollback-backup ]; then\n");
     s.push_str("        cp -a /etc/.uci-rollback-backup/* /etc/config/\n");
     s.push_str("        rm -rf /etc/.uci-rollback-backup\n");
@@ -566,10 +564,9 @@ mod tests {
             stdin_data: Option<&[u8]>,
             _config: &DeployConfig,
         ) -> Result<String, ConfigError> {
-            self.calls.borrow_mut().push((
-                cmd.to_string(),
-                stdin_data.map(|d| d.to_vec()),
-            ));
+            self.calls
+                .borrow_mut()
+                .push((cmd.to_string(), stdin_data.map(|d| d.to_vec())));
             // Discovery call returns no remote config; watchdog/cleanup calls
             // succeed so the happy path completes.
             Ok(String::new())
@@ -629,7 +626,9 @@ mod tests {
         // tree, asserting it restores the pre-deploy backup and removes itself.
         let hook = boot_rollback_hook();
         let start = hook.find("if [ \"$1\"").expect("hook has boot guard");
-        let end = hook.find("BOOT_EOF\n").expect("hook has heredoc terminator");
+        let end = hook
+            .find("BOOT_EOF\n")
+            .expect("hook has heredoc terminator");
         let body = &hook[start..end];
 
         let dir = tempfile::tempdir().unwrap();
@@ -664,7 +663,10 @@ mod tests {
         let restored = fs::read_to_string(etc.join("config").join("system")).unwrap();
         assert!(restored.contains("good"), "config not restored: {restored}");
         // Backup consumed.
-        assert!(!etc.join(".uci-rollback-backup").exists(), "backup not removed");
+        assert!(
+            !etc.join(".uci-rollback-backup").exists(),
+            "backup not removed"
+        );
         // Hook self-deleted.
         assert!(
             !etc.join("init.d").join("nuci_rollback").exists(),

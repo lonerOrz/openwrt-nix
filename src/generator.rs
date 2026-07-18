@@ -245,7 +245,12 @@ pub(crate) fn serialize_package_management(
             let ipk_path = Path::new(ipk_path_str);
             if let Some(file_name) = ipk_path.file_name().and_then(|n| n.to_str()) {
                 let pkg_name = extract_package_name(file_name);
-                writeln!(writer, "{}", backend.local_install_block(pkg_name, file_name)).unwrap();
+                writeln!(
+                    writer,
+                    "{}",
+                    backend.local_install_block(pkg_name, file_name)
+                )
+                .unwrap();
             }
         }
     }
