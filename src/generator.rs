@@ -41,14 +41,22 @@ impl PkgBackend {
     }
 
     /// The `if ! installed; then install /tmp/<file>; fi` block for a local package.
+    ///
+    /// For opkg the package name is reliably derivable from the filename
+    /// (`name_version_arch.ipk`), so we guard with `opkg list-installed`.
+    /// For apk the filename stem is NOT a reliable package name (e.g.
+    /// `libfoo-bar-1.0-r1.apk`), and `apk info <file>` returns nothing for a
+    /// bare local package, so a name-based probe would be guesswork that can
+    /// silently skip a package (false positive) or re-add it every run (false
+    /// negative). `apk add` is idempotent for an already-installed identical
+    /// package, so we install the file directly with no name probe — see
+    /// audit candidate #10.
     pub(crate) fn local_install_block(&self, pkg_name: &str, file_name: &str) -> String {
         match self {
             PkgBackend::Opkg => format!(
                 "\nif ! opkg list-installed \"{pkg_name}\" >/dev/null 2>&1; then\n    opkg install /tmp/{file_name}\nfi"
             ),
-            PkgBackend::Apk => format!(
-                "\nif ! apk info -e \"{pkg_name}\" >/dev/null 2>&1; then\n    apk add --allow-untrusted /tmp/{file_name}\nfi"
-            ),
+            PkgBackend::Apk => format!("\napk add --allow-untrusted /tmp/{file_name}"),
         }
     }
 
@@ -504,7 +512,7 @@ mod tests {
             local_packages: Some(vec!["./packages/test_1.0_all.apk".into()]),
         };
         serialize_package_management(&mut w, PkgBackend::Apk, Some(&sources), None).unwrap();
-        assert!(w.contains("apk info -e \"test\""));
+        assert!(!w.contains("apk info -e"));
         assert!(w.contains("apk add --allow-untrusted /tmp/test_1.0_all.apk"));
     }
 
