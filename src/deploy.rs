@@ -481,6 +481,17 @@ mod tests {
     }
 
     #[test]
+    fn reload_nonempty_keeps_primary_reload_config_branch() {
+        // The primary `if [ -x /sbin/reload_config ]` branch must be emitted
+        // even when there are modified configs (not just the empty case), so a
+        // real device with procd falls back to the canonical reload_config.
+        let out = reload_commands(&["network".into()], &BTreeMap::new());
+        assert!(out.starts_with("if [ -x /sbin/reload_config ]; then /sbin/reload_config; else"));
+        assert!(out.contains("/etc/init.d/network reload"));
+        assert!(out.trim_end().ends_with("fi"));
+    }
+
+    #[test]
     fn orphan_deletes_unmanaged_named_sections() {
         use indexmap::IndexMap;
         use serde_json::Map;
