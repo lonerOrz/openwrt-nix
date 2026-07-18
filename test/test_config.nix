@@ -29,14 +29,13 @@
   };
   uci.packages = [
     "luci"
-    "tcpdump"
   ];
   uci.packageSources = {
     feeds = [
       "src/gz custom https://example.com/packages"
     ];
     localPackages = [
-      "./packages/test-package_1.0_all.ipk"
+      "./packages/tcpdump.ipk"
     ];
   };
   uci.secrets =
