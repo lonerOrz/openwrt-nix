@@ -126,6 +126,13 @@ pub(crate) fn extract_desired_map(
     map
 }
 
+/// Separator used to serialize a UCI list so element boundaries survive.
+/// `uci show` emits `'a' 'b'` (space between items) which is ambiguous with a
+/// single element containing a space (`'a b'`). We re-serialize both the
+/// desired config and the remote `uci show` output with a unit-separator that
+/// cannot appear in a UCI value, so list-vs-space-in-element is never confused.
+const LIST_SEP: &str = "\u{1f}";
+
 /// Format a JSON value as a plain string (no quotes, matching `uci show` output).
 fn val_str(val: &serde_json::Value) -> Option<String> {
     match val {
@@ -137,25 +144,81 @@ fn val_str(val: &serde_json::Value) -> Option<String> {
             if items.is_empty() {
                 None
             } else {
-                Some(items.join(" "))
+                Some(items.join(LIST_SEP))
             }
         }
         _ => None,
     }
 }
 
+/// Split a UCI-quoted value into its element list.
+///
+/// `uci show` wraps values in single quotes: `proto='static'`. A list option
+/// is space-separated quoted items: `option='a' 'b'`. Inside a quoted element a
+/// literal `'` is escaped as `'\''` (close quote, backslash-quote, reopen).
+///
+/// Returns `None` when `v` is not a quoted value (e.g. an unquoted bareword),
+/// so the caller can fall back to the raw trim. A single quoted element yields
+/// one item; a list yields several — element-internal spaces are preserved.
+fn split_uci_quoted(v: &str) -> Option<Vec<String>> {
+    let trimmed = v.trim();
+    if !trimmed.starts_with('\'') || trimmed.len() < 2 {
+        return None;
+    }
+    let bytes = trimmed.as_bytes();
+    let mut items = Vec::new();
+    // Each element is `'<content>'`; elements are separated by spaces.
+    // Inside content a literal `'` is escaped as `'\''`.
+    let mut i = 1; // past the opening quote of the first element
+    loop {
+        let mut cur = String::new();
+        // Read one element's content until its closing quote.
+        while i < bytes.len() {
+            if bytes[i..].starts_with(b"'\\''") {
+                cur.push('\'');
+                i += 4; // consume the escaped-quote sequence
+                continue;
+            }
+            if bytes[i] == b'\'' {
+                i += 1; // consume the closing quote
+                break;
+            }
+            cur.push(bytes[i] as char);
+            i += 1;
+        }
+        items.push(cur);
+        // Skip spaces before the next element; stop if no more quotes.
+        while i < bytes.len() && bytes[i] == b' ' {
+            i += 1;
+        }
+        if i < bytes.len() && bytes[i] == b'\'' {
+            i += 1; // past the opening quote of the next element
+            continue;
+        }
+        break;
+    }
+    Some(items)
+}
+
+/// Render an internal canonical value for human-facing `diff` output.
+///
+/// Internal list form uses `LIST_SEP` so element boundaries survive comparison;
+/// on screen a list reads better as comma-separated, so translate it here.
+fn show_val(s: &str) -> String {
+    s.replace(LIST_SEP, ", ")
+}
+
 /// Strip UCI quotes and unescape from `uci show` output.
 ///
-/// `uci show` wraps values in single quotes: `proto='static'`.
-/// Inside quotes, literal `'` is escaped as `'\''`.
-/// Arrays use space-separated quoted items: `'a' 'b'`.
+/// `uci show` wraps values in single quotes: `proto='static'`. Inside quotes,
+/// literal `'` is escaped as `'\''`. Arrays use space-separated quoted items:
+/// `'a' 'b'`. Unlike a naive `' '`→space replace, element boundaries are kept
+/// so a list `('a b' 'c')` is distinct from a single element `'a b c'`.
 fn sanitize_uci_value(v: &str) -> String {
     let trimmed = v.trim();
-    if trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() >= 2 {
-        let inside = &trimmed[1..trimmed.len() - 1];
-        inside.replace("'\\''", "'").replace("' '", " ")
-    } else {
-        trimmed.to_string()
+    match split_uci_quoted(trimmed) {
+        Some(items) => items.join(LIST_SEP),
+        None => trimmed.to_string(),
     }
 }
 
@@ -237,22 +300,22 @@ pub(crate) fn run(
     for key in all_keys {
         match (remote.get(key), desired.get(key)) {
             (None, Some(d)) => {
-                println!("\x1b[32m+ {key}={d}\x1b[0m");
+                println!("\x1b[32m+ {key}={}\x1b[0m", show_val(d));
                 adds += 1;
                 if let Some(cfg) = key.split('.').next() {
                     affected.insert(cfg.to_string());
                 }
             }
             (Some(r), None) => {
-                println!("\x1b[31m- {key}={r}\x1b[0m");
+                println!("\x1b[31m- {key}={}\x1b[0m", show_val(r));
                 dels += 1;
                 if let Some(cfg) = key.split('.').next() {
                     affected.insert(cfg.to_string());
                 }
             }
             (Some(r), Some(d)) if r != d => {
-                println!("\x1b[31m- {key}={r}\x1b[0m");
-                println!("\x1b[32m+ {key}={d}\x1b[0m");
+                println!("\x1b[31m- {key}={}\x1b[0m", show_val(r));
+                println!("\x1b[32m+ {key}={}\x1b[0m", show_val(d));
                 mods += 1;
                 if let Some(cfg) = key.split('.').next() {
                     affected.insert(cfg.to_string());
@@ -360,8 +423,29 @@ mod tests {
 
     #[test]
     fn sanitize_array() {
-        // uci show: 'a' 'b' 'c'
-        assert_eq!(sanitize_uci_value("'a' 'b' 'c'"), "a b c");
+        // uci show: 'a' 'b' 'c' -> canonical unit-separator form
+        assert_eq!(sanitize_uci_value("'a' 'b' 'c'"), "a\u{1f}b\u{1f}c");
+    }
+
+    #[test]
+    fn sanitize_list_preserves_internal_spaces() {
+        // A list ('my city' 'c') must NOT collapse to a single space-joined token.
+        assert_eq!(sanitize_uci_value("'my city' 'c'"), "my city\u{1f}c");
+        // A single element containing a space is distinct from the two-element list.
+        assert_eq!(sanitize_uci_value("'my city'"), "my city");
+        assert_ne!(
+            sanitize_uci_value("'my city' 'c'"),
+            sanitize_uci_value("'my city c'")
+        );
+    }
+
+    #[test]
+    fn sanitize_list_escaped_quote() {
+        // 'admin'\''s net' 'other' -> two elements, first with a literal quote
+        assert_eq!(
+            sanitize_uci_value("'admin'\\''s net' 'other'"),
+            "admin's net\u{1f}other"
+        );
     }
 
     #[test]
@@ -375,6 +459,24 @@ mod tests {
     }
 
     #[test]
+    fn val_str_array_matches_parse() {
+        // desired array serialized the same way as parsed uci show output
+        let desired = val_str(&serde_json::Value::Array(vec![
+            "my city".into(),
+            "c".into(),
+        ]));
+        assert_eq!(desired, Some("my city\u{1f}c".into()));
+        assert_eq!(sanitize_uci_value("'my city' 'c'"), desired.unwrap());
+    }
+
+    #[test]
+    fn show_val_renders_list_for_humans() {
+        assert_eq!(show_val("a\u{1f}b\u{1f}c"), "a, b, c");
+        assert_eq!(show_val("my city\u{1f}c"), "my city, c");
+        assert_eq!(show_val("static"), "static");
+    }
+
+    #[test]
     fn val_str_types() {
         assert_eq!(
             val_str(&serde_json::Value::String("hello".into())),
@@ -383,7 +485,7 @@ mod tests {
         assert_eq!(val_str(&serde_json::Value::Bool(true)), Some("1".into()));
         assert_eq!(
             val_str(&serde_json::json!([1, "two", true])),
-            Some("1 two 1".into())
+            Some("1\u{1f}two\u{1f}1".into())
         );
     }
 

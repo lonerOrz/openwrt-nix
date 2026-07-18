@@ -42,6 +42,6 @@
   uci.secrets =
     if builtins.pathExists ./secrets.enc.json then { sops.files = [ ./secrets.enc.json ]; } else { };
   uci.sshKeys = [
-    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH7Ewu71EOwgtr9yyjNQiorri3c1hTCWGvR+JFEBDK1z openwrt-test"
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICUioRKfjpOZdWttf4L/x0LM2TJRvzOgEBASiDZiTE4Q openwrt-test"
   ];
 }
