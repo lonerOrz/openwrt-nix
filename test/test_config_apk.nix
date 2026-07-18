@@ -41,7 +41,5 @@
   };
   uci.secrets =
     if builtins.pathExists ./secrets.enc.json then { sops.files = [ ./secrets.enc.json ]; } else { };
-  uci.sshKeys = [
-    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICUioRKfjpOZdWttf4L/x0LM2TJRvzOgEBASiDZiTE4Q openwrt-test"
-  ];
+  uci.sshKeys = [ "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAvctZwmsE8Bxt0WYnHZAdRKERk0YKwwidsG32rY6cf2 openwrt-test" ];
 }

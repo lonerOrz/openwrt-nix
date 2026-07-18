@@ -39,10 +39,7 @@ pub(crate) fn build_discovery_command(managed: &[&str]) -> String {
 /// Build a single SSH command that probes the live target for package/key/password
 /// state, so `nuci diff` can mark what is already deployed vs what will change.
 pub(crate) fn build_state_command(packages: &[String], backend: PkgBackend) -> String {
-    let probe = match backend {
-        PkgBackend::Opkg => "opkg list-installed",
-        PkgBackend::Apk => "apk info -e",
-    };
+    let probe = backend.installed_probe();
     let mut cmd = String::new();
     if !packages.is_empty() {
         cmd.push_str(&format!(

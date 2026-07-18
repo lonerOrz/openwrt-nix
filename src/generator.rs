@@ -8,6 +8,78 @@ use std::borrow::Cow;
 use std::fmt::Write as FmtWrite;
 use std::path::Path;
 
+/// Backend-specific package-manager command fragments.
+///
+/// The opkg/apk branches used to be copy-pasted `match backend` blocks at every
+/// call site in `serialize_package_management`; centralizing them here means a
+/// third backend adds one method per concern instead of editing four sites.
+impl PkgBackend {
+    /// Command that probes whether a package is already installed.
+    pub(crate) fn installed_probe(&self) -> &'static str {
+        match self {
+            PkgBackend::Opkg => "opkg list-installed",
+            PkgBackend::Apk => "apk info -e",
+        }
+    }
+
+    /// The install line run when at least one package is missing.
+    pub(crate) fn install_expr(&self, pkgs: &[String]) -> String {
+        match self {
+            PkgBackend::Opkg => {
+                format!(
+                    "if [ \"$NEED_INSTALL\" = true ]; then opkg update && opkg install {}; fi",
+                    pkgs.join(" ")
+                )
+            }
+            PkgBackend::Apk => {
+                format!(
+                    "if [ \"$NEED_INSTALL\" = true ]; then apk -U add {}; fi",
+                    pkgs.join(" ")
+                )
+            }
+        }
+    }
+
+    /// The `if ! installed; then install /tmp/<file>; fi` block for a local package.
+    pub(crate) fn local_install_block(&self, pkg_name: &str, file_name: &str) -> String {
+        match self {
+            PkgBackend::Opkg => format!(
+                "\nif ! opkg list-installed \"{pkg_name}\" >/dev/null 2>&1; then\n    opkg install /tmp/{file_name}\nfi"
+            ),
+            PkgBackend::Apk => format!(
+                "\nif ! apk info -e \"{pkg_name}\" >/dev/null 2>&1; then\n    apk add --allow-untrusted /tmp/{file_name}\nfi"
+            ),
+        }
+    }
+
+    /// Shell lines that (re)write the custom-feed repository file.
+    pub(crate) fn feed_lines(&self, feeds: &[String]) -> String {
+        match self {
+            PkgBackend::Opkg => {
+                let mut out = String::from("\nprintf '' > /etc/opkg/customfeeds.conf");
+                for feed in feeds {
+                    out.push_str(&format!(
+                        "\nprintf '%s\\n' '{}' >> /etc/opkg/customfeeds.conf",
+                        escape_single_quotes(feed)
+                    ));
+                }
+                out
+            }
+            PkgBackend::Apk => {
+                let mut out = String::from("\nmkdir -p /etc/apk/repositories.d");
+                out.push_str("\nprintf '' > /etc/apk/repositories.d/customfeeds.list");
+                for feed in feeds {
+                    out.push_str(&format!(
+                        "\nprintf '%s\\n' '{}' >> /etc/apk/repositories.d/customfeeds.list",
+                        escape_single_quotes(feed)
+                    ));
+                }
+                out
+            }
+        }
+    }
+}
+
 fn serialize_option_val(writer: &mut String, key: &str, val: &Value) -> Result<(), ConfigError> {
     match val {
         Value::String(s) => {
@@ -147,42 +219,15 @@ pub(crate) fn serialize_package_management(
     {
         writeln!(writer, "\nNEED_INSTALL=false").unwrap();
         writeln!(writer, "for pkg in {}; do", pkgs.join(" ")).unwrap();
-        match backend {
-            PkgBackend::Opkg => {
-                writeln!(
-                    writer,
-                    "    if ! opkg list-installed \"$pkg\" >/dev/null 2>&1; then NEED_INSTALL=true; break; fi"
-                )
-                .unwrap();
-            }
-            PkgBackend::Apk => {
-                writeln!(
-                    writer,
-                    "    if ! apk info -e \"$pkg\" >/dev/null 2>&1; then NEED_INSTALL=true; break; fi"
-                )
-                .unwrap();
-            }
-        }
+        writeln!(
+            writer,
+            "    if ! {} \"$pkg\" >/dev/null 2>&1; then NEED_INSTALL=true; break; fi",
+            backend.installed_probe()
+        )
+        .unwrap();
         writeln!(writer, "done").unwrap();
 
-        match backend {
-            PkgBackend::Opkg => {
-                writeln!(
-                    writer,
-                    "if [ \"$NEED_INSTALL\" = true ]; then opkg update && opkg install {}; fi",
-                    pkgs.join(" ")
-                )
-                .unwrap();
-            }
-            PkgBackend::Apk => {
-                writeln!(
-                    writer,
-                    "if [ \"$NEED_INSTALL\" = true ]; then apk -U add {}; fi",
-                    pkgs.join(" ")
-                )
-                .unwrap();
-            }
-        }
+        writeln!(writer, "{}", backend.install_expr(pkgs)).unwrap();
     }
 
     if let Some(src_val) = sources
@@ -192,29 +237,7 @@ pub(crate) fn serialize_package_management(
             let ipk_path = Path::new(ipk_path_str);
             if let Some(file_name) = ipk_path.file_name().and_then(|n| n.to_str()) {
                 let pkg_name = extract_package_name(file_name);
-                match backend {
-                    PkgBackend::Opkg => {
-                        writeln!(
-                            writer,
-                            "\nif ! opkg list-installed \"{}\" >/dev/null 2>&1; then",
-                            pkg_name
-                        )
-                        .unwrap();
-                        writeln!(writer, "    opkg install /tmp/{}", file_name).unwrap();
-                        writeln!(writer, "fi").unwrap();
-                    }
-                    PkgBackend::Apk => {
-                        writeln!(
-                            writer,
-                            "\nif ! apk info -e \"{}\" >/dev/null 2>&1; then",
-                            pkg_name
-                        )
-                        .unwrap();
-                        writeln!(writer, "    apk add --allow-untrusted /tmp/{}", file_name)
-                            .unwrap();
-                        writeln!(writer, "fi").unwrap();
-                    }
-                }
+                writeln!(writer, "{}", backend.local_install_block(pkg_name, file_name)).unwrap();
             }
         }
     }
@@ -223,35 +246,7 @@ pub(crate) fn serialize_package_management(
         && let Some(feeds) = &src_val.feeds
         && !feeds.is_empty()
     {
-        match backend {
-            PkgBackend::Opkg => {
-                writeln!(writer, "\nprintf '' > /etc/opkg/customfeeds.conf").unwrap();
-                for feed in feeds {
-                    writeln!(
-                        writer,
-                        "printf '%s\\n' '{}' >> /etc/opkg/customfeeds.conf",
-                        escape_single_quotes(feed)
-                    )
-                    .unwrap();
-                }
-            }
-            PkgBackend::Apk => {
-                writeln!(writer, "\nmkdir -p /etc/apk/repositories.d").unwrap();
-                writeln!(
-                    writer,
-                    "printf '' > /etc/apk/repositories.d/customfeeds.list"
-                )
-                .unwrap();
-                for feed in feeds {
-                    writeln!(
-                        writer,
-                        "printf '%s\\n' '{}' >> /etc/apk/repositories.d/customfeeds.list",
-                        escape_single_quotes(feed)
-                    )
-                    .unwrap();
-                }
-            }
-        }
+        writeln!(writer, "{}", backend.feed_lines(feeds)).unwrap();
     }
 
     Ok(())
