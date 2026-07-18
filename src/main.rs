@@ -110,7 +110,7 @@ fn main() {
                 identity_file: identity.map(|p| p.to_string_lossy().into_owned()),
                 force,
             };
-            if let Err(e) = deploy::run(&json, &target, &config, secrets_dir.as_deref()) {
+            if let Err(e) = deploy::run(&json, &target, &config, secrets_dir.as_deref(), &deploy::RealSsh) {
                 eprintln!("{e}");
                 std::process::exit(1);
             }

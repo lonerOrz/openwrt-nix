@@ -44,6 +44,37 @@ fn build_ssh_args(config: &DeployConfig) -> Vec<String> {
     args
 }
 
+/// Transport seam for running a command on the target over SSH.
+///
+/// `run` takes a `&dyn SshExec` so the deploy orchestration can be exercised
+/// against an in-memory fake in unit tests without a real device or container.
+/// `RealSsh` is the only production adapter; `ssh_exec` wraps it for the rest
+/// of the codebase (e.g. `diff::run`).
+pub(crate) trait SshExec {
+    fn exec(
+        &self,
+        target: &str,
+        cmd: &str,
+        stdin_data: Option<&[u8]>,
+        config: &DeployConfig,
+    ) -> Result<String, ConfigError>;
+}
+
+/// Production transport: shells out to the `ssh` binary.
+pub(crate) struct RealSsh;
+
+impl SshExec for RealSsh {
+    fn exec(
+        &self,
+        target: &str,
+        cmd: &str,
+        stdin_data: Option<&[u8]>,
+        config: &DeployConfig,
+    ) -> Result<String, ConfigError> {
+        ssh_exec(target, cmd, stdin_data, config)
+    }
+}
+
 pub(crate) fn ssh_exec(
     target: &str,
     cmd: &str,
@@ -311,6 +342,7 @@ pub(crate) fn run(
     target: &str,
     config: &DeployConfig,
     secrets_dir: Option<&Path>,
+    ssh: &dyn SshExec,
 ) -> Result<(), ConfigError> {
     let compiled = compile_config(json_path, secrets_dir, false)?;
 
@@ -323,7 +355,7 @@ pub(crate) fn run(
 
     if !managed_refs.is_empty() {
         let discovery_cmd = build_discovery_command(&managed_refs);
-        if let Ok(remote_output) = ssh_exec(target, &discovery_cmd, None, config) {
+        if let Ok(remote_output) = ssh.exec(target, &discovery_cmd, None, config) {
             let mut parts = remote_output.splitn(2, SERVICE_SEPARATOR);
             let uci_output = parts.next().unwrap_or("");
             let services_output = parts.next().unwrap_or("");
@@ -359,7 +391,7 @@ pub(crate) fn run(
         &service_map,
     );
     eprintln!("Deploying to {target}...");
-    ssh_exec(
+    ssh.exec(
         target,
         "cat > /tmp/deploy.sh && sh /tmp/deploy.sh",
         Some(remote_script.as_bytes()),
@@ -371,13 +403,14 @@ pub(crate) fn run(
     let mut connected = false;
     for _ in 0..30 {
         std::thread::sleep(std::time::Duration::from_secs(2));
-        if ssh_exec(
-            target,
-            "kill $(cat /tmp/.uci-watchdog-pid) 2>/dev/null",
-            None,
-            config,
-        )
-        .is_ok()
+        if ssh
+            .exec(
+                target,
+                "kill $(cat /tmp/.uci-watchdog-pid) 2>/dev/null",
+                None,
+                config,
+            )
+            .is_ok()
         {
             eprintln!("Connectivity verified, rollback watchdog cancelled.");
             connected = true;
@@ -392,7 +425,7 @@ pub(crate) fn run(
     }
 
     // 5. Cleanup — remove persistent backup, boot hook, and watchdog PID
-    let _ = ssh_exec(
+    let _ = ssh.exec(
         target,
         "rm -rf /etc/.uci-rollback-backup /etc/init.d/nuci_rollback /etc/rc.d/S15nuci_rollback /tmp/.uci-watchdog-pid /tmp/deploy.sh",
         None,
@@ -494,5 +527,71 @@ mod tests {
         let mut remote = BTreeMap::new();
         remote.insert("network.lan".into(), "interface".into());
         assert!(orphan_delete_commands(&remote, &settings).is_empty());
+    }
+
+    /// In-memory transport that records every call and returns scripted output.
+    /// Lets `run` be exercised with zero SSH/container involvement.
+    struct FakeSsh {
+        calls: std::cell::RefCell<Vec<(String, Option<Vec<u8>>)>>,
+    }
+
+    impl SshExec for FakeSsh {
+        fn exec(
+            &self,
+            _target: &str,
+            cmd: &str,
+            stdin_data: Option<&[u8]>,
+            _config: &DeployConfig,
+        ) -> Result<String, ConfigError> {
+            self.calls.borrow_mut().push((
+                cmd.to_string(),
+                stdin_data.map(|d| d.to_vec()),
+            ));
+            // Discovery call returns no remote config; watchdog/cleanup calls
+            // succeed so the happy path completes.
+            Ok(String::new())
+        }
+    }
+
+    #[test]
+    fn run_orchestrates_deploy_without_ssh() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(
+            br#"{
+                "packageManager": "opkg",
+                "settings": {
+                    "network": {
+                        "lan": { "_type": "interface", "proto": "static" }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let config = DeployConfig {
+            port: 22,
+            identity_file: None,
+            force: false,
+        };
+        let ssh = FakeSsh {
+            calls: std::cell::RefCell::new(Vec::new()),
+        };
+
+        run(f.path(), "root@127.0.0.1", &config, None, &ssh).unwrap();
+
+        let calls = ssh.calls.borrow();
+        // 1) discovery, 2) deploy script (has stdin), 3) watchdog poll, 4) cleanup.
+        assert_eq!(calls.len(), 4);
+        let (deploy_cmd, deploy_stdin) = &calls[1];
+        assert_eq!(deploy_cmd, "cat > /tmp/deploy.sh && sh /tmp/deploy.sh");
+        let script = String::from_utf8_lossy(deploy_stdin.as_ref().unwrap());
+        // Compiled UCI batch must be present in the deployed script.
+        assert!(script.contains("set network.lan.proto='static'"));
+        // Watchdog kill + cleanup must both have been issued.
+        assert!(calls[2].0.contains("kill $(cat /tmp/.uci-watchdog-pid)"));
+        assert!(calls[3].0.contains("rm -rf /etc/.uci-rollback-backup"));
     }
 }
