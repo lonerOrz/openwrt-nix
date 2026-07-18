@@ -6,6 +6,7 @@ mod helpers;
 mod models;
 mod pipeline;
 mod secrets;
+mod uci_key;
 mod validation;
 
 use std::path::{Path, PathBuf};

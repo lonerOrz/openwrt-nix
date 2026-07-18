@@ -260,7 +260,7 @@ def _fetch_real_opk(pkg_dir: Path, pkg: str, out_name: str) -> None:
         )
         inside = (
             f"f=$(ls /tmp/{pkg}_*.ipk 2>/dev/null | head -n1); "
-            f"[ -n \"$f\" ] && mv \"$f\" /tmp/{out_name} && echo OK"
+            f'[ -n "$f" ] && mv "$f" /tmp/{out_name} && echo OK'
         )
         renamed = engine("exec", cname, "sh", "-c", inside, check=True).stdout.strip()
         if renamed != "OK":
@@ -296,9 +296,7 @@ def _fetch_real_apk(pkg_dir: Path, pkg: str, out_name: str) -> None:
             f"f=$(ls {pkg}-*.apk 2>/dev/null | head -n1); "
             f'[ -n "$f" ] && mv "$f" {out_name} && echo OK'
         )
-        renamed = engine(
-            "exec", cname, "sh", "-c", inside, check=True
-        ).stdout.strip()
+        renamed = engine("exec", cname, "sh", "-c", inside, check=True).stdout.strip()
         if renamed != "OK":
             raise RuntimeError(f"apk fetch produced no {pkg}-*.apk in {cname}")
         engine(

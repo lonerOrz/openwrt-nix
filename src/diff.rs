@@ -6,6 +6,9 @@ use crate::error::ConfigError;
 use crate::helpers::iter_options;
 use crate::models::{PkgBackend, Section};
 use crate::pipeline::compile_config;
+use crate::uci_key::{
+    anonymous_option_key, anonymous_section_key, named_option_key, named_section_key,
+};
 
 pub(crate) const SERVICE_SEPARATOR: &str = "===NUCI_SERVICES===";
 pub(crate) const STATE_SEPARATOR: &str = "===NUCI_STATE===";
@@ -95,11 +98,11 @@ pub(crate) fn extract_desired_map(
             match section {
                 Section::Named(obj) => {
                     if let Some(ty) = obj.get("_type").and_then(|v| v.as_str()) {
-                        map.insert(format!("{config_name}.{section_name}"), ty.to_string());
+                        map.insert(named_section_key(config_name, section_name), ty.to_string());
                     }
                     for (opt, val) in iter_options(obj) {
                         if let Some(s) = val_str(val) {
-                            map.insert(format!("{config_name}.{section_name}.{opt}"), s);
+                            map.insert(named_option_key(config_name, section_name, opt), s);
                         }
                     }
                 }
@@ -109,10 +112,10 @@ pub(crate) fn extract_desired_map(
                             .get("_type")
                             .and_then(|v| v.as_str())
                             .unwrap_or(section_name);
-                        map.insert(format!("{config_name}.@{ty}[{idx}]"), ty.to_string());
+                        map.insert(anonymous_section_key(config_name, ty, idx), ty.to_string());
                         for (opt, val) in iter_options(item) {
                             if let Some(s) = val_str(val) {
-                                map.insert(format!("{config_name}.@{ty}[{idx}].{opt}"), s);
+                                map.insert(anonymous_option_key(config_name, ty, idx, opt), s);
                             }
                         }
                     }

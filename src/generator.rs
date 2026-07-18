@@ -1,6 +1,7 @@
 use crate::error::ConfigError;
 use crate::helpers::{escape_single_quotes, extract_package_name, iter_options};
 use crate::models::{PackageSources, PkgBackend, Section};
+use crate::uci_key::{anonymous_option_key, named_option_key};
 use indexmap::IndexMap;
 use serde_json::Value;
 use std::borrow::Cow;
@@ -93,7 +94,7 @@ pub(crate) fn serialize_uci(
                         writeln!(uci_cmds, "add {} {}", config_name, ty).unwrap();
 
                         for (option_name, option) in iter_options(list_obj) {
-                            let key = format!("{}.@{}[{}].{}", config_name, ty, idx, option_name);
+                            let key = anonymous_option_key(config_name, ty, idx, option_name);
                             serialize_option_val(&mut uci_cmds, &key, option)?;
                         }
                     }
@@ -110,7 +111,7 @@ pub(crate) fn serialize_uci(
                     writeln!(uci_cmds, "set {}.{}={}", config_name, section_name, ty).unwrap();
 
                     for (option_name, option) in iter_options(obj) {
-                        let key = format!("{}.{}.{}", config_name, section_name, option_name);
+                        let key = named_option_key(config_name, section_name, option_name);
                         serialize_option_val(&mut uci_cmds, &key, option)?;
                     }
                 }

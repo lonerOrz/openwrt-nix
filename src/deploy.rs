@@ -9,6 +9,7 @@ use crate::diff::{
 use crate::error::ConfigError;
 use crate::models::{Root, Section};
 use crate::pipeline::compile_config;
+use crate::uci_key::is_named_section_key;
 use indexmap::IndexMap;
 
 pub(crate) struct DeployConfig {
@@ -295,7 +296,7 @@ fn orphan_delete_commands(
     for key in remote.keys() {
         // A named-section root key from `uci show` looks like `config.name`
         // (exactly one dot, no '@' anonymous marker, no '[index]').
-        if key.contains('@') || key.contains('[') || key.matches('.').count() != 1 {
+        if !is_named_section_key(key) {
             continue;
         }
         if !desired_named.contains(key) {
