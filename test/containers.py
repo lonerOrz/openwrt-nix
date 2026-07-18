@@ -220,6 +220,12 @@ def _ssh_config_text(ssh_key: Path, port: int) -> str:
         f"    UserKnownHostsFile /dev/null\n"
         f"    IdentityFile {ssh_key}\n"
         f"    IdentitiesOnly yes\n"
+        # Mirror nuci's Rust build_ssh_args connection-reuse flags so the
+        # harness exercises the same ControlMaster path the watchdog reconnect
+        # logic depends on. %C hashes host+port+user into the socket path.
+        f"    ControlMaster auto\n"
+        f"    ControlPath /tmp/ssh-%C\n"
+        f"    ControlPersist 5m\n"
     )
 
 
