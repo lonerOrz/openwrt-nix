@@ -13,3 +13,6 @@ bin/
 
 # Python
 __pycache__/
+
+# mdBook build output
+/book

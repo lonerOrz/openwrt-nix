@@ -4,82 +4,48 @@
 provides **escape hatches** for the other 20% rather than pretending to model
 every third-party package.
 
-## What nuci does declaratively
+## What nuci covers
 
-### Declarative UCI
-
-- **Scalar** and **list** options (`ports = [ "lan1" "lan2" ]`).
-- **Named sections** (`network.lan = { _type = "interface"; ... }`).
-- **Anonymous list sections** (`wireless.@wifi-iface[0]`), rebuilt idempotently.
-- Full rebuild strategy means removing an option from Nix removes it on the
-  router — no silent drift.
-
-### Package management (opkg + apk)
-
-- Dual backend: `packageManager = "opkg"` or `"apk"`.
-- `packages`: install from the repo.
-- `packageSources.feeds`: inject custom opkg feeds.
-- `packageSources.localPackages`: ship real `.ipk` / `.apk` files. For opkg the
-  install is guarded by `opkg list-installed <name>`; for apk the file is
-  installed directly with `apk add --allow-untrusted` (apk filenames don't
-  reliably encode the package name).
-
-> **Ordering pitfall (solved):** custom feeds are written *before* package
-> installs, and official packages are installed *before* custom-source packages,
-> so a package that depends on a feed never hits a dead-link error.
-
-### Secrets (SOPS)
-
-- `secrets.sops.files = [ ./secrets.yml ]` decrypts with `sops` + age at compile
-  time.
-- Placeholders in config use `@name@` syntax (e.g.
-  `key = "@wifi_password@"`). Missing placeholders are a **compile error**, not a
-  silent blank.
-
-### SSH keys & lockout prevention
-
-- `sshKeys` writes authorized keys.
-- The deployer's own key is **auto-appended** if absent, so a config mistake
+- **Declarative UCI** — scalar and list options (`ports = [ "lan1" "lan2" ]`),
+  named sections (`network.lan`), and anonymous list sections
+  (`wireless.@wifi-iface[0]`), all rebuilt idempotently. Removing an option
+  from Nix removes it on the router — no silent drift.
+- **Package management** — dual opkg/apk backend, `packages` from the repo,
+  custom `packageSources.feeds`, and `packageSources.localPackages` for real
+  `.ipk` / `.apk` files. opkg installs are guarded by `opkg list-installed
+<name>`; apk installs the file directly with `apk add --allow-untrusted`.
+- **Secrets (SOPS)** — `secrets.sops.files = [ ./secrets.yml ]` decrypts with
+  `sops` + age at compile time. Placeholders use `@name@` syntax
+  (`key = "@wifi_password@"`); a missing placeholder is a **compile error**,
+  not a silent blank.
+- **SSH keys & lockout prevention** — `sshKeys` writes authorized keys, and
+  the deployer's own key is auto-appended if absent, so a config mistake
   can't lock you out of the box you're deploying from.
+- **Arbitrary files (`files`)** — write any file to any absolute path
+  (configs for non-UCI apps, init scripts, crontabs). `executable = true`
+  sets mode `0755`; binary content uses `content = { "base64": "..." }`;
+  an optional `checksum` (sha256 hex) skips the write when the target hash
+  already matches.
+- **Raw UCI escape hatch (`rawUci`)** — for directives the typed model can't
+  express (`uci rename`, `uci reorder`, deleting a single option). Every
+  line is validated to start with `uci `.
+- **Diff preview** — `nuci diff` is read-only: it fetches live router state,
+  compares it to the Nix model, and prints a colored preview of UCI changes,
+  package installs, and auto-discovered affected services.
 
-### Arbitrary files (`files`)
-
-- Write any file to any absolute path: configs for non-UCI apps, init scripts,
-  crontabs.
-- `executable = true` → mode `0755`, else `0644`.
-- **Binary content:** `content = { "base64": "..." }` is decoded on-target via
-  `base64 -d`.
-- **Checksum-guarded idempotency:** an optional `checksum` (sha256 hex) wraps
-  the write in `if [ "$(sha256sum path)" != <sum> ]; then ... fi`, so an
-  unchanged file is skipped on redeploy.
-
-### Raw UCI escape hatch (`rawUci`)
-
-- For directives the typed `Section` model can't express (`uci rename`,
-  `uci reorder`, deleting a single option, exotic types).
-- Each entry must be a complete `uci ...` command — validated to start with
-  `uci `. This is the one place raw shell reaches the target, and it's
-  deliberately constrained.
-
-### Diff preview
-
-- `nuci diff` is read-only: it fetches live router state, compares it to the
-  Nix model, and prints a colored preview of UCI changes, package installs, and
-  auto-discovered affected services.
+> **Ordering pitfall (solved):** custom feeds are written _before_ package
+> installs, and official packages are installed _before_ custom-source
+> packages, so a package that depends on a feed never hits a dead-link error.
 
 ## Design philosophy: 80/20 + escape hatches
 
-### Why not 100% coverage?
-
 Writing a typed Rust `Section` schema for every OpenWrt package (AdGuardHome,
-sqm, bansui, …) is open-ended busywork. `nuci` owns the core surface
+sqm, banIP, …) is open-ended busywork. `nuci` owns the core surface
 (network / wireless / system / firewall / packages / files) and treats
 everything else as **data**, not schema.
 
-### Non-UCI apps → validate on the Nix side, write via `files`
-
-For an app configured by YAML/JSON (e.g. AdGuardHome), **do not** teach `nuci`
-a schema. Instead:
+**Non-UCI apps: validate in Nix, write via `files`.** For an app configured by
+YAML/JSON (e.g. AdGuardHome), do **not** teach `nuci` a schema. Instead:
 
 1. Generate and **validate** the config in Nix using `pkgs.formats.yaml` (or
    `json`) at eval time, so typos fail fast in CI.
@@ -98,16 +64,14 @@ let
 in {
   uci.files = [ {
     path = "/etc/adguardhome.yaml";
-    # read the Nix-generated file's contents
     content = builtins.readFile adguardCfg;
   } ];
 }
 ```
 
-### Advanced network rules (nftables) → init.d pattern
-
-Don't reach for cron hacks. OpenWrt already runs `/etc/init.d/*` on boot and
-network events. Write an init script via `files` and let procd trigger it:
+**Advanced network rules (nftables): use the init.d pattern.** Don't reach for
+cron hacks. OpenWrt already runs `/etc/init.d/*` on boot and network events.
+Write an init script via `files` and let procd trigger it:
 
 ```nix
 uci.files = [
@@ -133,9 +97,8 @@ uci.files = [
 
 This uses OpenWrt's **native** lifecycle — cleaner than cronning a reload.
 
-### Cron → overwrite the crontab
-
-Cron on OpenWrt lives in `/etc/crontabs/root`. Just write it:
+**Cron: overwrite the crontab.** Cron on OpenWrt lives in `/etc/crontabs/root`.
+Just write it:
 
 ```nix
 uci.files = [ {
@@ -146,12 +109,11 @@ uci.files = [ {
 } ];
 ```
 
-`nuci diff` will show the text delta directly, so changes are reviewable.
+`nuci diff` shows the text delta directly, so changes are reviewable.
 
-### The escape hatch of last resort: `rawUci`
-
-When you genuinely need a `uci rename` or list reorder that the typed model
-can't express, drop to `rawUci`:
+**The escape hatch of last resort: `rawUci`.** When you genuinely need a
+`uci rename` or list reorder that the typed model can't express, drop to
+`rawUci`:
 
 ```nix
 uci.rawUci = [
@@ -167,7 +129,6 @@ place raw commands reach the target.
 
 - **Run a full Nix daemon on the router.** OpenWrt's userspace is busybox +
   procd; Nix stays on the build host.
-- **Model every package's schema.** Covered above — use `files` + Nix-side
-  validation.
+- **Model every package's schema.** Use `files` + Nix-side validation instead.
 - **Edit `/etc/config/*` files by string patching.** All UCI goes through
   `uci batch` for correctness.

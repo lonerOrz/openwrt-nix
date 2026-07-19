@@ -70,6 +70,22 @@ def wait_for_port(host: str, port: int, timeout: int = 30) -> None:
     raise TimeoutError(f"Port {host}:{port} not reachable after {timeout}s")
 
 
+def _ensure_images() -> None:
+    """Build the opkg/apk test base images if missing.
+
+    The package-fetch helpers (``_fetch_real_opk``/``_fetch_real_apk``) run
+    throwaway containers from these images during session bootstrap, before any
+    ``Target`` is constructed — so the images must exist up front, not be built
+    lazily by ``Target._build_and_start``.
+    """
+    images = [
+        ("openwrt-test-opkg-env", PROJECT_ROOT / "test" / "Containerfile.opkg"),
+        ("openwrt-test-apk-env", PROJECT_ROOT / "test" / "Containerfile.apk"),
+    ]
+    for image, containerfile in images:
+        engine("build", "-q", "-t", image, "-f", str(containerfile), str(PROJECT_ROOT))
+
+
 # ---------------------------------------------------------------------------
 # Shared secrets / ssh / package tooling (built once per session, reused)
 # ---------------------------------------------------------------------------
@@ -161,6 +177,7 @@ def bootstrap_session() -> SessionArtifacts:
     )
 
     # Test packages (real .ipk / .apk built in-memory)
+    _ensure_images()
     package_dir.mkdir(parents=True, exist_ok=True)
     symlink = PROJECT_ROOT / "packages"
     symlink.unlink(missing_ok=True)

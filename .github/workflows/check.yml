@@ -1,9 +1,12 @@
 name: Check
 on:
   push:
-    branches: [main, dev]
+    branches: [main]
   pull_request:
     branches: [main]
+concurrency:
+  group: check-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
 jobs:
   format:
     runs-on: ubuntu-latest

@@ -1,92 +1,80 @@
 # nuci
 
-Declarative OpenWrt config: write it in Nix, compile to UCI with Rust, deploy over SSH.
+**Declarative OpenWrt configuration** — write it in Nix, compile to UCI with
+Rust, and deploy it over SSH.
 
-```
-Nix ──► uci.json ──► nuci ──► SSH ──► Router
+```text
+  Nix module (writeUci)
+        │  eval: validate, decrypt SOPS, serialize UCI
+        ▼
+     uci.json  ──────────────┐
+        │                    │
+        ▼                    ▼
+   nuci compile        nuci diff (read-only preview)
+        │                    │
+        ▼                    ▼
+   uci batch script ──►  nuci deploy ──► SSH ──► Router
+                              │
+                              ├─ snapshot /etc/config  (rollback backup)
+                              ├─ apply uci batch + files + packages
+                              ├─ smart service reload (procd / init.d)
+                              └─ watchdog + boot hook (anti-brick)
 ```
 
 The router only runs a small shell script. All the thinking — validation,
 secret decryption, UCI serialization — happens on your machine.
 
-## Why
+## Why nuci?
 
-- LUCI config isn't version-controlled or reproducible.
-- Ansible on a 128MB router is miserable.
-- You can't run Nix on the router itself.
+| Alternative       | Problem                                                   |
+| ----------------- | --------------------------------------------------------- |
+| LuCI (web UI)     | No version control, no review, config drifts silently.    |
+| Ansible / generic | Too heavy for a 128 MB router; rarely idempotent on UCI.  |
+| Pure NixOS        | NixOS does not run on OpenWrt — the userspace is busybox. |
 
-nuci keeps your config in Nix and ships a plain `uci batch` script to the device.
+`nuci` keeps your config in Nix (typed, reviewable, reproducible) and ships a
+plain `uci batch` script to the device.
 
-## Workflow
+## Features
 
-1. Write Nix config; mark secrets with `@placeholder@`.
-2. `nuci compile` — validates, decrypts SOPS, prints a `uci batch` script.
-3. `nuci diff --target root@router` — read-only preview of changes and which services reload.
-4. `nuci deploy --target root@router` — pipes the script over SSH, with rollback safety.
+- **Declarative UCI** — scalar/list options, named & anonymous sections, fully
+  rebuilt idempotently so removed options are removed on the router.
+- **Package management** — opkg / apk backends, custom feeds, local `.ipk`/`.apk`.
+- **Secrets** — SOPS + age decryption at compile time (`@placeholder@` syntax).
+- **Arbitrary files** — write any file via `files`, including binary (base64)
+  and checksum-guarded idempotent writes.
+- **Safety net** — rollback watchdog + self-deleting boot hook prevent bricking.
+- **Escape hatch** — `rawUci` for directives the typed model can't express.
+
+## Quick start
 
 ```bash
-just apply       # full deploy to $ROUTER_HOST
-just dry-run     # diff only
+nuci diff   ./uci.json --target root@router   # read-only preview
+nuci deploy ./uci.json --target root@router --force
 ```
 
-## How a deploy stays safe
+Or via the Nix flake:
 
-Before touching anything, nuci saves `/etc/.uci-rollback-backup` and installs a
-self-deleting boot hook (`/etc/init.d/nuci_rollback`). If the connection drops:
-
-- **Within ~60s** — a watchdog restores the backup and reloads services.
-- **On reboot** — the boot hook restores the backup on next start, then removes itself.
-
-No manual recovery needed either way.
-
-## Service reloads
-
-Rather than hardcode which init script owns each config, nuci discovers it on
-the target at deploy time:
-
-1. `/etc/init.d/<config>` exists → reload it.
-2. `wireless` → `/sbin/wifi reload` (or `network restart`).
-3. Otherwise it greps `config_load <config>` in `/etc/init.d/*` as a best-effort
-   guess for arbitrary services. The canonical OpenWrt reload path is
-   `reload_config`/procd, which nuci uses when available; this grep is a known
-   heuristic, not an official API.
-
-Reloads are targeted — only services tied to changed configs restart, not the
-whole box.
-
-## Declarative ownership
-
-nuci describes the **end state**, not a diff:
-
-- **Named sections** (`network.lan`): left alone unless you declare and later
-  remove them in Nix. Safe to edit by hand.
-- **Anonymous sections** (`system.@system[0]`): fully rebuilt on each deploy.
-  nuci clears every anonymous section of a type it owns and re-adds yours.
-
-So: don't hand-add anonymous sections of a type nuci manages — they get wiped.
-
-## CLI
-
-```
-nuci compile <json> [secrets_dir] [--no-sops]
-nuci deploy <json> --target <user@host> [--port PORT] [--identity FILE] [--force]
-nuci diff   <json> --target <user@host> [--port PORT] [--identity FILE]
+```bash
+nix run .#example -- "root@router"   # full deploy to $ROUTER_HOST
 ```
 
-`--force` skips the idempotency check and applies regardless.
+## Documentation
+
+Full architecture, design philosophy, and copy-paste Nix examples are on the
+documentation site:
+
+> https://lonerOrz.github.io/openwrt-nix/
+
+The source for the docs lives in [`docs/`](docs/).
 
 ## Testing
 
 ```bash
 just test-unit          # cargo unit tests
-just test-integration   # real OpenWrt containers via Podman
+just test-integration   # real OpenWrt containers (Podman)
 just test-all           # both
 ```
-
-Integration tests spin up isolated real OpenWrt containers (opkg 23.05.5 and
-apk latest) — no physical router required. They cover compile output, real
-deploys, idempotent list ordering, section deletion, diff accuracy, SSH-key
-lockout prevention, watchdog rollback, and targeted service reloads.
 
 ## License
 

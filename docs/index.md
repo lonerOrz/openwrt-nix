@@ -2,19 +2,33 @@
 
 > Write your router config in Nix, compile it to UCI with Rust, and deploy it over SSH — idempotently, safely, and with a built-in anti-brick safety net.
 
-```
-Nix ──► nuci.json ──► nuci (Rust) ──► SSH ──► Router (UCI)
+```text
+  Nix module (writeUci)
+        │  eval: validate, decrypt SOPS, serialize UCI
+        ▼
+     uci.json  ──────────────┐
+        │                    │
+        ▼                    ▼
+   nuci compile        nuci diff (read-only preview)
+        │                    │
+        ▼                    ▼
+   uci batch script ──►  nuci deploy ──► SSH ──► Router
+                              │
+                              ├─ snapshot /etc/config  (rollback backup)
+                              ├─ apply uci batch + files + packages
+                              ├─ smart service reload (procd / init.d)
+                              └─ watchdog + boot hook (anti-brick)
 ```
 
 ## Why nuci?
 
 Managing OpenWrt configurations has historically meant one of three painful options:
 
-| Approach | Pain point |
-| --- | --- |
-| **LuCI** (web UI) | No version control, no review, click-ops, diverges silently from reality. |
-| **Ansible / generic CM** | Too heavy for 128 MB routers; shell-driven, rarely idempotent on UCI. |
-| **Pure NixOS** | NixOS does not run on OpenWrt; the router's userspace is busybox + procd. |
+| Approach                 | Pain point                                                                |
+| ------------------------ | ------------------------------------------------------------------------- |
+| **LuCI** (web UI)        | No version control, no review, click-ops, diverges silently from reality. |
+| **Ansible / generic CM** | Too heavy for 128 MB routers; shell-driven, rarely idempotent on UCI.     |
+| **Pure NixOS**           | NixOS does not run on OpenWrt; the router's userspace is busybox + procd. |
 
 `nuci` sits in the gap: you keep **Nix** as the source of truth (typed, reviewable,
 reproducible), and `nuci` compiles that to the UCI directives OpenWrt actually speaks,
@@ -38,4 +52,11 @@ nuci diff ./uci.json --target root@192.168.1.1
 
 # Deploy (idempotent; rolls back automatically on failure)
 nuci deploy ./uci.json --target root@192.168.1.1 --force
+```
+
+Or drive the whole flow from a Nix flake — compile and deploy in one command:
+
+```bash
+# Full deploy to $ROUTER_HOST (set ROUTER_HOST or pass the target)
+nix run .#example -- "root@192.168.1.1"
 ```
