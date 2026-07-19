@@ -613,3 +613,79 @@ class TestCustomFiles:
             assert content == "apk custom file works"
         finally:
             os.unlink(fpath)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 12. Hyphen in config/section/option names (UCI-legal identifiers)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class TestHyphenIdentifiers:
+    """UCI rejects hyphens in config, section, and option names.
+
+    The ``set config.section.option=value`` syntax parses ``my-section`` as
+    ``config=my``, ``section=section``, ``option=value`` — treating ``-`` as a
+    separator.  Even ``_type`` values (which allow ``-``) are only accepted
+    because the generator emits ``add config type`` for anonymous sections,
+    not ``set``.  Named sections use ``set config.section=type`` which fails
+    for hyphenated names, so the validator rejects them uniformly.
+    """
+
+    def test_opkg_rejects_hyphen_in_config_name(self):
+        import json
+        import subprocess as sp
+        import tempfile
+
+        json_data = {
+            "packageManager": "opkg",
+            "settings": {"my-config": {}},
+        }
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False
+        ) as f:
+            json.dump(json_data, f)
+            f.flush()
+            fpath = f.name
+        try:
+            r = sp.run(
+                ["cargo", "run", "--", "compile", fpath],
+                capture_output=True,
+                text=True,
+            )
+            assert r.returncode != 0
+            assert "Invalid config name" in r.stderr
+        finally:
+            os.unlink(fpath)
+
+    def test_apk_rejects_hyphen_in_option_name(self):
+        import json
+        import subprocess as sp
+        import tempfile
+
+        json_data = {
+            "packageManager": "apk",
+            "settings": {
+                "network": {
+                    "lan": {
+                        "_type": "interface",
+                        "ip-address": "10.0.0.1",
+                    }
+                }
+            },
+        }
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False
+        ) as f:
+            json.dump(json_data, f)
+            f.flush()
+            fpath = f.name
+        try:
+            r = sp.run(
+                ["cargo", "run", "--", "compile", fpath],
+                capture_output=True,
+                text=True,
+            )
+            assert r.returncode != 0
+            assert "Invalid option" in r.stderr
+        finally:
+            os.unlink(fpath)

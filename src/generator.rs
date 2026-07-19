@@ -201,6 +201,11 @@ pub(crate) fn serialize_uci(
         write!(writer, "{}", shell_cmds).unwrap();
 
         if !uci_cmds.is_empty() {
+            // Ensure the config file exists before running batch — UCI won't
+            // accept set/add commands for a config whose file is missing on
+            // disk (the file is created on first commit, but the batch
+            // commands themselves silently fail if the file doesn't exist).
+            writeln!(writer, "touch /etc/config/{}", config_name).unwrap();
             writeln!(writer, "uci -q batch <<'UCI_EOF'").unwrap();
             write!(writer, "{}", uci_cmds).unwrap();
             writeln!(writer, "commit {}", config_name).unwrap();

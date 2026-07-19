@@ -58,7 +58,7 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), ConfigError> {
     for (config_name, sections) in &root.settings {
         if !is_valid_uci_identifier(config_name) {
             return Err(ConfigError::Validation(format!(
-                "Invalid config name '{config_name}': only [a-zA-Z0-9_-] allowed"
+                "Invalid config name '{config_name}': only [a-zA-Z0-9_] allowed (no digits at start)"
             )));
         }
 
@@ -84,7 +84,7 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), ConfigError> {
                 Section::Named(map) => {
                     if !is_valid_uci_identifier(section_name) {
                         return Err(ConfigError::Validation(format!(
-                            "Invalid section '{section_name}' in config '{config_name}': only [a-zA-Z0-9_-] allowed"
+                            "Invalid section '{section_name}' in config '{config_name}': only [a-zA-Z0-9_] allowed (no digits at start)"
                         )));
                     }
                     validate_section_map(map, config_name, section_name)?;
