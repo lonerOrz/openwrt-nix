@@ -43,6 +43,14 @@ clippy:
 clean:
 	cargo clean
 
+# Build the documentation site (mdBook) into ./book
+docs:
+	mdbook build
+
+# Serve the documentation site locally with live reload
+docs-serve:
+	mdbook serve
+
 # ==============================================================================
 # Router Deployment & Management
 # ==============================================================================
