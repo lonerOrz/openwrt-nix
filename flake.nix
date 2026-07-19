@@ -106,6 +106,7 @@
               just
               sops
               openssh
+              mdbook
               sshpass
               cargo
               rustc

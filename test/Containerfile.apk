@@ -1,41 +1,32 @@
+# Realistic OpenWrt (apk) target — latest rootfs ships real apk.
 ARG OPENWRT_VERSION=latest
 FROM docker.io/openwrt/rootfs:${OPENWRT_VERSION}
 
-ARG MOCK_OPKG=true
-
 RUN mkdir -p /var/lock /var/run /etc/dropbear /etc/opkg /etc/apk/repositories.d
-
-# Create config files that UCI needs (minimal rootfs doesn't include them)
 RUN touch /etc/config/system /etc/config/wireless /etc/config/network
+RUN mkdir -p /etc/apk/repositories.d && touch /etc/opkg/customfeeds.conf
 
-# Ensure opkg/apk config dirs exist
-RUN mkdir -p /etc/opkg /etc/apk/repositories.d && touch /etc/opkg/customfeeds.conf
+# Ensure apk is present (latest rootfs has it); install if missing.
+RUN if ! command -v apk >/dev/null 2>&1; then \
+      opkg update >/dev/null 2>&1 || true; \
+      opkg install apk-tools >/dev/null 2>&1 || true; \
+    fi
 
-# Mock chpasswd — minimal rootfs doesn't have it, BusyBox may not include it
+# Real chpasswd: genuine sha512 via openssl.
 RUN printf '#!/bin/sh\nread line; user=$(echo "$line" | cut -d: -f1); pass=$(echo "$line" | cut -d: -f2-); sha=$(openssl passwd -6 "$pass" 2>/dev/null || echo "$pass"); sed -i "s|^${user}:.*|${user}:${sha}:0:0:99999:7:::|" /etc/shadow\n' \
     > /usr/sbin/chpasswd && chmod +x /usr/sbin/chpasswd
 
-# Mock opkg — only when MOCK_OPKG=true (default for latest which has apk)
-RUN if [ "$MOCK_OPKG" = "true" ]; then \
-    printf '#!/bin/sh\necho "opkg $*" >> /tmp/opkg.log\nif [ "$1" = "list-installed" ]; then exit 1; fi\nexit 0\n' \
-    > /usr/bin/opkg && chmod +x /usr/bin/opkg; \
-fi
-
-# Set root password for container access (BusyBox passwd accepts piped input)
 RUN printf 'root\nroot\n' | passwd root
 
-# Disable password auth — test uses SSH key injection instead
 RUN uci set dropbear.@dropbear[0].PasswordAuth='off' && \
     uci set dropbear.@dropbear[0].RootPasswordAuth='off' && \
     uci commit dropbear
 
 EXPOSE 22
 
-# Mock reload_config — no-op in test container (don't kill dropbear mid-SSH!)
-RUN printf '#!/bin/sh\nexit 0\n' \
+RUN printf '#!/bin/sh\nfor s in /etc/init.d/*; do\n  case "$s" in\n    /etc/init.d/dropbear|/etc/init.d/nuci_rollback) ;;\n    *) [ -x "$s" ] && "$s" reload >/dev/null 2>&1 ;;\n  esac\ndone\nexit 0\n' \
     > /sbin/reload_config && chmod +x /sbin/reload_config
 
-# Wrapper: start dropbear directly (init.d needs procd which isn't running)
 RUN printf '#!/bin/sh\n/usr/sbin/dropbear -F -E -p 22 -R\nexec sleep infinity\n' \
     > /start.sh && chmod +x /start.sh
 CMD ["/start.sh"]

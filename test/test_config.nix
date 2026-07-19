@@ -29,19 +29,18 @@
   };
   uci.packages = [
     "luci"
-    "tcpdump"
   ];
   uci.packageSources = {
     feeds = [
       "src/gz custom https://example.com/packages"
     ];
     localPackages = [
-      "./packages/test-package_1.0_all.ipk"
+      "./packages/tcpdump.ipk"
     ];
   };
   uci.secrets =
     if builtins.pathExists ./secrets.enc.json then { sops.files = [ ./secrets.enc.json ]; } else { };
   uci.sshKeys = [
-    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKey test@host"
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAvctZwmsE8Bxt0WYnHZAdRKERk0YKwwidsG32rY6cf2 openwrt-test"
   ];
 }

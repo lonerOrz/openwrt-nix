@@ -1,0 +1,41 @@
+# Realistic OpenWrt (opkg) target — OpenWrt 23.05.5 with genuine opkg.
+#
+# Dropbear's binary in 22.03/23.05 crashes with "Bad buf_getptr" under some
+# modern container kernels, so the transport layer uses OpenSSH (an officially
+# packaged OpenWrt drop-in). All logic under test — opkg, uci, .ipk installs —
+# is the genuine OpenWrt opkg-era stack; only the SSH daemon differs.
+ARG OPENWRT_VERSION=x86-64-23.05.5
+FROM docker.io/openwrt/rootfs:${OPENWRT_VERSION}
+
+RUN mkdir -p /var/lock /var/run /etc/dropbear /etc/ssh /root/.ssh /etc/opkg
+RUN touch /etc/config/system /etc/config/wireless /etc/config/network
+RUN mkdir -p /etc/opkg && touch /etc/opkg/customfeeds.conf
+
+# Replace the broken dropbear with OpenSSH (official OpenWrt package).
+RUN opkg update && opkg install openssh-server openssl-util coreutils-base64
+
+# nuci writes authorized keys to /etc/dropbear/authorized_keys; point OpenSSH
+# there so deployments land without changing nuci's source.
+RUN ln -sf /etc/dropbear/authorized_keys /root/.ssh/authorized_keys && \
+    sed -i 's/#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config && \
+    sed -i 's/#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+
+# Real chpasswd: minimal rootfs lacks it; use genuine sha512 via openssl.
+RUN printf '#!/bin/sh\nread line; user=$(echo "$line" | cut -d: -f1); pass=$(echo "$line" | cut -d: -f2-); sha=$(openssl passwd -6 "$pass" 2>/dev/null || echo "$pass"); sed -i "s|^${user}:.*|${user}:${sha}:0:0:99999:7:::|" /etc/shadow\n' \
+    > /usr/sbin/chpasswd && chmod +x /usr/sbin/chpasswd
+
+RUN printf 'root\nroot\n' | passwd root
+
+EXPOSE 22
+
+# Realistic reload_config: in a rootfs container procd is not running, so a
+# real reload_config no-ops. We reload known init.d services that export a
+# `reload` action, but NEVER dropbear (would kill the SSH session carrying the
+# deploy) and never nuci_rollback. This exercises nuci's fallback path without
+# severing the test connection.
+RUN printf '#!/bin/sh\nfor s in /etc/init.d/*; do\n  case "$s" in\n    /etc/init.d/dropbear|/etc/init.d/nuci_rollback) ;;\n    *) [ -x "$s" ] && "$s" reload >/dev/null 2>&1 ;;\n  esac\ndone\nexit 0\n' \
+    > /sbin/reload_config && chmod +x /sbin/reload_config
+
+RUN printf '#!/bin/sh\nmkdir -p /var/run/sshd\nexec /usr/sbin/sshd -D -e\n' \
+    > /start.sh && chmod +x /start.sh
+CMD ["/start.sh"]

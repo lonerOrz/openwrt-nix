@@ -58,7 +58,7 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), ConfigError> {
     for (config_name, sections) in &root.settings {
         if !is_valid_uci_identifier(config_name) {
             return Err(ConfigError::Validation(format!(
-                "Invalid config name '{config_name}': only [a-zA-Z0-9_-] allowed"
+                "Invalid config name '{config_name}': only [a-zA-Z0-9_] allowed (no digits at start)"
             )));
         }
 
@@ -84,7 +84,7 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), ConfigError> {
                 Section::Named(map) => {
                     if !is_valid_uci_identifier(section_name) {
                         return Err(ConfigError::Validation(format!(
-                            "Invalid section '{section_name}' in config '{config_name}': only [a-zA-Z0-9_-] allowed"
+                            "Invalid section '{section_name}' in config '{config_name}': only [a-zA-Z0-9_] allowed (no digits at start)"
                         )));
                     }
                     validate_section_map(map, config_name, section_name)?;
@@ -92,6 +92,42 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), ConfigError> {
             }
         }
     }
+
+    if let Some(raw) = &root.raw_uci {
+        for (i, line) in raw.iter().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return Err(ConfigError::Validation(format!("rawUci[{i}] is empty")));
+            }
+            if !trimmed.starts_with("uci ") {
+                return Err(ConfigError::Validation(format!(
+                    "rawUci[{i}] must be a 'uci' command, got: {trimmed}"
+                )));
+            }
+        }
+    }
+
+    if let Some(files) = &root.files {
+        for (i, file) in files.iter().enumerate() {
+            let path = &file.path;
+            if !path.starts_with('/') {
+                return Err(ConfigError::Validation(format!(
+                    "files[{i}].path must be absolute, got: {path}"
+                )));
+            }
+            if path.contains("..") {
+                return Err(ConfigError::Validation(format!(
+                    "files[{i}].path must not contain '..': {path}"
+                )));
+            }
+            if file.content.is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "files[{i}].path={path} has empty content"
+                )));
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -110,6 +146,8 @@ mod tests {
             package_sources: None,
             ssh_keys: vec![],
             secrets: None,
+            raw_uci: None,
+            files: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(format!("{err}").contains("Invalid config name"));
@@ -129,6 +167,8 @@ mod tests {
             package_sources: None,
             ssh_keys: vec![],
             secrets: None,
+            raw_uci: None,
+            files: None,
         };
         assert!(validate_root(&root).is_ok());
     }
@@ -148,6 +188,8 @@ mod tests {
             package_sources: None,
             ssh_keys: vec![],
             secrets: None,
+            raw_uci: None,
+            files: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(format!("{err}").contains("Invalid option"));
@@ -167,6 +209,8 @@ mod tests {
             package_sources: None,
             ssh_keys: vec![],
             secrets: None,
+            raw_uci: None,
+            files: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(format!("{err}").contains("Invalid section"));
@@ -187,6 +231,8 @@ mod tests {
             package_sources: None,
             ssh_keys: vec![],
             secrets: None,
+            raw_uci: None,
+            files: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(format!("{err}").contains("null value"));
@@ -206,6 +252,8 @@ mod tests {
             package_sources: None,
             ssh_keys: vec![],
             secrets: None,
+            raw_uci: None,
+            files: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(format!("{err}").contains("missing required '_type'"));
@@ -225,6 +273,8 @@ mod tests {
             package_sources: None,
             ssh_keys: vec![],
             secrets: None,
+            raw_uci: None,
+            files: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(format!("{err}").contains("missing required '_type'"));
@@ -242,6 +292,8 @@ mod tests {
             package_sources: None,
             ssh_keys: vec![],
             secrets: None,
+            raw_uci: None,
+            files: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(format!("{err}").contains("Empty list section"));
@@ -262,6 +314,8 @@ mod tests {
             package_sources: None,
             ssh_keys: vec![],
             secrets: None,
+            raw_uci: None,
+            files: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(format!("{err}").contains("Invalid option"));
@@ -276,6 +330,8 @@ mod tests {
             package_sources: None,
             ssh_keys: vec![],
             secrets: None,
+            raw_uci: None,
+            files: None,
         };
         assert!(validate_root(&root).is_ok());
     }
@@ -289,6 +345,8 @@ mod tests {
             package_sources: None,
             ssh_keys: vec![],
             secrets: None,
+            raw_uci: None,
+            files: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(format!("{err}").contains("Invalid config name"));
@@ -309,8 +367,41 @@ mod tests {
             package_sources: None,
             ssh_keys: vec![],
             secrets: None,
+            raw_uci: None,
+            files: None,
         };
         let err = validate_root(&root).unwrap_err();
         assert!(format!("{err}").contains("Invalid option"));
+    }
+
+    #[test]
+    fn validate_rejects_raw_uci_not_starting_with_uci() {
+        let root = Root {
+            package_manager: "opkg".into(),
+            settings: IndexMap::new(),
+            packages: None,
+            package_sources: None,
+            ssh_keys: vec![],
+            secrets: None,
+            raw_uci: Some(vec!["rm -rf /".into()]),
+            files: None,
+        };
+        let err = validate_root(&root).unwrap_err();
+        assert!(format!("{err}").contains("must be a 'uci' command"));
+    }
+
+    #[test]
+    fn validate_allows_raw_uci_rename() {
+        let root = Root {
+            package_manager: "opkg".into(),
+            settings: IndexMap::new(),
+            packages: None,
+            package_sources: None,
+            ssh_keys: vec![],
+            secrets: None,
+            raw_uci: Some(vec!["uci rename network.lan=lan2".into()]),
+            files: None,
+        };
+        assert!(validate_root(&root).is_ok());
     }
 }
