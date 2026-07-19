@@ -1,6 +1,6 @@
 use crate::error::ConfigError;
 use crate::helpers::iter_options;
-use crate::models::{File, Root, Section};
+use crate::models::{Root, Section};
 use serde_json::Value;
 
 fn is_valid_uci_identifier(s: &str) -> bool {
