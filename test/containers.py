@@ -26,6 +26,9 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENGINE = os.environ.get("CONTAINER_ENGINE", "podman")
 
+NUCI_BIN = PROJECT_ROOT / "target" / "debug" / "nuci"
+PACKAGE_CACHE = Path("/tmp/nuci_package_cache")
+
 SESSION_ID = uuid.uuid4().hex[:8]
 
 
@@ -70,19 +73,32 @@ def wait_for_port(host: str, port: int, timeout: int = 30) -> None:
     raise TimeoutError(f"Port {host}:{port} not reachable after {timeout}s")
 
 
+def _image_exists(image: str) -> bool:
+    """True if `image` is present in local storage.
+
+    Uses `image inspect`, which both Podman and Docker support, so the check
+    works regardless of CONTAINER_ENGINE. (`podman image exists` exists, but
+    the Docker CLI has no `exists` subcommand.)
+    """
+    return engine("image", "inspect", image, check=False).returncode == 0
+
+
 def _ensure_images() -> None:
     """Build the opkg/apk test base images if missing.
 
     The package-fetch helpers (``_fetch_real_opk``/``_fetch_real_apk``) run
     throwaway containers from these images during session bootstrap, before any
     ``Target`` is constructed — so the images must exist up front, not be built
-    lazily by ``Target._build_and_start``.
+    lazily by ``Target._build_and_start``. Skip the build when the image is
+    already present (avoids repeated `opkg update` + openssh install tax).
     """
     images = [
         ("openwrt-test-opkg-env", PROJECT_ROOT / "test" / "Containerfile.opkg"),
         ("openwrt-test-apk-env", PROJECT_ROOT / "test" / "Containerfile.apk"),
     ]
     for image, containerfile in images:
+        if _image_exists(image):
+            continue
         engine("build", "-q", "-t", image, "-f", str(containerfile), str(PROJECT_ROOT))
 
 
@@ -131,6 +147,13 @@ def bootstrap_session() -> SessionArtifacts:
             ]
         )
     pub_key = (Path(f"{ssh_key}.pub")).read_text().strip()
+
+    # Precompile the nuci binary once so Target.nuci() and the inline
+    # subprocess calls in integration_test.py invoke ./target/debug/nuci
+    # directly instead of paying `cargo run` incremental-compile tax per call.
+    # Fail fast on a compile error rather than booting containers and only
+    # discovering the missing binary later.
+    _run(["cargo", "build"], cwd=str(PROJECT_ROOT), check=True)
 
     # SOPS / age
     sops_key_dir.mkdir(parents=True, exist_ok=True)
@@ -276,10 +299,17 @@ def _fetch_real_opk(pkg_dir: Path, pkg: str, out_name: str) -> None:
 
     opkg installs compliant packages regardless of origin, but fetching the
     real package from downloads.openwrt.org keeps the local-package deploy
-    path exercised against a genuinely installable artifact.
+    path exercised against a genuinely installable artifact. A hit in
+    PACKAGE_CACHE skips the network pull + throwaway container entirely.
     """
     import uuid as _uuid
 
+    cached = PACKAGE_CACHE / out_name
+    if cached.exists():
+        shutil.copy(cached, pkg_dir / out_name)
+        return
+
+    PACKAGE_CACHE.mkdir(parents=True, exist_ok=True)
     cname = f"nuci-opkfetch-{_uuid.uuid4().hex[:6]}"
     engine("run", "-d", "--name", cname, "openwrt-test-opkg-env", check=True)
     try:
@@ -299,6 +329,7 @@ def _fetch_real_opk(pkg_dir: Path, pkg: str, out_name: str) -> None:
         if renamed != "OK":
             raise RuntimeError(f"opkg download produced no {pkg}_*.ipk in {cname}")
         engine("cp", f"{cname}:/tmp/{out_name}", str(pkg_dir / out_name), check=True)
+        shutil.copy(pkg_dir / out_name, cached)
     finally:
         engine("rm", "-f", cname, check=False)
 
@@ -308,10 +339,17 @@ def _fetch_real_apk(pkg_dir: Path, pkg: str, out_name: str) -> None:
 
     apk-tools 3.x only installs valid v3 packages; those can't be produced by
     hand-rolled archives. The only compliant source is the official repo,
-    reachable from inside the apk container.
+    reachable from inside the apk container. A hit in PACKAGE_CACHE skips the
+    network pull + throwaway container entirely.
     """
     import uuid as _uuid
 
+    cached = PACKAGE_CACHE / out_name
+    if cached.exists():
+        shutil.copy(cached, pkg_dir / out_name)
+        return
+
+    PACKAGE_CACHE.mkdir(parents=True, exist_ok=True)
     cname = f"nuci-apkfetch-{_uuid.uuid4().hex[:6]}"
     engine("run", "-d", "--name", cname, "openwrt-test-apk-env", check=True)
     try:
@@ -338,6 +376,7 @@ def _fetch_real_apk(pkg_dir: Path, pkg: str, out_name: str) -> None:
             str(pkg_dir / out_name),
             check=True,
         )
+        shutil.copy(pkg_dir / out_name, cached)
     finally:
         engine("rm", "-f", cname, check=False)
 
@@ -386,7 +425,8 @@ class Target:
 
     def _build_and_start(self):
         image, args = self._image_and_args()
-        engine("build", "-q", "-t", image, *args, str(PROJECT_ROOT))
+        if not _image_exists(image):
+            engine("build", "-q", "-t", image, *args, str(PROJECT_ROOT))
         caps = ["--cap-add=NET_ADMIN"] if self.role != "agent" else []
         engine(
             "run",
@@ -503,11 +543,11 @@ class Target:
     # -- nuci binary helpers -------------------------------------------------
 
     def nuci(self, *args, timeout=120) -> subprocess.CompletedProcess:
+        # Use the precompiled binary (built once in bootstrap_session) instead
+        # of `cargo run`, which would re-trigger incremental compilation.
         return _run(
             [
-                "cargo",
-                "run",
-                "--",
+                str(NUCI_BIN),
                 *args,
                 "--target",
                 "root@127.0.0.1",
@@ -532,6 +572,17 @@ class Target:
 
 def cleanup_session(artifacts: SessionArtifacts):
     import glob
+
+    # Tear down any containers spawned for this session by namespace match,
+    # so teardown does not need to hold references to the session fixtures
+    # (which would force eager instantiation of both targets up front).
+    try:
+        out = engine("ps", "-a", "--format", "{{.Names}}", check=False).stdout
+        for name in out.splitlines():
+            if SESSION_ID in name:
+                engine("rm", "-f", name, check=False)
+    except Exception:
+        pass
 
     for sock in glob.glob("/tmp/ssh-*"):
         Path(sock).unlink(missing_ok=True)

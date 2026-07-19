@@ -15,7 +15,7 @@ import time
 
 import pytest
 
-from containers import Target, bootstrap_session, cleanup_session
+from containers import Target, bootstrap_session, cleanup_session, NUCI_BIN
 
 ART = bootstrap_session()
 
@@ -27,6 +27,30 @@ def _count_sections(uci_show: str) -> int:
     `system.@system[0].hostname='...'` — only the `[N]=` form is a header.
     """
     return len(re.findall(r"@\w+\[\d+\]=", uci_show))
+
+
+# Verbatim copy of the reload_config mock baked into Containerfile.opkg /
+# Containerfile.apk. Tests that overwrite /sbin/reload_config must restore
+# this exact script, otherwise the next class sharing the session container
+# runs under corrupted reload semantics (see TestSmartReloadFallback/Primary).
+RELOAD_CONFIG_ORIGINAL = (
+    "#!/bin/sh\n"
+    "for s in /etc/init.d/*; do\n"
+    '  case "$s" in\n'
+    "    /etc/init.d/dropbear|/etc/init.d/nuci_rollback) ;;\n"
+    '    *) [ -x "$s" ] && "$s" reload >/dev/null 2>&1 ;;\n'
+    "  esac\n"
+    "done\n"
+    "exit 0\n"
+)
+
+
+def _restore_reload_config(target: Target) -> None:
+    target.sh(
+        f"cat > /sbin/reload_config <<'EOF'\n{RELOAD_CONFIG_ORIGINAL}EOF\n"
+        "chmod +x /sbin/reload_config",
+        check=False,
+    )
 
 
 def _spawn(role: str, check_ssh: bool = True):
@@ -45,12 +69,12 @@ def _spawn(role: str, check_ssh: bool = True):
     return t
 
 
-@pytest.fixture(scope="class")
+@pytest.fixture(scope="session")
 def opkg_target():
     yield _spawn("opkg")
 
 
-@pytest.fixture(scope="class")
+@pytest.fixture(scope="session")
 def apkg_target():
     yield _spawn("apk")
 
@@ -58,6 +82,50 @@ def apkg_target():
 @pytest.fixture(scope="class")
 def agent_target():
     yield _spawn("agent", check_ssh=False)
+
+
+# Classes that need a clean, converged UCI state on the shared session
+# container before each test. Every method redeploys OPKG_JSON/APK_JSON with
+# --force, which (being idempotent) wipes orphan sections, rebuilds anonymous
+# lists, and restores overwritten files — our reset primitive. reload_config
+# is also restored verbatim, since some tests mutate it on the container.
+_RESET_OPKG_CLASSES = {
+    "TestDeploy",
+    "TestRawUciEscapeHatch",
+    "TestIdempotentListOrder",
+    "TestSectionDeletion",
+    "TestAnonymousListDeletion",
+    "TestDiffPreviewsPackagesAndKeys",
+    "TestWatchdogRollback",
+    "TestSmartReloadFallback",
+    "TestUnifiedLifecycle",
+    "TestCustomFiles",
+}
+_RESET_APKG_CLASSES = {
+    "TestDeploy",
+    "TestRawUciEscapeHatch",
+    "TestAnonymousListDeletionApk",
+    "TestDiffAccuracy",
+    "TestSmartReloadPrimary",
+}
+
+
+@pytest.fixture(autouse=True)
+def reset_uci_state(request):
+    cls = request.cls.__name__ if request.cls else ""
+    target = None
+    if cls in _RESET_OPKG_CLASSES:
+        target = request.getfixturevalue("opkg_target")
+        target.nuci("deploy", OPKG_JSON, "--force")
+        _restore_reload_config(target)
+    elif cls in _RESET_APKG_CLASSES:
+        target = request.getfixturevalue("apkg_target")
+        target.nuci("deploy", APK_JSON, "--force")
+        _restore_reload_config(target)
+    yield
+    # Best-effort re-converge so a crash mid-test doesn't poison the next one.
+    if target is not None:
+        _restore_reload_config(target)
 
 
 def _compile(backend: str) -> str:
@@ -91,6 +159,10 @@ APK_JSON = ART.apk_json
 
 @pytest.fixture(scope="session", autouse=True)
 def _teardown_session():
+    # No target params: requesting opkg_target/apkg_target here would force
+    # pytest to instantiate BOTH containers eagerly at session start, even
+    # when a selective run (e.g. `pytest -k TestDeploy`) only needs one.
+    # cleanup_session tears down containers by SESSION_ID namespace instead.
     yield
     cleanup_session(ART)
 
@@ -326,7 +398,7 @@ class TestNestedAndComplexValues:
             '"obj":{"nested":"v"}}}}}'
         )
         r = subprocess.run(
-            ["cargo", "run", "--", "compile", str(bad)],
+            [str(NUCI_BIN), "compile", str(bad)],
             capture_output=True,
             text=True,
         )
@@ -340,7 +412,7 @@ class TestNestedAndComplexValues:
             '{"packageManager":"opkg","settings":{"x":{"s":{"_type":"t","k":null}}}}'
         )
         r = subprocess.run(
-            ["cargo", "run", "--", "compile", str(bad)],
+            [str(NUCI_BIN), "compile", str(bad)],
             capture_output=True,
             text=True,
         )
@@ -435,11 +507,10 @@ class TestSmartReloadFallback:
             assert "network called" in hist and "system called" in hist
             assert "firewall called" not in hist
         finally:
-            opkg_target.sh(
-                "printf '#!/bin/sh\\nexit 0\\n' > /sbin/reload_config && "
-                "chmod +x /sbin/reload_config",
-                check=False,
-            )
+            # Restore the original mock reload_config (not a bare `exit 0`
+            # stub) so the shared session container keeps correct reload
+            # semantics for subsequent classes.
+            _restore_reload_config(opkg_target)
             for svc in ("dropbear", "network", "firewall", "dnsmasq", "system"):
                 opkg_target.sh(f"rm -f /etc/init.d/{svc}", check=False)
             opkg_target.sh("rm -f /tmp/reload_history", check=False)
@@ -472,6 +543,7 @@ class TestSmartReloadPrimary:
             )
         finally:
             apkg_target.sh("rm -f /tmp/.reload_config_primary", check=False)
+            _restore_reload_config(apkg_target)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -494,7 +566,7 @@ class TestUnifiedLifecycle:
         )
         boot.close()
         r = subprocess.run(
-            ["cargo", "run", "--", "compile", boot.name, "--no-sops"],
+            [str(NUCI_BIN), "compile", boot.name, "--no-sops"],
             capture_output=True,
             text=True,
         )
@@ -539,9 +611,7 @@ class TestCustomFiles:
         try:
             r = sp.run(
                 [
-                    "cargo",
-                    "run",
-                    "--",
+                    str(NUCI_BIN),
                     "deploy",
                     fpath,
                     "--target",
@@ -586,9 +656,7 @@ class TestCustomFiles:
         try:
             r = sp.run(
                 [
-                    "cargo",
-                    "run",
-                    "--",
+                    str(NUCI_BIN),
                     "deploy",
                     fpath,
                     "--target",
@@ -639,9 +707,7 @@ class TestCustomFiles:
             fpath = f.name
         try:
             common = [
-                "cargo",
-                "run",
-                "--",
+                str(NUCI_BIN),
                 "deploy",
                 fpath,
                 "--target",
@@ -712,7 +778,7 @@ class TestHyphenIdentifiers:
             fpath = f.name
         try:
             r = sp.run(
-                ["cargo", "run", "--", "compile", fpath],
+                [str(NUCI_BIN), "compile", fpath],
                 capture_output=True,
                 text=True,
             )
@@ -743,7 +809,7 @@ class TestHyphenIdentifiers:
             fpath = f.name
         try:
             r = sp.run(
-                ["cargo", "run", "--", "compile", fpath],
+                [str(NUCI_BIN), "compile", fpath],
                 capture_output=True,
                 text=True,
             )
