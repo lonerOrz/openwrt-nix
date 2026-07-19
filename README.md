@@ -44,15 +44,32 @@ No manual recovery needed either way.
 Rather than hardcode which init script owns each config, nuci discovers it on
 the target at deploy time:
 
-1. `/etc/init.d/<config>` exists → reload it.
-2. `wireless` → `/sbin/wifi reload` (or `network restart`).
-3. Otherwise it greps `config_load <config>` in `/etc/init.d/*` as a best-effort
-   guess for arbitrary services. The canonical OpenWrt reload path is
-   `reload_config`/procd, which nuci uses when available; this grep is a known
-   heuristic, not an official API.
+1. procd's native `/sbin/reload_config` is used when available (the canonical
+   OpenWrt reload path).
+2. Otherwise it greps `config_load <config>` in `/etc/init.d/*` to learn which
+   services own which config, then reloads only the affected ones
+   (`/etc/init.d/<svc> reload`). This `config_load` heuristic is the documented
+   OpenWrt convention — a known best-effort fallback, not an official API.
 
 Reloads are targeted — only services tied to changed configs restart, not the
 whole box.
+
+## Beyond UCI
+
+- **Arbitrary files** (`files`): write any file to an absolute path — configs
+  for non-UCI apps, init scripts, crontabs. Supports `executable` mode, binary
+  content (`content = { "base64": "..." }`), and optional `checksum`-guarded
+  idempotent writes that skip the file when its hash already matches.
+- **Raw UCI escape hatch** (`rawUci`): for directives the typed model can't
+  express (`uci rename`, `uci reorder`, deleting a single option). Every line
+  must start with `uci ` — the one auditable place raw commands reach the target.
+- **Secrets**: SOPS + age decryption at compile time, with `@placeholder@`
+  syntax in config. Missing placeholders are a compile error, not a blank.
+- **Packages**: opkg / apk dual backend, custom feeds, and local `.ipk` / `.apk`
+  injection.
+
+See the [documentation](docs/index.md) for the full design philosophy and
+copy-paste Nix examples.
 
 ## Declarative ownership
 
