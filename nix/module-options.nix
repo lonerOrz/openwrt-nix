@@ -53,7 +53,17 @@
           };
           content = lib.mkOption {
             type = lib.types.str;
-            description = "File content to write.";
+            description = "Text content to write. Use `base64` instead for binary content.";
+          };
+          base64 = lib.mkOption {
+            default = null;
+            type = lib.types.nullOr lib.types.str;
+            description = "Base64-encoded binary content. Takes precedence over `content` when set.";
+          };
+          checksum = lib.mkOption {
+            default = null;
+            type = lib.types.nullOr lib.types.str;
+            description = "Expected sha256 (hex) of the file. When set, the target skips the write if its current hash already matches.";
           };
           executable = lib.mkOption {
             default = false;

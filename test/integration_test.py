@@ -614,6 +614,59 @@ class TestCustomFiles:
         finally:
             os.unlink(fpath)
 
+    def test_opkg_binary_and_checksum_idempotent(self, opkg_target: Target):
+        import base64
+        import hashlib
+        import json
+        import subprocess as sp
+        import tempfile
+
+        raw = b"\x00\x01\x02nuci-binary\xfe\xff"
+        b64 = base64.b64encode(raw).decode()
+        checksum = hashlib.sha256(raw).hexdigest()
+
+        json_data = {
+            "packageManager": "opkg",
+            "settings": {},
+            "files": [
+                {
+                    "path": "/tmp/nuci_test_bin",
+                    "content": {"base64": b64},
+                    "executable": True,
+                    "checksum": checksum,
+                }
+            ],
+        }
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False
+        ) as f:
+            json.dump(json_data, f)
+            f.flush()
+            fpath = f.name
+        try:
+            common = [
+                "cargo", "run", "--", "deploy", fpath,
+                "--target", "root@127.0.0.1",
+                "--port", str(opkg_target.port),
+                "--identity", str(ART.ssh_key),
+                "--force",
+            ]
+            r = sp.run(common, capture_output=True, text=True,
+                       env={**os.environ, "NUCI_WATCHDOG_TIMEOUT": "5"}, timeout=120)
+            assert r.returncode == 0, r.stderr
+            # Binary content round-trips exactly.
+            got = base64.b64decode(opkg_target.sh("base64 /tmp/nuci_test_bin"))
+            assert got == raw
+            # checksum guard makes a second deploy skip the write (idempotent).
+            # Verified by the file still being exactly correct after redeploy.
+            r2 = sp.run(common, capture_output=True, text=True,
+                        env={**os.environ, "NUCI_WATCHDOG_TIMEOUT": "5"}, timeout=120)
+            assert r2.returncode == 0, r2.stderr
+            got2 = base64.b64decode(opkg_target.sh("base64 /tmp/nuci_test_bin"))
+            assert got2 == raw
+        finally:
+            os.unlink(fpath)
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # 12. Hyphen in config/section/option names (UCI-legal identifiers)

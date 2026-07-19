@@ -27,6 +27,26 @@ in
           configuration
         ];
       };
+      filesJson =
+        map
+          (
+            f:
+            {
+              path = f.path;
+              executable = f.executable;
+              content =
+                if f.base64 != null then
+                  {
+                    base64 = f.base64;
+                  }
+                else
+                  f.content;
+            }
+            // (lib.optionalAttrs (f.checksum != null) {
+              inherit (f) checksum;
+            })
+          )
+          res.config.uci.files;
       json = (formats.json { }).generate "uci.json" {
         inherit (res.config.uci)
           packageManager
@@ -36,8 +56,8 @@ in
           packageSources
           sshKeys
           rawUci
-          files
           ;
+        inherit filesJson;
       };
     in
     {

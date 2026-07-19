@@ -7,7 +7,7 @@ use crate::diff::{
     SERVICE_SEPARATOR, build_discovery_command, extract_desired_map, parse_services, parse_uci_show,
 };
 use crate::error::ConfigError;
-use crate::models::{Root, Section};
+use crate::models::{FileContent, Root, Section};
 use crate::pipeline::compile_config;
 use crate::uci_key::is_named_section_key;
 use indexmap::IndexMap;
@@ -296,16 +296,39 @@ fn build_remote_script(
             let dir = Path::new(dest).parent().unwrap_or(Path::new("/"));
             let dir_str = dir.to_string_lossy();
             script.push_str(&format!("mkdir -p '{dir_str}'\n"));
-            script.push_str(&format!("cat > '{dest}' <<'NUCI_FILE_{i}_EOF'\n"));
-            script.push_str(&file.content);
-            if !file.content.ends_with('\n') {
-                script.push('\n');
+
+            let guard_open = match &file.checksum {
+                Some(sum) => format!(
+                    "if [ \"$(sha256sum '{dest}' 2>/dev/null | cut -d' ' -f1)\" != '{sum}' ]; then\n"
+                ),
+                None => String::new(),
+            };
+            let indent = if file.checksum.is_some() { "    " } else { "" };
+            script.push_str(&guard_open);
+
+            match &file.content {
+                FileContent::Text(text) => {
+                    script.push_str(&format!("{indent}cat > '{dest}' <<'NUCI_FILE_{i}_EOF'\n"));
+                    script.push_str(indent);
+                    script.push_str(text);
+                    if !text.ends_with('\n') {
+                        script.push('\n');
+                    }
+                    script.push_str(&format!("{indent}NUCI_FILE_{i}_EOF\n"));
+                }
+                FileContent::Base64(b64) => {
+                    script.push_str(&format!("{indent}echo '{b64}' | base64 -d > '{dest}'\n"));
+                }
             }
-            script.push_str(&format!("NUCI_FILE_{i}_EOF\n"));
+
             if file.executable {
-                script.push_str(&format!("chmod 755 '{dest}'\n"));
+                script.push_str(&format!("{indent}chmod 755 '{dest}'\n"));
             } else {
-                script.push_str(&format!("chmod 644 '{dest}'\n"));
+                script.push_str(&format!("{indent}chmod 644 '{dest}'\n"));
+            }
+
+            if file.checksum.is_some() {
+                script.push_str("fi\n");
             }
         }
     }
@@ -744,5 +767,48 @@ mod tests {
         assert!(script.contains("chmod 755 '/etc/rc.local'"));
         assert!(script.contains("cat > '/etc/custom/config.txt'"));
         assert!(script.contains("chmod 644 '/etc/custom/config.txt'"));
+    }
+
+    #[test]
+    fn build_remote_script_binary_and_checksum() {
+        use std::io::Write;
+
+        let json_text = r##"{
+            "packageManager": "opkg",
+            "settings": {},
+            "files": [
+                {
+                    "path": "/usr/bin/blob",
+                    "content": { "base64": "aGVsbG8=" },
+                    "executable": true,
+                    "checksum": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+                }
+            ]
+        }"##;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(json_text.as_bytes()).unwrap();
+
+        let config = DeployConfig {
+            port: 22,
+            identity_file: None,
+            force: true,
+        };
+        let ssh = FakeSsh {
+            calls: std::cell::RefCell::new(Vec::new()),
+        };
+
+        run(f.path(), "root@127.0.0.1", &config, None, &ssh).unwrap();
+
+        let calls = ssh.calls.borrow();
+        let script = String::from_utf8_lossy(calls[0].1.as_ref().unwrap());
+
+        assert!(script.contains("echo 'aGVsbG8=' | base64 -d > '/usr/bin/blob'"));
+        assert!(script.contains("chmod 755 '/usr/bin/blob'"));
+        assert!(script.contains("sha256sum '/usr/bin/blob'"));
+        assert!(
+            script.contains("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+        );
+        assert!(script.contains("if [ \"$(sha256sum '/usr/bin/blob'"));
+        assert!(script.trim_end().ends_with("fi"));
     }
 }
