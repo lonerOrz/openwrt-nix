@@ -10,11 +10,11 @@ Nix ──► nuci.json ──► nuci (Rust) ──► SSH ──► Router (UC
 
 Managing OpenWrt configurations has historically meant one of three painful options:
 
-| Approach | Pain point |
-| --- | --- |
-| **LuCI** (web UI) | No version control, no review, click-ops, diverges silently from reality. |
-| **Ansible / generic CM** | Too heavy for 128 MB routers; shell-driven, rarely idempotent on UCI. |
-| **Pure NixOS** | NixOS does not run on OpenWrt; the router's userspace is busybox + procd. |
+| Approach                 | Pain point                                                                |
+| ------------------------ | ------------------------------------------------------------------------- |
+| **LuCI** (web UI)        | No version control, no review, click-ops, diverges silently from reality. |
+| **Ansible / generic CM** | Too heavy for 128 MB routers; shell-driven, rarely idempotent on UCI.     |
+| **Pure NixOS**           | NixOS does not run on OpenWrt; the router's userspace is busybox + procd. |
 
 `nuci` sits in the gap: you keep **Nix** as the source of truth (typed, reviewable,
 reproducible), and `nuci` compiles that to the UCI directives OpenWrt actually speaks,

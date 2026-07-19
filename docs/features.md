@@ -24,8 +24,8 @@ every third-party package.
   installed directly with `apk add --allow-untrusted` (apk filenames don't
   reliably encode the package name).
 
-> **Ordering pitfall (solved):** custom feeds are written *before* package
-> installs, and official packages are installed *before* custom-source packages,
+> **Ordering pitfall (solved):** custom feeds are written _before_ package
+> installs, and official packages are installed _before_ custom-source packages,
 > so a package that depends on a feed never hits a dead-link error.
 
 ### Secrets (SOPS)

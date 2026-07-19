@@ -532,9 +532,7 @@ class TestCustomFiles:
                 }
             ],
         }
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump(json_data, f)
             f.flush()
             fpath = f.name
@@ -581,9 +579,7 @@ class TestCustomFiles:
                 }
             ],
         }
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump(json_data, f)
             f.flush()
             fpath = f.name
@@ -637,22 +633,32 @@ class TestCustomFiles:
                 }
             ],
         }
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump(json_data, f)
             f.flush()
             fpath = f.name
         try:
             common = [
-                "cargo", "run", "--", "deploy", fpath,
-                "--target", "root@127.0.0.1",
-                "--port", str(opkg_target.port),
-                "--identity", str(ART.ssh_key),
+                "cargo",
+                "run",
+                "--",
+                "deploy",
+                fpath,
+                "--target",
+                "root@127.0.0.1",
+                "--port",
+                str(opkg_target.port),
+                "--identity",
+                str(ART.ssh_key),
                 "--force",
             ]
-            r = sp.run(common, capture_output=True, text=True,
-                       env={**os.environ, "NUCI_WATCHDOG_TIMEOUT": "5"}, timeout=120)
+            r = sp.run(
+                common,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "NUCI_WATCHDOG_TIMEOUT": "5"},
+                timeout=120,
+            )
             assert r.returncode == 0, r.stderr
             # Binary content round-trips exactly: busybox sha256sum on the
             # target matches the hash we computed locally (no host-side
@@ -661,8 +667,13 @@ class TestCustomFiles:
             assert got_sum == checksum
             # checksum guard makes a second deploy skip the write (idempotent).
             # Verified by the file still hashing correctly after redeploy.
-            r2 = sp.run(common, capture_output=True, text=True,
-                        env={**os.environ, "NUCI_WATCHDOG_TIMEOUT": "5"}, timeout=120)
+            r2 = sp.run(
+                common,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "NUCI_WATCHDOG_TIMEOUT": "5"},
+                timeout=120,
+            )
             assert r2.returncode == 0, r2.stderr
             got_sum2 = opkg_target.sh("sha256sum /tmp/nuci_test_bin").split()[0]
             assert got_sum2 == checksum
@@ -695,9 +706,7 @@ class TestHyphenIdentifiers:
             "packageManager": "opkg",
             "settings": {"my-config": {}},
         }
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump(json_data, f)
             f.flush()
             fpath = f.name
@@ -728,9 +737,7 @@ class TestHyphenIdentifiers:
                 }
             },
         }
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump(json_data, f)
             f.flush()
             fpath = f.name

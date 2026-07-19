@@ -26,7 +26,7 @@ there is exactly one function that decides "what the router should look like".
 ## Core mechanism 1 — UCI serialization & absolute idempotency
 
 OpenWrt's `uci` stores config in `/etc/config/*`. `nuci` never edits those files
-directly; it emits `uci batch` directives that set the *desired* state. The
+directly; it emits `uci batch` directives that set the _desired_ state. The
 tricky part is that UCI has two kinds of sections, and they need different
 reconciliation strategies.
 
@@ -68,7 +68,7 @@ cleanup.)
 ### List-order independence
 
 `uci show` emits list values as separate `option[0]=`, `option[1]=` lines, and
-the *order* in which you append them can differ from what's on the router even
+the _order_ in which you append them can differ from what's on the router even
 when the set is identical — causing false "changed" reports.
 
 `nuci` joins list elements with the **Unit Separator** control character
@@ -166,12 +166,12 @@ converges to the Nix model with no leftovers.
 
 ## Summary
 
-| Concern | Mechanism |
-| --- | --- |
-| Idempotent named sections | `delete` + `set` rebuild |
-| Idempotent anon lists | `while delete @type[0]` + re-add |
-| No false diffs on reorder | `LIST_SEP` (`\u{1f}`) comparison |
-| Lockout safety (network) | 60 s rollback watchdog (`NUCI_WATCHDOG_TIMEOUT`) |
-| Lockout safety (power loss) | self-deleting `S15nuci_rollback` boot hook |
-| Reload correctness | procd `reload_config`, else `config_load` grep fallback |
-| Stale cleanup | named-section `uci delete` + anon full-rebuild |
+| Concern                     | Mechanism                                               |
+| --------------------------- | ------------------------------------------------------- |
+| Idempotent named sections   | `delete` + `set` rebuild                                |
+| Idempotent anon lists       | `while delete @type[0]` + re-add                        |
+| No false diffs on reorder   | `LIST_SEP` (`\u{1f}`) comparison                        |
+| Lockout safety (network)    | 60 s rollback watchdog (`NUCI_WATCHDOG_TIMEOUT`)        |
+| Lockout safety (power loss) | self-deleting `S15nuci_rollback` boot hook              |
+| Reload correctness          | procd `reload_config`, else `config_load` grep fallback |
+| Stale cleanup               | named-section `uci delete` + anon full-rebuild          |
