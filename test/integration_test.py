@@ -654,16 +654,18 @@ class TestCustomFiles:
             r = sp.run(common, capture_output=True, text=True,
                        env={**os.environ, "NUCI_WATCHDOG_TIMEOUT": "5"}, timeout=120)
             assert r.returncode == 0, r.stderr
-            # Binary content round-trips exactly.
-            got = base64.b64decode(opkg_target.sh("base64 /tmp/nuci_test_bin"))
-            assert got == raw
+            # Binary content round-trips exactly: busybox sha256sum on the
+            # target matches the hash we computed locally (no host-side
+            # base64 needed, since the OpenWrt base image lacks it).
+            got_sum = opkg_target.sh("sha256sum /tmp/nuci_test_bin").split()[0]
+            assert got_sum == checksum
             # checksum guard makes a second deploy skip the write (idempotent).
-            # Verified by the file still being exactly correct after redeploy.
+            # Verified by the file still hashing correctly after redeploy.
             r2 = sp.run(common, capture_output=True, text=True,
                         env={**os.environ, "NUCI_WATCHDOG_TIMEOUT": "5"}, timeout=120)
             assert r2.returncode == 0, r2.stderr
-            got2 = base64.b64decode(opkg_target.sh("base64 /tmp/nuci_test_bin"))
-            assert got2 == raw
+            got_sum2 = opkg_target.sh("sha256sum /tmp/nuci_test_bin").split()[0]
+            assert got_sum2 == checksum
         finally:
             os.unlink(fpath)
 

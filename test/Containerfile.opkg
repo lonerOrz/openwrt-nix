@@ -12,7 +12,7 @@ RUN touch /etc/config/system /etc/config/wireless /etc/config/network
 RUN mkdir -p /etc/opkg && touch /etc/opkg/customfeeds.conf
 
 # Replace the broken dropbear with OpenSSH (official OpenWrt package).
-RUN opkg update && opkg install openssh-server openssl-util
+RUN opkg update && opkg install openssh-server openssl-util coreutils-base64
 
 # nuci writes authorized keys to /etc/dropbear/authorized_keys; point OpenSSH
 # there so deployments land without changing nuci's source.
