@@ -355,15 +355,15 @@ pub(crate) fn run(
 
     // High-risk changes beyond UCI — surface them so `diff` is a real preview,
     // marked against the live target state.
-    if let Some(packages) = &compiled.resolved_root.packages {
-        if !packages.is_empty() {
-            println!("\n\x1b[1;35m[Packages]\x1b[0m");
-            for pkg in packages {
-                match pkg_state.get(pkg) {
-                    Some(true) => println!("  \x1b[90m{pkg}  (Installed)\x1b[0m"),
-                    Some(false) => println!("  \x1b[32m+ {pkg}  (To Install)\x1b[0m"),
-                    None => println!("  \x1b[32m+ {pkg}  (To Install)\x1b[0m"),
-                }
+    if let Some(packages) = &compiled.resolved_root.packages
+        && !packages.is_empty()
+    {
+        println!("\n\x1b[1;35m[Packages]\x1b[0m");
+        for pkg in packages {
+            match pkg_state.get(pkg) {
+                Some(true) => println!("  \x1b[90m{pkg}  (Installed)\x1b[0m"),
+                Some(false) => println!("  \x1b[32m+ {pkg}  (To Install)\x1b[0m"),
+                None => println!("  \x1b[32m+ {pkg}  (To Install)\x1b[0m"),
             }
         }
     }

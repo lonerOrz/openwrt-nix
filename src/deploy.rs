@@ -348,9 +348,10 @@ fn orphan_delete_commands(
     let desired_named: HashSet<String> = desired
         .iter()
         .flat_map(|(config, sections)| {
-            sections.iter().filter_map(move |(name, section)| {
-                matches!(section, Section::Named(_)).then(|| format!("{config}.{name}"))
-            })
+            sections
+                .iter()
+                .filter(|(_, section)| matches!(section, Section::Named(_)))
+                .map(move |(name, _)| format!("{config}.{name}"))
         })
         .collect();
 
