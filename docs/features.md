@@ -17,7 +17,8 @@ every third-party package.
 - **Secrets (SOPS)** — `secrets.sops.files = [ ./secrets.yml ]` decrypts with
   `sops` + age at compile time. Placeholders use `@name@` syntax
   (`key = "@wifi_password@"`); a missing placeholder is a **compile error**,
-  not a silent blank.
+  not a silent blank. You can skip SOPS with `--no-sops` or supply extra plain
+  JSON secret files with `-s` / `--secrets-dir`.
 - **SSH keys & lockout prevention** — `sshKeys` writes authorized keys, and
   the deployer's own key is auto-appended if absent, so a config mistake
   can't lock you out of the box you're deploying from.

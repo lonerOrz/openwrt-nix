@@ -95,7 +95,7 @@ watchdog:
 If the deploy succeeds, `nuci` reconnects and **kills the watchdog PID** — the
 backup is discarded and the new config stays. If the connection drops (wrong
 IP, dead interface, reboot), the watchdog fires after 60 s, restores the
-backup, and reloads. The timeout is overridable via `NUCI_WATCHDOG_TIMEOUT`.
+backup, and reloads. The timeout is configurable via the `--watchdog-timeout` CLI flag (or `uci.watchdogTimeout` in Nix, defaulting to 60s).
 
 **Layer B — Boot-time hook (power loss during deploy).** The watchdog only
 helps if the box stays up. If it **reboots mid-deploy** (power loss), `nuci`
@@ -154,12 +154,12 @@ to the Nix model with no leftovers.
 
 ## Summary
 
-| Concern                     | Mechanism                                               |
-| --------------------------- | ------------------------------------------------------- |
-| Idempotent named sections   | `delete` + `set` rebuild                                |
-| Idempotent anon lists       | `while delete @type[0]` + re-add                        |
-| No false diffs on reorder   | `LIST_SEP` (`\u{1f}`) comparison                        |
-| Lockout safety (network)    | 60 s rollback watchdog (`NUCI_WATCHDOG_TIMEOUT`)        |
-| Lockout safety (power loss) | self-deleting `S15nuci_rollback` boot hook              |
-| Reload correctness          | procd `reload_config`, else `config_load` grep fallback |
-| Stale cleanup               | named-section `uci delete` + anon full-rebuild          |
+| Concern                     | Mechanism                                                             |
+| --------------------------- | --------------------------------------------------------------------- |
+| Idempotent named sections   | `delete` + `set` rebuild                                              |
+| Idempotent anon lists       | `while delete @type[0]` + re-add                                      |
+| No false diffs on reorder   | `LIST_SEP` (`\u{1f}`) comparison                                      |
+| Lockout safety (network)    | 60 s rollback watchdog (`--watchdog-timeout` / `uci.watchdogTimeout`) |
+| Lockout safety (power loss) | self-deleting `S15nuci_rollback` boot hook                            |
+| Reload correctness          | procd `reload_config`, else `config_load` grep fallback               |
+| Stale cleanup               | named-section `uci delete` + anon full-rebuild                        |

@@ -1,5 +1,4 @@
 use crate::error::ConfigError;
-use crate::helpers::iter_options_mut;
 use crate::models::{Root, Section};
 use serde_json::Value;
 use std::borrow::Cow;
@@ -86,14 +85,14 @@ pub(crate) fn resolve_secrets(
         for section in sections.values_mut() {
             match section {
                 Section::List(arr) => {
-                    for map in arr {
-                        for (_, v) in iter_options_mut(map) {
+                    for section in arr {
+                        for (_, v) in section.options.iter_mut() {
                             resolve_value(v, secrets)?;
                         }
                     }
                 }
-                Section::Named(map) => {
-                    for (_, v) in iter_options_mut(map) {
+                Section::Named(section) => {
+                    for (_, v) in section.options.iter_mut() {
                         resolve_value(v, secrets)?;
                     }
                 }
@@ -206,9 +205,8 @@ pub(crate) fn decrypt_sops_mem(root: &Root) -> Result<HashMap<String, String>, C
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::PackageSources;
+    use crate::models::{AnonymousSection, NamedSection, PackageSources, Section};
     use indexmap::IndexMap;
-    use serde_json::Map;
     use std::fs;
     use tempfile::TempDir;
 
@@ -263,12 +261,17 @@ mod tests {
 
     #[test]
     fn resolve_secrets_success() {
-        let mut obj = Map::new();
-        obj.insert("_type".into(), Value::String("wifi-iface".into()));
-        obj.insert("key".into(), Value::String("@wifi_pass@".into()));
+        let mut options = IndexMap::new();
+        options.insert("key".into(), Value::String("@wifi_pass@".into()));
 
         let mut sections = IndexMap::new();
-        sections.insert("radio0".into(), Section::Named(obj));
+        sections.insert(
+            "radio0".into(),
+            Section::Named(NamedSection {
+                section_type: "wifi-iface".into(),
+                options,
+            }),
+        );
 
         let mut settings = IndexMap::new();
         settings.insert("wireless".into(), sections);
@@ -287,8 +290,8 @@ mod tests {
         let secs = secrets(&[("wifi_pass", "secret123")]);
         let resolved = resolve_secrets(root, &secs).unwrap();
 
-        if let Section::Named(map) = &resolved.settings["wireless"]["radio0"] {
-            assert_eq!(map["key"], "secret123");
+        if let Section::Named(section) = &resolved.settings["wireless"]["radio0"] {
+            assert_eq!(section.options["key"], "secret123");
         } else {
             panic!("Expected Section::Named");
         }
@@ -296,12 +299,17 @@ mod tests {
 
     #[test]
     fn resolve_secrets_missing_secret_errors() {
-        let mut obj = Map::new();
-        obj.insert("_type".into(), Value::String("wifi-iface".into()));
-        obj.insert("key".into(), Value::String("@missing_secret@".into()));
+        let mut options = IndexMap::new();
+        options.insert("key".into(), Value::String("@missing_secret@".into()));
 
         let mut sections = IndexMap::new();
-        sections.insert("radio0".into(), Section::Named(obj));
+        sections.insert(
+            "radio0".into(),
+            Section::Named(NamedSection {
+                section_type: "wifi-iface".into(),
+                options,
+            }),
+        );
 
         let mut settings = IndexMap::new();
         settings.insert("wireless".into(), sections);
@@ -322,13 +330,18 @@ mod tests {
     }
 
     #[test]
-    fn resolve_secrets_skips_type_field() {
-        let mut obj = Map::new();
-        obj.insert("_type".into(), Value::String("@not_a_secret@".into()));
-        obj.insert("key".into(), Value::String("plain".into()));
+    fn resolve_secrets_preserves_type_field() {
+        let mut options = IndexMap::new();
+        options.insert("key".into(), Value::String("plain".into()));
 
         let mut sections = IndexMap::new();
-        sections.insert("test".into(), Section::Named(obj));
+        sections.insert(
+            "test".into(),
+            Section::Named(NamedSection {
+                section_type: "wifi-iface".into(),
+                options,
+            }),
+        );
 
         let mut settings = IndexMap::new();
         settings.insert("config".into(), sections);
@@ -345,9 +358,9 @@ mod tests {
         };
 
         let resolved = resolve_secrets(root, &HashMap::new()).unwrap();
-        if let Section::Named(map) = &resolved.settings["config"]["test"] {
-            assert_eq!(map["_type"], "@not_a_secret@");
-            assert_eq!(map["key"], "plain");
+        if let Section::Named(section) = &resolved.settings["config"]["test"] {
+            assert_eq!(section.section_type, "wifi-iface");
+            assert_eq!(section.options["key"], "plain");
         } else {
             panic!("Expected Section::Named");
         }
@@ -355,10 +368,16 @@ mod tests {
 
     #[test]
     fn resolve_secrets_empty_map_errors_on_placeholder() {
-        let mut obj = Map::new();
-        obj.insert("key".into(), Value::String("@secret@".into()));
+        let mut options = IndexMap::new();
+        options.insert("key".into(), Value::String("@secret@".into()));
         let mut sections = IndexMap::new();
-        sections.insert("s".into(), Section::Named(obj));
+        sections.insert(
+            "s".into(),
+            Section::Named(NamedSection {
+                section_type: "test".into(),
+                options,
+            }),
+        );
         let mut settings = IndexMap::new();
         settings.insert("c".into(), sections);
         let root = Root {
@@ -378,11 +397,16 @@ mod tests {
 
     #[test]
     fn resolve_secrets_list_section() {
-        let mut item = Map::new();
-        item.insert("_type".into(), Value::String("dropbear".into()));
-        item.insert("Port".into(), Value::String("@port@".into()));
+        let mut options = IndexMap::new();
+        options.insert("Port".into(), Value::String("@port@".into()));
         let mut sections = IndexMap::new();
-        sections.insert("dropbear".into(), Section::List(vec![item]));
+        sections.insert(
+            "dropbear".into(),
+            Section::List(vec![AnonymousSection {
+                section_type: "dropbear".into(),
+                options,
+            }]),
+        );
         let mut settings = IndexMap::new();
         settings.insert("dropbear".into(), sections);
         let root = Root {
@@ -399,8 +423,8 @@ mod tests {
         let secs = secrets(&[("port", "22")]);
         let resolved = resolve_secrets(root, &secs).unwrap();
         if let Section::List(arr) = &resolved.settings["dropbear"]["dropbear"] {
-            assert_eq!(arr[0]["Port"], "22");
-            assert_eq!(arr[0]["_type"], "dropbear");
+            assert_eq!(arr[0].options["Port"], "22");
+            assert_eq!(arr[0].section_type, "dropbear");
         } else {
             panic!("Expected Section::List");
         }

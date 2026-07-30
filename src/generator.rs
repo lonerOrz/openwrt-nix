@@ -1,5 +1,5 @@
 use crate::error::ConfigError;
-use crate::helpers::{escape_single_quotes, extract_package_name, iter_options};
+use crate::helpers::{escape_single_quotes, extract_package_name};
 use crate::models::{PackageSources, PkgBackend, Section};
 use crate::uci_key::{anonymous_option_key, named_option_key};
 use indexmap::IndexMap;
@@ -144,10 +144,7 @@ pub(crate) fn serialize_uci(
             match section {
                 Section::List(arr) => {
                     let list_ty = if let Some(first) = arr.first() {
-                        first
-                            .get("_type")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or(section_name)
+                        first.section_type.as_str()
                     } else {
                         section_name
                     };
@@ -160,37 +157,23 @@ pub(crate) fn serialize_uci(
                     .unwrap();
 
                     for (idx, list_obj) in arr.iter().enumerate() {
-                        let ty =
-                            list_obj
-                                .get("_type")
-                                .and_then(|v| v.as_str())
-                                .ok_or_else(|| {
-                                    ConfigError::Validation(format!(
-                                        "{}.@{}[{}] has no type!",
-                                        config_name, section_name, idx
-                                    ))
-                                })?;
+                        let ty = &list_obj.section_type;
 
                         writeln!(uci_cmds, "add {} {}", config_name, ty).unwrap();
 
-                        for (option_name, option) in iter_options(list_obj) {
+                        for (option_name, option) in &list_obj.options {
                             let key = anonymous_option_key(config_name, ty, idx, option_name);
                             serialize_option_val(&mut uci_cmds, &key, option)?;
                         }
                     }
                 }
-                Section::Named(obj) => {
-                    let ty = obj.get("_type").and_then(|v| v.as_str()).ok_or_else(|| {
-                        ConfigError::Validation(format!(
-                            "{}.{} has no type",
-                            config_name, section_name
-                        ))
-                    })?;
+                Section::Named(section) => {
+                    let ty = &section.section_type;
 
                     writeln!(uci_cmds, "delete {}.{}", config_name, section_name).unwrap();
                     writeln!(uci_cmds, "set {}.{}={}", config_name, section_name, ty).unwrap();
 
-                    for (option_name, option) in iter_options(obj) {
+                    for (option_name, option) in &section.options {
                         let key = named_option_key(config_name, section_name, option_name);
                         serialize_option_val(&mut uci_cmds, &key, option)?;
                     }
@@ -273,7 +256,7 @@ pub(crate) fn serialize_package_management(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Map;
+    use crate::models::{AnonymousSection, NamedSection};
 
     #[test]
     fn serialize_string_val() {
@@ -347,10 +330,15 @@ mod tests {
     fn serialize_named_section() {
         let mut configs = IndexMap::new();
         let mut sections = IndexMap::new();
-        let mut obj = Map::new();
-        obj.insert("_type".into(), Value::String("interface".into()));
-        obj.insert("proto".into(), Value::String("static".into()));
-        sections.insert("lan".into(), Section::Named(obj));
+        let mut options = IndexMap::new();
+        options.insert("proto".into(), Value::String("static".into()));
+        sections.insert(
+            "lan".into(),
+            Section::Named(NamedSection {
+                section_type: "interface".into(),
+                options,
+            }),
+        );
         configs.insert("network".into(), sections);
 
         let mut w = String::new();
@@ -368,10 +356,15 @@ mod tests {
     fn serialize_list_section() {
         let mut configs = IndexMap::new();
         let mut sections = IndexMap::new();
-        let mut item = Map::new();
-        item.insert("_type".into(), Value::String("dropbear".into()));
-        item.insert("Port".into(), Value::String("22".into()));
-        sections.insert("dropbear".into(), Section::List(vec![item]));
+        let mut options = IndexMap::new();
+        options.insert("Port".into(), Value::String("22".into()));
+        sections.insert(
+            "dropbear".into(),
+            Section::List(vec![AnonymousSection {
+                section_type: "dropbear".into(),
+                options,
+            }]),
+        );
         configs.insert("dropbear".into(), sections);
 
         let mut w = String::new();
@@ -385,44 +378,65 @@ mod tests {
     }
 
     #[test]
-    fn serialize_named_section_missing_type_errors() {
+    fn serialize_named_section_empty_type_succeeds() {
+        // section_type is guaranteed by Serde deserialization; serialization
+        // just uses it verbatim. An empty section_type produces valid (but
+        // semantically wrong) UCI — validation catches it before this point.
         let mut configs = IndexMap::new();
         let mut sections = IndexMap::new();
-        let mut obj = Map::new();
-        obj.insert("proto".into(), Value::String("static".into()));
-        sections.insert("lan".into(), Section::Named(obj));
+        sections.insert(
+            "lan".into(),
+            Section::Named(NamedSection {
+                section_type: String::new(),
+                options: IndexMap::new(),
+            }),
+        );
         configs.insert("network".into(), sections);
 
         let mut w = String::new();
-        let err = serialize_uci(&mut w, &configs).unwrap_err();
-        assert!(format!("{err}").contains("has no type"));
+        serialize_uci(&mut w, &configs).unwrap();
+        assert!(w.contains("set network.lan="));
     }
 
     #[test]
-    fn serialize_list_section_missing_type_errors() {
+    fn serialize_list_section_empty_type_succeeds() {
         let mut configs = IndexMap::new();
         let mut sections = IndexMap::new();
-        let mut item = Map::new();
-        item.insert("Port".into(), Value::String("22".into()));
-        sections.insert("dropbear".into(), Section::List(vec![item]));
+        sections.insert(
+            "dropbear".into(),
+            Section::List(vec![AnonymousSection {
+                section_type: String::new(),
+                options: IndexMap::new(),
+            }]),
+        );
         configs.insert("dropbear".into(), sections);
 
         let mut w = String::new();
-        let err = serialize_uci(&mut w, &configs).unwrap_err();
-        assert!(format!("{err}").contains("has no type"));
+        serialize_uci(&mut w, &configs).unwrap();
+        assert!(w.contains("add dropbear "));
     }
 
     #[test]
     fn serialize_multiple_list_items() {
         let mut configs = IndexMap::new();
         let mut sections = IndexMap::new();
-        let mut item1 = Map::new();
-        item1.insert("_type".into(), Value::String("dropbear".into()));
-        item1.insert("Port".into(), Value::String("22".into()));
-        let mut item2 = Map::new();
-        item2.insert("_type".into(), Value::String("dropbear".into()));
-        item2.insert("Port".into(), Value::String("2222".into()));
-        sections.insert("dropbear".into(), Section::List(vec![item1, item2]));
+        let mut opts1 = IndexMap::new();
+        opts1.insert("Port".into(), Value::String("22".into()));
+        let mut opts2 = IndexMap::new();
+        opts2.insert("Port".into(), Value::String("2222".into()));
+        sections.insert(
+            "dropbear".into(),
+            Section::List(vec![
+                AnonymousSection {
+                    section_type: "dropbear".into(),
+                    options: opts1,
+                },
+                AnonymousSection {
+                    section_type: "dropbear".into(),
+                    options: opts2,
+                },
+            ]),
+        );
         configs.insert("dropbear".into(), sections);
 
         let mut w = String::new();
@@ -437,10 +451,15 @@ mod tests {
     fn serialize_list_section_type_mismatch() {
         let mut configs = IndexMap::new();
         let mut sections = IndexMap::new();
-        let mut item = Map::new();
-        item.insert("_type".into(), Value::String("interface".into()));
-        item.insert("proto".into(), Value::String("static".into()));
-        sections.insert("interfaces".into(), Section::List(vec![item]));
+        let mut options = IndexMap::new();
+        options.insert("proto".into(), Value::String("static".into()));
+        sections.insert(
+            "interfaces".into(),
+            Section::List(vec![AnonymousSection {
+                section_type: "interface".into(),
+                options,
+            }]),
+        );
         configs.insert("network".into(), sections);
 
         let mut w = String::new();
@@ -528,14 +547,17 @@ mod tests {
 
     #[test]
     fn serialize_list_rebuilds_every_item() {
-        // Every list section emits a `delete @type[0]` clear loop, so removing an
-        // item from the Nix config makes it disappear on the target (full rebuild).
         let mut configs = IndexMap::new();
         let mut sections = IndexMap::new();
-        let mut item = Map::new();
-        item.insert("_type".into(), Value::String("dropbear".into()));
-        item.insert("Port".into(), Value::String("22".into()));
-        sections.insert("dropbear".into(), Section::List(vec![item]));
+        let mut options = IndexMap::new();
+        options.insert("Port".into(), Value::String("22".into()));
+        sections.insert(
+            "dropbear".into(),
+            Section::List(vec![AnonymousSection {
+                section_type: "dropbear".into(),
+                options,
+            }]),
+        );
         configs.insert("dropbear".into(), sections);
 
         let mut w = String::new();

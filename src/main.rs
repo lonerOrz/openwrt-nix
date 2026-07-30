@@ -31,7 +31,8 @@ enum Command {
         /// Path to the JSON config file
         json: PathBuf,
 
-        /// Optional directory containing secrets files
+        /// Directory containing secrets files
+        #[arg(short, long)]
         secrets_dir: Option<PathBuf>,
 
         /// Skip SOPS decryption (secrets must be in secrets_dir as plain JSON)
@@ -56,12 +57,21 @@ enum Command {
         #[arg(short, long)]
         identity: Option<PathBuf>,
 
-        /// Optional directory containing secrets files
+        /// Directory containing secrets files
+        #[arg(short, long)]
         secrets_dir: Option<PathBuf>,
 
         /// Force deployment even if configuration is already up-to-date
         #[arg(short, long)]
         force: bool,
+
+        /// Skip SOPS decryption (secrets must be in secrets_dir as plain JSON)
+        #[arg(long)]
+        no_sops: bool,
+
+        /// Watchdog timeout in seconds before rollback triggers
+        #[arg(long, default_value_t = 60)]
+        watchdog_timeout: u64,
     },
 
     /// Preview differences between target and compiled config (read-only)
@@ -81,8 +91,13 @@ enum Command {
         #[arg(short, long)]
         identity: Option<PathBuf>,
 
-        /// Optional directory containing secrets files
+        /// Directory containing secrets files
+        #[arg(short, long)]
         secrets_dir: Option<PathBuf>,
+
+        /// Skip SOPS decryption (secrets must be in secrets_dir as plain JSON)
+        #[arg(long)]
+        no_sops: bool,
     },
 }
 
@@ -104,11 +119,15 @@ fn main() {
             identity,
             secrets_dir,
             force,
+            no_sops,
+            watchdog_timeout,
         }) => {
             let config = deploy::DeployConfig {
                 port,
                 identity_file: identity.map(|p| p.to_string_lossy().into_owned()),
                 force,
+                no_sops,
+                watchdog_timeout,
             };
             if let Err(e) = deploy::run(
                 &json,
@@ -127,20 +146,29 @@ fn main() {
             port,
             identity,
             secrets_dir,
+            no_sops,
         }) => {
             let config = deploy::DeployConfig {
                 port,
                 identity_file: identity.map(|p| p.to_string_lossy().into_owned()),
                 force: false,
+                no_sops,
+                watchdog_timeout: 60,
             };
-            if let Err(e) = diff::run(&json, &target, &config, secrets_dir.as_deref()) {
+            if let Err(e) = diff::run(
+                &json,
+                &target,
+                &config,
+                secrets_dir.as_deref(),
+                &deploy::RealSsh,
+            ) {
                 eprintln!("{e}");
                 std::process::exit(1);
             }
         }
         None => {
             eprintln!(
-                "USAGE:\n  nuci compile <JSON_FILE> [SECRETS_DIR]\n  nuci diff <JSON_FILE> --target <HOST> [--port PORT] [--identity FILE]\n  nuci deploy <JSON_FILE> --target <HOST> [--port PORT] [--identity FILE]"
+                "USAGE:\n  nuci compile <JSON_FILE> [OPTIONS]\n  nuci diff <JSON_FILE> --target <HOST> [OPTIONS]\n  nuci deploy <JSON_FILE> --target <HOST> [OPTIONS]\nRun `nuci <SUBCOMMAND> --help` for details."
             );
             std::process::exit(1);
         }

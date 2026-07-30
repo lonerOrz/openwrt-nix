@@ -48,7 +48,6 @@ pub(crate) fn compile_config(
     if let Some(raw) = &resolved_root.raw_uci
         && !raw.is_empty()
     {
-        // Collect config names from rawUci lines that reference them.
         let mut needed: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for line in raw {
             let trimmed = line.trim();
@@ -56,24 +55,19 @@ pub(crate) fn compile_config(
                 .strip_prefix("uci set ")
                 .or_else(|| trimmed.strip_prefix("uci add "))
             {
-                // rest = "config_name.section..." or "config_name"
                 if let Some(cfg) = rest.split('.').next().filter(|c| !c.is_empty()) {
                     needed.insert(cfg);
                 }
             }
         }
-        // Emit touch lines for each needed config.
+
         if !needed.is_empty() {
             uci_batch.push_str("\n# Ensure config files exist for raw UCI lines below\n");
             for cfg in &needed {
-                uci_batch.push_str(&format!("echo 'config system' > /etc/config/{}\n", cfg));
+                uci_batch.push_str(&format!("touch /etc/config/{}\n", cfg));
             }
         }
-    }
 
-    if let Some(raw) = &resolved_root.raw_uci
-        && !raw.is_empty()
-    {
         uci_batch.push_str("\n# Raw UCI escape hatch (verbatim)\n");
         for line in raw {
             uci_batch.push_str(line.trim_end());

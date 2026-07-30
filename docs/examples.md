@@ -51,6 +51,9 @@ myRouter = uci.writeUci ./my-router.nix;
       };
     };
   };
+
+  # Optional: Customize deployment watchdog timeout (default: 60s)
+  uci.watchdogTimeout = 120;
 }
 ```
 

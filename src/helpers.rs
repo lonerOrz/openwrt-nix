@@ -1,21 +1,5 @@
-use serde_json::{Map, Value};
-
 pub(crate) fn escape_single_quotes(s: &str) -> String {
     s.replace('\'', "'\\''")
-}
-
-pub(crate) fn iter_options(map: &Map<String, Value>) -> impl Iterator<Item = (&str, &Value)> {
-    map.iter()
-        .filter(|(k, _)| k.as_str() != "_type")
-        .map(|(k, v)| (k.as_str(), v))
-}
-
-pub(crate) fn iter_options_mut(
-    map: &mut Map<String, Value>,
-) -> impl Iterator<Item = (&str, &mut Value)> {
-    map.iter_mut()
-        .filter(|(k, _)| k.as_str() != "_type")
-        .map(|(k, v)| (k.as_str(), v))
 }
 
 pub(crate) fn extract_package_name(file_name: &str) -> &str {

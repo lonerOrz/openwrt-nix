@@ -29,7 +29,6 @@
       systems = [
         "x86_64-linux"
         "aarch64-linux"
-        "x86_64-darwin"
         "aarch64-darwin"
       ];
 
@@ -44,10 +43,15 @@
           uciConfig = uci.writeUci ./example.nix;
           testConfig = uci.writeUci ./test/test_config.nix;
           testConfigApk = uci.writeUci ./test/test_config_apk.nix;
-          exampleFirmware = uci.buildFirmware {
-            configuration = ./example.nix;
-            profile = "linksys_e8450-ubi";
-          };
+          isX86Linux = pkgs.stdenv.hostPlatform.isLinux && pkgs.stdenv.hostPlatform.isx86_64;
+          exampleFirmware =
+            if isX86Linux then
+              uci.buildFirmware {
+                configuration = ./example.nix;
+                profile = "linksys_e8450-ubi";
+              }
+            else
+              null;
         in
         {
           treefmt = {
@@ -61,12 +65,10 @@
               ruff-check.enable = true;
               ruff-format.enable = true;
             };
-            # 约束 prettier 的工作范围为 Markdown 和 JSON
             settings.formatter.prettier.includes = [
               "*.md"
               "*.json"
             ];
-            # 防御性排除：防止格式化工具因意外美化损坏 SOPS 加密数据和 MAC 校验
             settings.global.excludes = [
               "secrets.yml"
               "test/secrets.enc.json"
@@ -79,8 +81,10 @@
             example-json = uciConfig.json;
             test-json = testConfig.json;
             test-json-apk = testConfigApk.json;
+          }
+          // (pkgs.lib.optionalAttrs isX86Linux {
             firmware = exampleFirmware;
-          };
+          });
 
           apps = {
             example = {

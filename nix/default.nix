@@ -4,13 +4,17 @@
   writeShellScript,
   pkgs,
   sops,
-  openwrt-imagebuilder,
+  openwrt-imagebuilder ? null,
 }:
 let
   nuci = pkgs.callPackage ./nuci.nix { };
-  firmware = pkgs.callPackage ./firmware.nix {
-    inherit openwrt-imagebuilder nuci;
-  };
+  firmware =
+    if openwrt-imagebuilder != null then
+      pkgs.callPackage ./firmware.nix {
+        inherit openwrt-imagebuilder nuci;
+      }
+    else
+      null;
 in
 {
   writeUci =
@@ -54,7 +58,7 @@ in
           sshKeys
           rawUci
           ;
-        inherit filesJson;
+        files = filesJson;
       };
     in
     {
@@ -70,10 +74,14 @@ in
         if [ "$#" -lt 1 ]; then
           ${nuci}/bin/nuci compile "${json}"
         else
-          ${nuci}/bin/nuci deploy "${json}" --target "$1"
+          ${nuci}/bin/nuci deploy "${json}" --target "$1" --watchdog-timeout "${toString res.config.uci.watchdogTimeout}"
         fi
       '';
     };
   inherit nuci;
-  inherit (firmware) buildFirmware;
+  buildFirmware =
+    if firmware != null then
+      firmware.buildFirmware
+    else
+      throw "buildFirmware requires 'openwrt-imagebuilder' to be passed to nix/default.nix";
 }

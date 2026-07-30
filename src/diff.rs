@@ -1,9 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use crate::deploy::{DeployConfig, ssh_exec};
+use crate::deploy::{DeployConfig, SshExec};
 use crate::error::ConfigError;
-use crate::helpers::iter_options;
 use crate::models::{PkgBackend, Section};
 use crate::pipeline::compile_config;
 use crate::uci_key::{
@@ -110,11 +109,12 @@ pub(crate) fn extract_desired_map(
     for (config_name, sections) in configs {
         for (section_name, section) in sections {
             match section {
-                Section::Named(obj) => {
-                    if let Some(ty) = obj.get("_type").and_then(|v| v.as_str()) {
-                        map.insert(named_section_key(config_name, section_name), ty.to_string());
-                    }
-                    for (opt, val) in iter_options(obj) {
+                Section::Named(section) => {
+                    map.insert(
+                        named_section_key(config_name, section_name),
+                        section.section_type.clone(),
+                    );
+                    for (opt, val) in &section.options {
                         if let Some(s) = val_str(val) {
                             map.insert(named_option_key(config_name, section_name, opt), s);
                         }
@@ -122,12 +122,9 @@ pub(crate) fn extract_desired_map(
                 }
                 Section::List(arr) => {
                     for (idx, item) in arr.iter().enumerate() {
-                        let ty = item
-                            .get("_type")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or(section_name);
-                        map.insert(anonymous_section_key(config_name, ty, idx), ty.to_string());
-                        for (opt, val) in iter_options(item) {
+                        let ty = &item.section_type;
+                        map.insert(anonymous_section_key(config_name, ty, idx), ty.clone());
+                        for (opt, val) in &item.options {
                             if let Some(s) = val_str(val) {
                                 map.insert(anonymous_option_key(config_name, ty, idx, opt), s);
                             }
@@ -256,8 +253,9 @@ pub(crate) fn run(
     target: &str,
     config: &DeployConfig,
     secrets_dir: Option<&Path>,
+    ssh: &dyn SshExec,
 ) -> Result<(), ConfigError> {
-    let compiled = compile_config(json_path, secrets_dir, false)?;
+    let compiled = compile_config(json_path, secrets_dir, config.no_sops)?;
     let desired = extract_desired_map(&compiled.resolved_root.settings);
 
     let managed: Vec<&str> = compiled
@@ -274,7 +272,7 @@ pub(crate) fn run(
 
     let uci_cmd = build_discovery_command(&managed);
     eprintln!("Fetching current configuration & services from {target} (read-only)...");
-    let remote_output = ssh_exec(target, &uci_cmd, None, config)?;
+    let remote_output = ssh.exec(target, &uci_cmd, None, config)?;
 
     let mut parts = remote_output.splitn(2, SERVICE_SEPARATOR);
     let uci_output = parts.next().unwrap_or("");
@@ -287,7 +285,7 @@ pub(crate) fn run(
     let backend = PkgBackend::from_str(&compiled.resolved_root.package_manager);
     let packages = compiled.resolved_root.packages.clone().unwrap_or_default();
     let state_cmd = build_state_command(&packages, backend);
-    let state_output = ssh_exec(target, &state_cmd, None, config)?;
+    let state_output = ssh.exec(target, &state_cmd, None, config)?;
     let state_blocks: Vec<&str> = state_output.split(STATE_SEPARATOR).collect();
     let pkg_state = parse_package_state(state_blocks.first().copied().unwrap_or(""));
     let remote_keys = state_blocks
@@ -561,5 +559,52 @@ mod tests {
         let map = parse_package_state(out);
         assert_eq!(map.get("luci"), Some(&true));
         assert_eq!(map.get("tcpdump"), Some(&false));
+    }
+
+    struct MockSsh {
+        discovery_response: String,
+        state_response: String,
+    }
+
+    impl SshExec for MockSsh {
+        fn exec(
+            &self,
+            _target: &str,
+            cmd: &str,
+            _stdin: Option<&[u8]>,
+            _config: &DeployConfig,
+        ) -> Result<String, ConfigError> {
+            if cmd.contains(SERVICE_SEPARATOR) {
+                Ok(self.discovery_response.clone())
+            } else {
+                Ok(self.state_response.clone())
+            }
+        }
+    }
+
+    #[test]
+    fn diff_run_with_mock_ssh_succeeds() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(br#"{ "packageManager": "opkg", "settings": {} }"#)
+            .unwrap();
+
+        let config = DeployConfig {
+            port: 22,
+            identity_file: None,
+            force: false,
+            no_sops: true,
+            watchdog_timeout: 60,
+        };
+
+        let ssh = MockSsh {
+            discovery_response: format!("\n{}\n", SERVICE_SEPARATOR),
+            state_response: format!("\n{}\n{}\n", STATE_SEPARATOR, STATE_SEPARATOR),
+        };
+
+        let result = run(f.path(), "root@127.0.0.1", &config, None, &ssh);
+        assert!(result.is_ok());
     }
 }
