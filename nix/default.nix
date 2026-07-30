@@ -70,7 +70,7 @@ in
         if [ "$#" -lt 1 ]; then
           ${nuci}/bin/nuci compile "${json}"
         else
-          ${nuci}/bin/nuci deploy "${json}" --target "$1"
+          ${nuci}/bin/nuci deploy "${json}" --target "$1" --watchdog-timeout "${toString res.config.uci.watchdogTimeout}"
         fi
       '';
     };

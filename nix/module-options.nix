@@ -38,6 +38,11 @@
       type = lib.types.listOf lib.types.str;
       description = "List of SSH authorized keys to deploy to the router";
     };
+    watchdogTimeout = lib.mkOption {
+      default = 60;
+      type = lib.types.int;
+      description = "Watchdog timeout in seconds before rollback triggers on deployment.";
+    };
     rawUci = lib.mkOption {
       default = [ ];
       type = lib.types.listOf lib.types.str;

@@ -560,4 +560,51 @@ mod tests {
         assert_eq!(map.get("luci"), Some(&true));
         assert_eq!(map.get("tcpdump"), Some(&false));
     }
+
+    struct MockSsh {
+        discovery_response: String,
+        state_response: String,
+    }
+
+    impl SshExec for MockSsh {
+        fn exec(
+            &self,
+            _target: &str,
+            cmd: &str,
+            _stdin: Option<&[u8]>,
+            _config: &DeployConfig,
+        ) -> Result<String, ConfigError> {
+            if cmd.contains(SERVICE_SEPARATOR) {
+                Ok(self.discovery_response.clone())
+            } else {
+                Ok(self.state_response.clone())
+            }
+        }
+    }
+
+    #[test]
+    fn diff_run_with_mock_ssh_succeeds() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(br#"{ "packageManager": "opkg", "settings": {} }"#)
+            .unwrap();
+
+        let config = DeployConfig {
+            port: 22,
+            identity_file: None,
+            force: false,
+            no_sops: true,
+            watchdog_timeout: 60,
+        };
+
+        let ssh = MockSsh {
+            discovery_response: format!("\n{}\n", SERVICE_SEPARATOR),
+            state_response: format!("\n{}\n{}\n", STATE_SEPARATOR, STATE_SEPARATOR),
+        };
+
+        let result = run(f.path(), "root@127.0.0.1", &config, None, &ssh);
+        assert!(result.is_ok());
+    }
 }
