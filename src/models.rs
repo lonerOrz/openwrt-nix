@@ -1,6 +1,5 @@
 use indexmap::IndexMap;
 use serde::Deserialize;
-use serde_json::Map;
 use serde_json::Value;
 
 #[derive(Deserialize, Debug)]
@@ -68,11 +67,27 @@ pub(crate) struct PackageSources {
     pub(crate) local_packages: Option<Vec<String>>,
 }
 
+#[derive(Deserialize, Debug, Clone)]
+pub(crate) struct NamedSection {
+    #[serde(rename = "_type")]
+    pub(crate) section_type: String,
+    #[serde(flatten)]
+    pub(crate) options: IndexMap<String, Value>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub(crate) struct AnonymousSection {
+    #[serde(rename = "_type")]
+    pub(crate) section_type: String,
+    #[serde(flatten)]
+    pub(crate) options: IndexMap<String, Value>,
+}
+
 #[derive(Deserialize, Debug)]
 #[serde(untagged)]
 pub(crate) enum Section {
-    List(Vec<Map<String, Value>>),
-    Named(Map<String, Value>),
+    List(Vec<AnonymousSection>),
+    Named(NamedSection),
 }
 
 /// A file to write on the target device.

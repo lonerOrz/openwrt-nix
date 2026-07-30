@@ -54,7 +54,7 @@ in
           sshKeys
           rawUci
           ;
-        inherit filesJson;
+        files = filesJson;
       };
     in
     {

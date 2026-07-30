@@ -16,6 +16,8 @@ pub(crate) struct DeployConfig {
     pub port: u16,
     pub identity_file: Option<String>,
     pub force: bool,
+    pub no_sops: bool,
+    pub watchdog_timeout: u64,
 }
 
 fn build_ssh_args(config: &DeployConfig) -> Vec<String> {
@@ -247,6 +249,7 @@ fn build_remote_script(
     deployer_key: Option<&str>,
     modified_configs: &[String],
     service_map: &BTreeMap<String, String>,
+    watchdog_timeout: u64,
 ) -> String {
     let mut script = String::with_capacity(4096);
 
@@ -341,8 +344,6 @@ fn build_remote_script(
     script.push('\n');
 
     // 5. Rollback watchdog — restore persistent backup + targeted reload on timeout
-    let watchdog_timeout =
-        std::env::var("NUCI_WATCHDOG_TIMEOUT").unwrap_or_else(|_| "60".to_string());
     let reload_cmds = reload_commands(modified_configs, service_map);
     script.push_str(&format!(
         "( trap '' HUP; sleep {watchdog_timeout}; \
@@ -399,7 +400,7 @@ pub(crate) fn run(
     secrets_dir: Option<&Path>,
     ssh: &dyn SshExec,
 ) -> Result<(), ConfigError> {
-    let compiled = compile_config(json_path, secrets_dir, false)?;
+    let compiled = compile_config(json_path, secrets_dir, config.no_sops)?;
 
     let managed_configs: Vec<String> = compiled.resolved_root.settings.keys().cloned().collect();
     let managed_refs: Vec<&str> = managed_configs.iter().map(|s| s.as_str()).collect();
@@ -444,6 +445,7 @@ pub(crate) fn run(
         deployer_key.as_deref(),
         &managed_configs,
         &service_map,
+        config.watchdog_timeout,
     );
     eprintln!("Deploying to {target}...");
     ssh.exec(
@@ -548,16 +550,14 @@ mod tests {
 
     #[test]
     fn orphan_deletes_unmanaged_named_sections() {
-        use indexmap::IndexMap;
-        use serde_json::Map;
-
-        let mut obj = Map::new();
-        obj.insert(
-            "_type".into(),
-            serde_json::Value::String("interface".into()),
-        );
         let mut sections = IndexMap::new();
-        sections.insert("lan".into(), Section::Named(obj));
+        sections.insert(
+            "lan".into(),
+            Section::Named(crate::models::NamedSection {
+                section_type: "interface".into(),
+                options: IndexMap::new(),
+            }),
+        );
         let mut settings = IndexMap::new();
         settings.insert("network".into(), sections);
 
@@ -577,16 +577,14 @@ mod tests {
 
     #[test]
     fn orphan_empty_when_all_declared() {
-        use indexmap::IndexMap;
-        use serde_json::Map;
-
-        let mut obj = Map::new();
-        obj.insert(
-            "_type".into(),
-            serde_json::Value::String("interface".into()),
-        );
         let mut sections = IndexMap::new();
-        sections.insert("lan".into(), Section::Named(obj));
+        sections.insert(
+            "lan".into(),
+            Section::Named(crate::models::NamedSection {
+                section_type: "interface".into(),
+                options: IndexMap::new(),
+            }),
+        );
         let mut settings = IndexMap::new();
         settings.insert("network".into(), sections);
 
@@ -640,6 +638,8 @@ mod tests {
             port: 22,
             identity_file: None,
             force: false,
+            no_sops: false,
+            watchdog_timeout: 60,
         };
         let ssh = FakeSsh {
             calls: std::cell::RefCell::new(Vec::new()),
@@ -749,6 +749,8 @@ mod tests {
             port: 22,
             identity_file: None,
             force: true,
+            no_sops: false,
+            watchdog_timeout: 60,
         };
         let ssh = FakeSsh {
             calls: std::cell::RefCell::new(Vec::new()),
@@ -792,6 +794,8 @@ mod tests {
             port: 22,
             identity_file: None,
             force: true,
+            no_sops: false,
+            watchdog_timeout: 60,
         };
         let ssh = FakeSsh {
             calls: std::cell::RefCell::new(Vec::new()),

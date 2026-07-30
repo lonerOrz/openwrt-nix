@@ -1,5 +1,4 @@
 use crate::error::ConfigError;
-use crate::helpers::iter_options;
 use crate::models::{Root, Section};
 use serde_json::Value;
 
@@ -15,24 +14,12 @@ fn is_valid_uci_type(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
-fn validate_section_map(
-    map: &serde_json::Map<String, Value>,
+fn validate_section_options(
+    options: &indexmap::IndexMap<String, Value>,
     config_name: &str,
     section_path: &str,
 ) -> Result<(), ConfigError> {
-    let ty = map.get("_type").and_then(|v| v.as_str()).ok_or_else(|| {
-        ConfigError::Validation(format!(
-            "{config_name}.{section_path} missing required '_type'"
-        ))
-    })?;
-
-    if !is_valid_uci_type(ty) {
-        return Err(ConfigError::Validation(format!(
-            "Invalid type '{ty}' in {config_name}.{section_path}: only [a-zA-Z0-9_-] allowed"
-        )));
-    }
-
-    for (opt_name, opt_val) in iter_options(map) {
+    for (opt_name, opt_val) in options {
         if !is_valid_uci_identifier(opt_name) {
             return Err(ConfigError::Validation(format!(
                 "Invalid option '{opt_name}' in {config_name}.{section_path}: only [a-zA-Z0-9_-] allowed"
@@ -77,17 +64,29 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), ConfigError> {
                     }
 
                     for (idx, item) in arr.iter().enumerate() {
+                        if !is_valid_uci_type(&item.section_type) {
+                            return Err(ConfigError::Validation(format!(
+                                "Invalid type '{}' in {config_name}.@{section_name}[{idx}]",
+                                item.section_type
+                            )));
+                        }
                         let path = format!("@{section_name}[{idx}]");
-                        validate_section_map(item, config_name, &path)?;
+                        validate_section_options(&item.options, config_name, &path)?;
                     }
                 }
-                Section::Named(map) => {
+                Section::Named(section) => {
                     if !is_valid_uci_identifier(section_name) {
                         return Err(ConfigError::Validation(format!(
                             "Invalid section '{section_name}' in config '{config_name}': only [a-zA-Z0-9_] allowed (no digits at start)"
                         )));
                     }
-                    validate_section_map(map, config_name, section_name)?;
+                    if !is_valid_uci_type(&section.section_type) {
+                        return Err(ConfigError::Validation(format!(
+                            "Invalid type '{}' in {config_name}.{section_name}",
+                            section.section_type
+                        )));
+                    }
+                    validate_section_options(&section.options, config_name, section_name)?;
                 }
             }
         }
@@ -134,8 +133,8 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{AnonymousSection, NamedSection, Section};
     use indexmap::IndexMap;
-    use serde_json::Map;
 
     #[test]
     fn validate_rejects_hyphen_in_config_name() {
@@ -155,13 +154,17 @@ mod tests {
 
     #[test]
     fn validate_allows_hyphen_in_type() {
-        let mut obj = Map::new();
-        obj.insert("_type".into(), Value::String("wifi-iface".into()));
         let root = Root {
             package_manager: "opkg".into(),
             settings: IndexMap::from([(
                 "wireless".into(),
-                IndexMap::from([("radio0".into(), Section::Named(obj))]),
+                IndexMap::from([(
+                    "radio0".into(),
+                    Section::Named(NamedSection {
+                        section_type: "wifi-iface".into(),
+                        options: IndexMap::new(),
+                    }),
+                )]),
             )]),
             packages: None,
             package_sources: None,
@@ -175,14 +178,19 @@ mod tests {
 
     #[test]
     fn validate_rejects_hyphen_in_option_name() {
-        let mut obj = Map::new();
-        obj.insert("_type".into(), Value::String("interface".into()));
-        obj.insert("ip-address".into(), Value::String("192.168.1.1".into()));
+        let mut options = IndexMap::new();
+        options.insert("ip-address".into(), Value::String("192.168.1.1".into()));
         let root = Root {
             package_manager: "opkg".into(),
             settings: IndexMap::from([(
                 "network".into(),
-                IndexMap::from([("lan".into(), Section::Named(obj))]),
+                IndexMap::from([(
+                    "lan".into(),
+                    Section::Named(NamedSection {
+                        section_type: "interface".into(),
+                        options,
+                    }),
+                )]),
             )]),
             packages: None,
             package_sources: None,
@@ -197,13 +205,17 @@ mod tests {
 
     #[test]
     fn validate_rejects_hyphen_in_section_name() {
-        let mut obj = Map::new();
-        obj.insert("_type".into(), Value::String("interface".into()));
         let root = Root {
             package_manager: "opkg".into(),
             settings: IndexMap::from([(
                 "network".into(),
-                IndexMap::from([("my-section".into(), Section::Named(obj))]),
+                IndexMap::from([(
+                    "my-section".into(),
+                    Section::Named(NamedSection {
+                        section_type: "interface".into(),
+                        options: IndexMap::new(),
+                    }),
+                )]),
             )]),
             packages: None,
             package_sources: None,
@@ -218,14 +230,19 @@ mod tests {
 
     #[test]
     fn validate_rejects_null_value() {
-        let mut obj = Map::new();
-        obj.insert("_type".into(), Value::String("interface".into()));
-        obj.insert("proto".into(), Value::Null);
+        let mut options = IndexMap::new();
+        options.insert("proto".into(), Value::Null);
         let root = Root {
             package_manager: "opkg".into(),
             settings: IndexMap::from([(
                 "network".into(),
-                IndexMap::from([("lan".into(), Section::Named(obj))]),
+                IndexMap::from([(
+                    "lan".into(),
+                    Section::Named(NamedSection {
+                        section_type: "interface".into(),
+                        options,
+                    }),
+                )]),
             )]),
             packages: None,
             package_sources: None,
@@ -239,14 +256,18 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_missing_type() {
-        let mut obj = Map::new();
-        obj.insert("proto".into(), Value::String("static".into()));
+    fn validate_rejects_invalid_type() {
         let root = Root {
             package_manager: "opkg".into(),
             settings: IndexMap::from([(
                 "network".into(),
-                IndexMap::from([("lan".into(), Section::Named(obj))]),
+                IndexMap::from([(
+                    "lan".into(),
+                    Section::Named(NamedSection {
+                        section_type: "bad type!".into(),
+                        options: IndexMap::new(),
+                    }),
+                )]),
             )]),
             packages: None,
             package_sources: None,
@@ -256,18 +277,22 @@ mod tests {
             files: None,
         };
         let err = validate_root(&root).unwrap_err();
-        assert!(format!("{err}").contains("missing required '_type'"));
+        assert!(format!("{err}").contains("Invalid type"));
     }
 
     #[test]
-    fn validate_list_missing_type() {
-        let mut item = Map::new();
-        item.insert("Port".into(), Value::String("22".into()));
+    fn validate_list_invalid_type() {
         let root = Root {
             package_manager: "opkg".into(),
             settings: IndexMap::from([(
                 "dropbear".into(),
-                IndexMap::from([("dropbear".into(), Section::List(vec![item]))]),
+                IndexMap::from([(
+                    "dropbear".into(),
+                    Section::List(vec![AnonymousSection {
+                        section_type: "bad type!".into(),
+                        options: IndexMap::new(),
+                    }]),
+                )]),
             )]),
             packages: None,
             package_sources: None,
@@ -277,7 +302,7 @@ mod tests {
             files: None,
         };
         let err = validate_root(&root).unwrap_err();
-        assert!(format!("{err}").contains("missing required '_type'"));
+        assert!(format!("{err}").contains("Invalid type"));
     }
 
     #[test]
@@ -301,14 +326,19 @@ mod tests {
 
     #[test]
     fn validate_list_rejects_hyphen_in_option() {
-        let mut item = Map::new();
-        item.insert("_type".into(), Value::String("dropbear".into()));
-        item.insert("listen-port".into(), Value::String("22".into()));
+        let mut options = IndexMap::new();
+        options.insert("listen-port".into(), Value::String("22".into()));
         let root = Root {
             package_manager: "opkg".into(),
             settings: IndexMap::from([(
                 "dropbear".into(),
-                IndexMap::from([("dropbear".into(), Section::List(vec![item]))]),
+                IndexMap::from([(
+                    "dropbear".into(),
+                    Section::List(vec![AnonymousSection {
+                        section_type: "dropbear".into(),
+                        options,
+                    }]),
+                )]),
             )]),
             packages: None,
             package_sources: None,
@@ -354,14 +384,19 @@ mod tests {
 
     #[test]
     fn validate_rejects_digit_start_in_option() {
-        let mut obj = Map::new();
-        obj.insert("_type".into(), Value::String("interface".into()));
-        obj.insert("0proto".into(), Value::String("static".into()));
+        let mut options = IndexMap::new();
+        options.insert("0proto".into(), Value::String("static".into()));
         let root = Root {
             package_manager: "opkg".into(),
             settings: IndexMap::from([(
                 "network".into(),
-                IndexMap::from([("lan".into(), Section::Named(obj))]),
+                IndexMap::from([(
+                    "lan".into(),
+                    Section::Named(NamedSection {
+                        section_type: "interface".into(),
+                        options,
+                    }),
+                )]),
             )]),
             packages: None,
             package_sources: None,
