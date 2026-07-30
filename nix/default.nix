@@ -4,13 +4,17 @@
   writeShellScript,
   pkgs,
   sops,
-  openwrt-imagebuilder,
+  openwrt-imagebuilder ? null,
 }:
 let
   nuci = pkgs.callPackage ./nuci.nix { };
-  firmware = pkgs.callPackage ./firmware.nix {
-    inherit openwrt-imagebuilder nuci;
-  };
+  firmware =
+    if openwrt-imagebuilder != null then
+      pkgs.callPackage ./firmware.nix {
+        inherit openwrt-imagebuilder nuci;
+      }
+    else
+      null;
 in
 {
   writeUci =
@@ -75,5 +79,9 @@ in
       '';
     };
   inherit nuci;
-  inherit (firmware) buildFirmware;
+  buildFirmware =
+    if firmware != null then
+      firmware.buildFirmware
+    else
+      throw "buildFirmware requires 'openwrt-imagebuilder' to be passed to nix/default.nix";
 }

@@ -537,18 +537,19 @@ class Target:
     def sops_env(self) -> dict:
         env = os.environ.copy()
         env["SOPS_AGE_KEY_FILE"] = str(self.artifacts.sops_key_dir / "keys.txt")
-        env["NUCI_WATCHDOG_TIMEOUT"] = "10"
         return env
 
     # -- nuci binary helpers -------------------------------------------------
 
     def nuci(self, *args, timeout=120) -> subprocess.CompletedProcess:
-        # Use the precompiled binary (built once in bootstrap_session) instead
-        # of `cargo run`, which would re-trigger incremental compilation.
+        extra = []
+        if args and args[0] == "deploy" and "--watchdog-timeout" not in args:
+            extra = ["--watchdog-timeout", "10"]
         return _run(
             [
                 str(NUCI_BIN),
                 *args,
+                *extra,
                 "--target",
                 "root@127.0.0.1",
                 "--port",

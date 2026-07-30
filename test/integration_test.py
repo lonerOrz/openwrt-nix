@@ -620,11 +620,12 @@ class TestCustomFiles:
                     str(opkg_target.port),
                     "--identity",
                     str(ART.ssh_key),
+                    "--watchdog-timeout",
+                    "5",
                     "--force",
                 ],
                 capture_output=True,
                 text=True,
-                env={**os.environ, "NUCI_WATCHDOG_TIMEOUT": "5"},
                 timeout=120,
             )
             assert r.returncode == 0, r.stderr
@@ -665,11 +666,12 @@ class TestCustomFiles:
                     str(apkg_target.port),
                     "--identity",
                     str(ART.ssh_key),
+                    "--watchdog-timeout",
+                    "5",
                     "--force",
                 ],
                 capture_output=True,
                 text=True,
-                env={**os.environ, "NUCI_WATCHDOG_TIMEOUT": "5"},
                 timeout=120,
             )
             assert r.returncode == 0, r.stderr
@@ -716,13 +718,14 @@ class TestCustomFiles:
                 str(opkg_target.port),
                 "--identity",
                 str(ART.ssh_key),
+                "--watchdog-timeout",
+                "5",
                 "--force",
             ]
             r = sp.run(
                 common,
                 capture_output=True,
                 text=True,
-                env={**os.environ, "NUCI_WATCHDOG_TIMEOUT": "5"},
                 timeout=120,
             )
             assert r.returncode == 0, r.stderr
@@ -737,7 +740,6 @@ class TestCustomFiles:
                 common,
                 capture_output=True,
                 text=True,
-                env={**os.environ, "NUCI_WATCHDOG_TIMEOUT": "5"},
                 timeout=120,
             )
             assert r2.returncode == 0, r2.stderr
