@@ -31,8 +31,6 @@ fn build_ssh_args(config: &DeployConfig) -> Vec<String> {
         "-o".into(),
         "BatchMode=yes".into(),
         "-o".into(),
-        "IdentitiesOnly=yes".into(),
-        "-o".into(),
         "ControlMaster=auto".into(),
         "-o".into(),
         "ControlPath=/tmp/ssh-%C".into(),
@@ -43,7 +41,12 @@ fn build_ssh_args(config: &DeployConfig) -> Vec<String> {
         args.extend(["-p".into(), config.port.to_string()]);
     }
     if let Some(ref identity) = config.identity_file {
-        args.extend(["-i".into(), identity.clone()]);
+        args.extend([
+            "-o".into(),
+            "IdentitiesOnly=yes".into(),
+            "-i".into(),
+            identity.clone(),
+        ]);
     }
     args
 }
