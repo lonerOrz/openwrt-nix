@@ -20,7 +20,7 @@ let
 in
 rustPlatform.buildRustPackage {
   pname = "nuci";
-  version = "0.0.1";
+  version = "0.1.0";
   inherit src;
 
   cargoLock = {
@@ -28,7 +28,7 @@ rustPlatform.buildRustPackage {
   };
 
   meta = {
-    description = "Write openwrt's UCI configuration using nixos modules";
+    description = "Declarative OpenWrt UCI configuration compiler and deployer";
     homepage = "https://github.com/lonerOrz/openwrt-nix";
     license = lib.licenses.mit;
     maintainers = with lib.maintainers; [ lonerOrz ];
