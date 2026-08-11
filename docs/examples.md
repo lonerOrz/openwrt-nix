@@ -139,14 +139,27 @@ See [Design Philosophy](features.md) for why this is the clean pattern.
 }
 ```
 
-## Binary file with checksum-guarded idempotency
+## Custom files
+
+Text content is written with a POSIX heredoc (`cat <<'EOF'`), so no external
+tools are needed on the target. Binary content is delivered as base64 and
+decoded with `base64 -d` on-device.
 
 ```nix
 {
   uci.files = [
+    # Text file — written via POSIX cat heredoc (zero Busybox dependency)
+    {
+      path = "/etc/nftables.conf";
+      content = ''
+        table inet filter {
+          chain input { type filter hook input priority 0; policy drop; }
+        }
+      '';
+    }
+    # Binary file — base64-decoded on-device
     {
       path = "/usr/bin/blob";
-      # base64-encoded binary content (decoded on-target via base64 -d)
       base64 = "aGVsbG8=";
       executable = true;
       # optional: skip the write when the target hash already matches

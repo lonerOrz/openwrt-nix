@@ -6,19 +6,23 @@ real OpenWrt device.
 ## Repository layout
 
 ```text
-src/            Rust core (compile + deploy + diff)
-  models.rs     JSON models (Root, Section, File, FileContent, ...)
-  pipeline.rs   single compile seam: JSON -> uci batch + side effects
-  generator.rs  UCI serialization, package install blocks, feeds
-  deploy.rs     SSH orchestration, file writes, watchdog, boot hook
-  diff.rs       read-only state comparison + service discovery
-  validation.rs config validation (paths, identifiers, content)
-  secrets.rs    SOPS decryption + @placeholder@ interpolation
+src/
+  config/       models.rs, uci_key.rs, validation.rs, mod.rs
+  compile/      generator.rs, pipeline.rs, secrets.rs, mod.rs
+  target/       deploy.rs, diff.rs, mod.rs
+  utils/        error.rs, helpers.rs, mod.rs
+  lib.rs        public re-export facade
+  main.rs       CLI entry (clap)
 nix/            Nix module (writeUci), firmware image builder
-test/           Podman-based real-container integration tests
+tests/          Rust testcontainers integration tests
 ```
 
-The whole compile path funnels through **one seam** (`pipeline::compile_config`),
+Modules are split into four domains (config / compile / target / utils) so that
+each boundary is enforceable at compile time. `lib.rs` re-exports the public
+API (`nuci::deploy`, `nuci::diff`, `nuci::pipeline`, etc.) so callers never need
+to know about the internal split.
+
+The whole compile path funnels through **one seam** (`compile::pipeline::compile_config`),
 so every output — UCI batch, package installs, file writes, raw UCI escape
 lines — is derived from a single `Root` model. That is what keeps the system
 idempotent: exactly one function decides "what the router should look like".
@@ -134,6 +138,23 @@ hardcode a service list.
    This heuristic is documented in `diff.rs` as the upstream OpenWrt
    convention — no behaviour change, just an officially-cited fallback.
 
+### Async detached reload
+
+Reloads are **never** executed synchronously in the foreground SSH session.
+Reconnecting the network or restarting dropbear/SSHD severs the active SSH
+connection (exit status 255), which would prevent the 60 s reconnect loop from
+ever starting. `nuci` avoids this by writing the reload block as:
+
+```sh
+( sleep 1; <reload_commands> ) >/dev/null 2>&1 &
+```
+
+The subshell detaches immediately, `/tmp/deploy.sh` exits 0, and the SSH channel
+closes cleanly. One second later — after the session is gone — the background
+process fires the actual reloads on the router. This guarantees the client
+always reaches the reconnect verification loop, regardless of whether network
+interfaces restart mid-deploy.
+
 `nuci diff` prints the discovered affected services, making the reload preview
 explicit:
 
@@ -143,7 +164,25 @@ Affected services (auto-discovered):
   network → /etc/init.d/network reload
 ```
 
-## Orphan deletion
+## File writes: POSIX heredoc vs base64
+
+Text files are written with a `cat` heredoc (`cat > path <<'EOF'`) because the
+single-quoted delimiter prevents any shell expansion inside the body — POSIX
+guarantees this is safe without any external tool. Busybox (the default shell
+on OpenWrt) always provides `cat`; it may not provide `base64`.
+
+Binary payloads use `echo '<b64>' | base64 -d > path` instead, because they
+arrive from the caller already encoded and would be wasteful to re-encode.
+
+```rust
+match &file.content {
+    FileContent::Text(text) => cat <<'NUCI_FILE_{i}_EOF' … EOF,   // zero-dependency
+    FileContent::Base64(b64)  => echo '<b64>' | base64 -d > path, // decode only
+}
+```
+
+Root password is similarly written via a `chpasswd` heredoc (or `passwd` fallback)
+to avoid a base64 pipe dependency on minimal Busybox images.
 
 Deleting a **named** section from your Nix config causes `nuci` to emit
 `uci delete config.section` for the now-absent section (see
