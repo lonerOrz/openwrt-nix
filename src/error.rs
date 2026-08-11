@@ -1,7 +1,7 @@
 use std::fmt;
 
 #[derive(Debug)]
-pub(crate) enum ConfigError {
+pub enum ConfigError {
     Io(std::io::Error),
     Json(serde_json::Error),
     Validation(String),

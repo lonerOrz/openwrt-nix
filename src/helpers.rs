@@ -11,36 +11,22 @@ pub(crate) fn extract_package_name(file_name: &str) -> &str {
     if file_name.ends_with(".ipk") || without_ext.contains('_') {
         without_ext.split('_').next().unwrap_or(without_ext)
     } else {
-        // Standard APK format: zlib-1.3.1-r1 or luci-theme-proton2025-1.2.9-r1
+        // Standard APK format: zlib-1.3.1-r1 or luci-theme-proton2025-1.2.9-r1.
+        // The version is the first dash-part (after the name) starting with a digit.
         let parts: Vec<&str> = without_ext.split('-').collect();
-        if parts.len() <= 1 {
-            return without_ext;
-        }
-
-        let mut split_idx = parts.len();
-        for (i, part) in parts.iter().enumerate() {
-            if i > 0 && !part.is_empty() && part.chars().next().unwrap().is_ascii_digit() {
-                split_idx = i;
-                break;
-            }
-        }
-
+        let split_idx = parts
+            .iter()
+            .skip(1)
+            .position(|p| p.as_bytes().first().is_some_and(u8::is_ascii_digit))
+            .map_or(parts.len(), |i| i + 1);
         if split_idx == parts.len() {
-            if parts.len() > 2 {
-                split_idx = parts.len() - 2;
-            } else {
-                split_idx = parts.len() - 1;
-            }
+            // No version part (e.g. foo-bar.apk): the whole stem is the name
+            without_ext
+        } else {
+            let name_len =
+                parts[..split_idx].iter().map(|p| p.len()).sum::<usize>() + split_idx - 1;
+            &without_ext[..name_len]
         }
-
-        let mut end_pos = 0;
-        for (i, part) in parts.iter().enumerate().take(split_idx) {
-            if i > 0 {
-                end_pos += 1;
-            }
-            end_pos += part.len();
-        }
-        &without_ext[..end_pos]
     }
 }
 
@@ -49,48 +35,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn escape_no_quotes() {
-        assert_eq!(escape_single_quotes("hello"), "hello");
+    fn escape_single_quotes_roundtrip() {
+        for (input, expected) in [("hello", "hello"), ("it's", "it'\\''s")] {
+            assert_eq!(escape_single_quotes(input), expected);
+        }
     }
 
     #[test]
-    fn escape_with_quotes() {
-        assert_eq!(escape_single_quotes("it's"), "it'\\''s");
-    }
-
-    #[test]
-    fn extract_pkg_standard() {
-        assert_eq!(
-            extract_package_name("luci-app-nlbwmon_0.3-1_all.ipk"),
-            "luci-app-nlbwmon"
-        );
-    }
-
-    #[test]
-    fn extract_pkg_apk_extension() {
-        assert_eq!(
-            extract_package_name("luci-app-nlbwmon_0.3-1_all.apk"),
-            "luci-app-nlbwmon"
-        );
-    }
-
-    #[test]
-    fn extract_pkg_no_version() {
-        assert_eq!(extract_package_name("luci.ipk"), "luci");
-    }
-
-    #[test]
-    fn extract_pkg_no_extension() {
-        assert_eq!(extract_package_name("luci-app_1.0"), "luci-app");
-    }
-
-    #[test]
-    fn extract_pkg_apk_hyphen_format() {
-        assert_eq!(extract_package_name("zlib-1.3.1-r1.apk"), "zlib");
-        assert_eq!(
-            extract_package_name("luci-theme-proton2025-1.2.9-r1.apk"),
-            "luci-theme-proton2025"
-        );
-        assert_eq!(extract_package_name("3proxy-0.9.3-r1.apk"), "3proxy");
+    fn extract_package_name_from_file() {
+        for (input, expected) in [
+            ("luci-app-nlbwmon_0.3-1_all.ipk", "luci-app-nlbwmon"),
+            ("luci-app-nlbwmon_0.3-1_all.apk", "luci-app-nlbwmon"),
+            ("luci.ipk", "luci"),
+            ("luci-app_1.0", "luci-app"),
+            ("zlib-1.3.1-r1.apk", "zlib"),
+            (
+                "luci-theme-proton2025-1.2.9-r1.apk",
+                "luci-theme-proton2025",
+            ),
+            ("3proxy-0.9.3-r1.apk", "3proxy"),
+            ("foo-bar.apk", "foo-bar"),
+            ("foo.apk", "foo"),
+        ] {
+            assert_eq!(extract_package_name(input), expected);
+        }
     }
 }

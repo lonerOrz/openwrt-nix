@@ -35,9 +35,5 @@ jobs:
             ~/.cargo/git/db/
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      - name: Run Rust unit tests
+      - name: Run all Rust tests
         run: nix develop --command cargo test
-      - name: Run integration tests (opkg + apk)
-        env:
-          CONTAINER_ENGINE: docker
-        run: nix develop --command python3 -m pytest test/integration_test.py -v --tb=short

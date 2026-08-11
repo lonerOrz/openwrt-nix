@@ -1,9 +1,10 @@
 {
+  uci.packageManager = "apk";
   uci.settings = {
     system.system = [
       {
         _type = "system";
-        hostname = "rauter";
+        hostname = "rauter-apk";
         timezone = "UTC";
       }
     ];
@@ -28,19 +29,23 @@
     };
   };
   uci.packages = [
-    "luci"
+    "tcpdump"
   ];
   uci.packageSources = {
     feeds = [
-      "src/gz custom https://example.com/packages"
+      "https://example.com/packages"
     ];
     localPackages = [
-      "./packages/tcpdump.ipk"
+      "./packages/libuci20250120.apk"
     ];
   };
   uci.secrets =
     if builtins.pathExists ./secrets.enc.json then { sops.files = [ ./secrets.enc.json ]; } else { };
+  uci.rawUci = [
+    "uci set nuci_test.marker=escaped"
+    "uci commit nuci_test"
+  ];
   uci.sshKeys = [
-    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAvctZwmsE8Bxt0WYnHZAdRKERk0YKwwidsG32rY6cf2 openwrt-test"
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEGPJpRJiBIHwzjGVJxKYGO8nCrhAbHnqHox3X+qkRM8 openwrt-test"
   ];
 }

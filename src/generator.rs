@@ -256,7 +256,7 @@ pub(crate) fn serialize_package_management(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{AnonymousSection, NamedSection};
+    use crate::models::SectionData;
 
     #[test]
     fn serialize_string_val() {
@@ -334,7 +334,7 @@ mod tests {
         options.insert("proto".into(), Value::String("static".into()));
         sections.insert(
             "lan".into(),
-            Section::Named(NamedSection {
+            Section::Named(SectionData {
                 section_type: "interface".into(),
                 options,
             }),
@@ -360,7 +360,7 @@ mod tests {
         options.insert("Port".into(), Value::String("22".into()));
         sections.insert(
             "dropbear".into(),
-            Section::List(vec![AnonymousSection {
+            Section::List(vec![SectionData {
                 section_type: "dropbear".into(),
                 options,
             }]),
@@ -386,7 +386,7 @@ mod tests {
         let mut sections = IndexMap::new();
         sections.insert(
             "lan".into(),
-            Section::Named(NamedSection {
+            Section::Named(SectionData {
                 section_type: String::new(),
                 options: IndexMap::new(),
             }),
@@ -404,7 +404,7 @@ mod tests {
         let mut sections = IndexMap::new();
         sections.insert(
             "dropbear".into(),
-            Section::List(vec![AnonymousSection {
+            Section::List(vec![SectionData {
                 section_type: String::new(),
                 options: IndexMap::new(),
             }]),
@@ -427,11 +427,11 @@ mod tests {
         sections.insert(
             "dropbear".into(),
             Section::List(vec![
-                AnonymousSection {
+                SectionData {
                     section_type: "dropbear".into(),
                     options: opts1,
                 },
-                AnonymousSection {
+                SectionData {
                     section_type: "dropbear".into(),
                     options: opts2,
                 },
@@ -455,7 +455,7 @@ mod tests {
         options.insert("proto".into(), Value::String("static".into()));
         sections.insert(
             "interfaces".into(),
-            Section::List(vec![AnonymousSection {
+            Section::List(vec![SectionData {
                 section_type: "interface".into(),
                 options,
             }]),
@@ -553,7 +553,7 @@ mod tests {
         options.insert("Port".into(), Value::String("22".into()));
         sections.insert(
             "dropbear".into(),
-            Section::List(vec![AnonymousSection {
+            Section::List(vec![SectionData {
                 section_type: "dropbear".into(),
                 options,
             }]),

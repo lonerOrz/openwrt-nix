@@ -248,7 +248,7 @@ pub(crate) fn parse_uci_show(output: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
-pub(crate) fn run(
+pub fn run(
     json_path: &Path,
     target: &str,
     config: &DeployConfig,
@@ -282,7 +282,7 @@ pub(crate) fn run(
     let service_map = parse_services(services_output);
 
     // Probe live target state (packages / keys / password) in one round-trip.
-    let backend = PkgBackend::from_str(&compiled.resolved_root.package_manager);
+    let backend = PkgBackend::from_name(&compiled.resolved_root.package_manager);
     let packages = compiled.resolved_root.packages.clone().unwrap_or_default();
     let state_cmd = build_state_command(&packages, backend);
     let state_output = ssh.exec(target, &state_cmd, None, config)?;
@@ -559,52 +559,5 @@ mod tests {
         let map = parse_package_state(out);
         assert_eq!(map.get("luci"), Some(&true));
         assert_eq!(map.get("tcpdump"), Some(&false));
-    }
-
-    struct MockSsh {
-        discovery_response: String,
-        state_response: String,
-    }
-
-    impl SshExec for MockSsh {
-        fn exec(
-            &self,
-            _target: &str,
-            cmd: &str,
-            _stdin: Option<&[u8]>,
-            _config: &DeployConfig,
-        ) -> Result<String, ConfigError> {
-            if cmd.contains(SERVICE_SEPARATOR) {
-                Ok(self.discovery_response.clone())
-            } else {
-                Ok(self.state_response.clone())
-            }
-        }
-    }
-
-    #[test]
-    fn diff_run_with_mock_ssh_succeeds() {
-        use std::io::Write;
-        use tempfile::NamedTempFile;
-
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(br#"{ "packageManager": "opkg", "settings": {} }"#)
-            .unwrap();
-
-        let config = DeployConfig {
-            port: 22,
-            identity_file: None,
-            force: false,
-            no_sops: true,
-            watchdog_timeout: 60,
-        };
-
-        let ssh = MockSsh {
-            discovery_response: format!("\n{}\n", SERVICE_SEPARATOR),
-            state_response: format!("\n{}\n{}\n", STATE_SEPARATOR, STATE_SEPARATOR),
-        };
-
-        let result = run(f.path(), "root@127.0.0.1", &config, None, &ssh);
-        assert!(result.is_ok());
     }
 }

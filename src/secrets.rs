@@ -8,6 +8,15 @@ use std::io::BufReader;
 use std::path::Path;
 use std::process::Command;
 
+fn secret_to_string(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        _ => v.to_string(),
+    }
+}
+
 pub(crate) fn interpolate_secrets<'a>(
     option_val: &'a str,
     secrets: &HashMap<String, String>,
@@ -133,12 +142,7 @@ pub(crate) fn load_secrets_dir(dir_path: &str) -> Result<HashMap<String, String>
                     if k == "sops" {
                         continue;
                     }
-                    let val_str = match v {
-                        Value::String(s) => s.clone(),
-                        Value::Number(n) => n.to_string(),
-                        Value::Bool(b) => b.to_string(),
-                        _ => v.to_string(),
-                    };
+                    let val_str = secret_to_string(v);
 
                     if let Some(old_val) = secrets.insert(k.clone(), val_str)
                         && old_val != secrets[k]
@@ -189,12 +193,7 @@ pub(crate) fn decrypt_sops_mem(root: &Root) -> Result<HashMap<String, String>, C
                 if k == "sops" {
                     continue;
                 }
-                let val = match v {
-                    serde_json::Value::String(s) => s.clone(),
-                    serde_json::Value::Number(n) => n.to_string(),
-                    serde_json::Value::Bool(b) => b.to_string(),
-                    _ => v.to_string(),
-                };
+                let val = secret_to_string(v);
                 secrets.insert(k.clone(), val);
             }
         }
@@ -205,7 +204,7 @@ pub(crate) fn decrypt_sops_mem(root: &Root) -> Result<HashMap<String, String>, C
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{AnonymousSection, NamedSection, PackageSources, Section};
+    use crate::models::{PackageSources, Section, SectionData};
     use indexmap::IndexMap;
     use std::fs;
     use tempfile::TempDir;
@@ -214,6 +213,50 @@ mod tests {
         map.iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    fn root(settings: IndexMap<String, IndexMap<String, Section>>) -> Root {
+        Root {
+            package_manager: "opkg".into(),
+            settings,
+            packages: None,
+            package_sources: None,
+            ssh_keys: vec![],
+            secrets: None,
+            raw_uci: None,
+            files: None,
+        }
+    }
+
+    fn section(config: &str, section: &str, ty: &str, options: IndexMap<String, Value>) -> Root {
+        root(IndexMap::from([(
+            config.into(),
+            IndexMap::from([(
+                section.into(),
+                Section::Named(SectionData {
+                    section_type: ty.into(),
+                    options,
+                }),
+            )]),
+        )]))
+    }
+
+    fn list_section(
+        config: &str,
+        section: &str,
+        ty: &str,
+        options: IndexMap<String, Value>,
+    ) -> Root {
+        root(IndexMap::from([(
+            config.into(),
+            IndexMap::from([(
+                section.into(),
+                Section::List(vec![SectionData {
+                    section_type: ty.into(),
+                    options,
+                }]),
+            )]),
+        )]))
     }
 
     #[test]
@@ -261,32 +304,12 @@ mod tests {
 
     #[test]
     fn resolve_secrets_success() {
-        let mut options = IndexMap::new();
-        options.insert("key".into(), Value::String("@wifi_pass@".into()));
-
-        let mut sections = IndexMap::new();
-        sections.insert(
-            "radio0".into(),
-            Section::Named(NamedSection {
-                section_type: "wifi-iface".into(),
-                options,
-            }),
+        let root = section(
+            "wireless",
+            "radio0",
+            "wifi-iface",
+            IndexMap::from([("key".into(), Value::String("@wifi_pass@".into()))]),
         );
-
-        let mut settings = IndexMap::new();
-        settings.insert("wireless".into(), sections);
-
-        let root = Root {
-            package_manager: "opkg".into(),
-            settings,
-            packages: None,
-            package_sources: None,
-            ssh_keys: vec![],
-            secrets: None,
-            raw_uci: None,
-            files: None,
-        };
-
         let secs = secrets(&[("wifi_pass", "secret123")]);
         let resolved = resolve_secrets(root, &secs).unwrap();
 
@@ -299,64 +322,24 @@ mod tests {
 
     #[test]
     fn resolve_secrets_missing_secret_errors() {
-        let mut options = IndexMap::new();
-        options.insert("key".into(), Value::String("@missing_secret@".into()));
-
-        let mut sections = IndexMap::new();
-        sections.insert(
-            "radio0".into(),
-            Section::Named(NamedSection {
-                section_type: "wifi-iface".into(),
-                options,
-            }),
+        let root = section(
+            "wireless",
+            "radio0",
+            "wifi-iface",
+            IndexMap::from([("key".into(), Value::String("@missing_secret@".into()))]),
         );
-
-        let mut settings = IndexMap::new();
-        settings.insert("wireless".into(), sections);
-
-        let root = Root {
-            package_manager: "opkg".into(),
-            settings,
-            packages: None,
-            package_sources: None,
-            ssh_keys: vec![],
-            secrets: None,
-            raw_uci: None,
-            files: None,
-        };
-
         let err = resolve_secrets(root, &secrets(&[("other", "v")])).unwrap_err();
         assert!(format!("{err}").contains("missing_secret"));
     }
 
     #[test]
     fn resolve_secrets_preserves_type_field() {
-        let mut options = IndexMap::new();
-        options.insert("key".into(), Value::String("plain".into()));
-
-        let mut sections = IndexMap::new();
-        sections.insert(
-            "test".into(),
-            Section::Named(NamedSection {
-                section_type: "wifi-iface".into(),
-                options,
-            }),
+        let root = section(
+            "config",
+            "test",
+            "wifi-iface",
+            IndexMap::from([("key".into(), Value::String("plain".into()))]),
         );
-
-        let mut settings = IndexMap::new();
-        settings.insert("config".into(), sections);
-
-        let root = Root {
-            package_manager: "opkg".into(),
-            settings,
-            packages: None,
-            package_sources: None,
-            ssh_keys: vec![],
-            secrets: None,
-            raw_uci: None,
-            files: None,
-        };
-
         let resolved = resolve_secrets(root, &HashMap::new()).unwrap();
         if let Section::Named(section) = &resolved.settings["config"]["test"] {
             assert_eq!(section.section_type, "wifi-iface");
@@ -368,58 +351,24 @@ mod tests {
 
     #[test]
     fn resolve_secrets_empty_map_errors_on_placeholder() {
-        let mut options = IndexMap::new();
-        options.insert("key".into(), Value::String("@secret@".into()));
-        let mut sections = IndexMap::new();
-        sections.insert(
-            "s".into(),
-            Section::Named(NamedSection {
-                section_type: "test".into(),
-                options,
-            }),
+        let root = section(
+            "c",
+            "s",
+            "test",
+            IndexMap::from([("key".into(), Value::String("@secret@".into()))]),
         );
-        let mut settings = IndexMap::new();
-        settings.insert("c".into(), sections);
-        let root = Root {
-            package_manager: "opkg".into(),
-            settings,
-            packages: None,
-            package_sources: None,
-            ssh_keys: vec![],
-            secrets: None,
-            raw_uci: None,
-            files: None,
-        };
-
         let err = resolve_secrets(root, &HashMap::new()).unwrap_err();
         assert!(format!("{err}").contains("secret"));
     }
 
     #[test]
     fn resolve_secrets_list_section() {
-        let mut options = IndexMap::new();
-        options.insert("Port".into(), Value::String("@port@".into()));
-        let mut sections = IndexMap::new();
-        sections.insert(
-            "dropbear".into(),
-            Section::List(vec![AnonymousSection {
-                section_type: "dropbear".into(),
-                options,
-            }]),
+        let root = list_section(
+            "dropbear",
+            "dropbear",
+            "dropbear",
+            IndexMap::from([("Port".into(), Value::String("@port@".into()))]),
         );
-        let mut settings = IndexMap::new();
-        settings.insert("dropbear".into(), sections);
-        let root = Root {
-            package_manager: "opkg".into(),
-            settings,
-            packages: None,
-            package_sources: None,
-            ssh_keys: vec![],
-            secrets: None,
-            raw_uci: None,
-            files: None,
-        };
-
         let secs = secrets(&[("port", "22")]);
         let resolved = resolve_secrets(root, &secs).unwrap();
         if let Section::List(arr) = &resolved.settings["dropbear"]["dropbear"] {
@@ -433,17 +382,11 @@ mod tests {
     #[test]
     fn resolve_secrets_feeds() {
         let root = Root {
-            package_manager: "opkg".into(),
-            settings: IndexMap::new(),
-            packages: None,
             package_sources: Some(PackageSources {
                 feeds: Some(vec!["src/gz @repo_name@ https://example.com".into()]),
                 local_packages: None,
             }),
-            ssh_keys: vec![],
-            secrets: None,
-            raw_uci: None,
-            files: None,
+            ..root(IndexMap::new())
         };
 
         let secs = secrets(&[("repo_name", "custom")]);

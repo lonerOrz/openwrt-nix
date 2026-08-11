@@ -6,13 +6,21 @@ use crate::validation::validate_root;
 use std::collections::HashMap;
 use std::path::Path;
 
-pub(crate) struct CompiledConfig {
-    pub(crate) uci_batch: String,
-    pub(crate) resolved_root: Root,
-    pub(crate) secrets: HashMap<String, String>,
+pub struct CompiledConfig {
+    pub uci_batch: String,
+    pub resolved_root: Root,
+    pub secrets: HashMap<String, String>,
 }
 
-pub(crate) fn compile_config(
+impl std::fmt::Debug for CompiledConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledConfig")
+            .field("uci_batch_len", &self.uci_batch.len())
+            .finish()
+    }
+}
+
+pub fn compile_config(
     json_path: &Path,
     secrets_dir: Option<&Path>,
     skip_sops: bool,
@@ -54,10 +62,9 @@ pub(crate) fn compile_config(
             if let Some(rest) = trimmed
                 .strip_prefix("uci set ")
                 .or_else(|| trimmed.strip_prefix("uci add "))
+                && let Some(cfg) = rest.split('.').next().filter(|c| !c.is_empty())
             {
-                if let Some(cfg) = rest.split('.').next().filter(|c| !c.is_empty()) {
-                    needed.insert(cfg);
-                }
+                needed.insert(cfg);
             }
         }
 
@@ -75,7 +82,7 @@ pub(crate) fn compile_config(
         }
     }
 
-    let backend = PkgBackend::from_str(&resolved_root.package_manager);
+    let backend = PkgBackend::from_name(&resolved_root.package_manager);
     serialize_package_management(
         &mut uci_batch,
         backend,

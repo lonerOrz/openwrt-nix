@@ -16,19 +16,20 @@ ssh_opts := "-o ControlMaster=auto -o ControlPath=/tmp/ssh-%C -o ControlPersist=
 eval-config:
 	nix run .#example
 
-# Run local Rust binary against mock configuration files
-test-unit:
+# Run all Rust tests (unit + integration)
+test-all:
 	cargo test
-	cargo run -- compile test/test_uci.json > /dev/null
-	cargo run -- compile test/test_edge_cases.json -s test/test_secrets > /dev/null
-	@echo "All local mock configuration tests passed!"
 
-# Run Podman-based end-to-end integration tests against a real OpenWrt container
+# Run Rust integration tests (requires Docker/Podman)
 test-integration:
-	@nix develop --command python3 -m pytest test/integration_test.py -v --tb=short
+	cargo test --test integration_test -- --test-threads=1
 
-# Run all test suites
-test-all: test-unit test-integration
+# Run Rust unit tests only
+test-unit:
+	cargo test --lib
+	cargo run -- compile tests/test_uci.json > /dev/null
+	cargo run -- compile tests/test_edge_cases.json -s tests/test_secrets > /dev/null
+	@echo "All local mock configuration tests passed!"
 
 # Format both Rust and Nix files
 fmt:

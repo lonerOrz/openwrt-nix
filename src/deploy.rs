@@ -12,7 +12,7 @@ use crate::pipeline::compile_config;
 use crate::uci_key::is_named_section_key;
 use indexmap::IndexMap;
 
-pub(crate) struct DeployConfig {
+pub struct DeployConfig {
     pub port: u16,
     pub identity_file: Option<String>,
     pub force: bool,
@@ -52,7 +52,7 @@ fn build_ssh_args(config: &DeployConfig) -> Vec<String> {
 /// against an in-memory fake in unit tests without a real device or container.
 /// `RealSsh` is the only production adapter; `ssh_exec` wraps it for the rest
 /// of the codebase (e.g. `diff::run`).
-pub(crate) trait SshExec {
+pub trait SshExec {
     fn exec(
         &self,
         target: &str,
@@ -63,7 +63,7 @@ pub(crate) trait SshExec {
 }
 
 /// Production transport: shells out to the `ssh` binary.
-pub(crate) struct RealSsh;
+pub struct RealSsh;
 
 impl SshExec for RealSsh {
     fn exec(
@@ -77,7 +77,7 @@ impl SshExec for RealSsh {
     }
 }
 
-pub(crate) fn ssh_exec(
+pub fn ssh_exec(
     target: &str,
     cmd: &str,
     stdin_data: Option<&[u8]>,
@@ -393,7 +393,7 @@ fn orphan_delete_commands(
     out
 }
 
-pub(crate) fn run(
+pub fn run(
     json_path: &Path,
     target: &str,
     config: &DeployConfig,
@@ -553,7 +553,7 @@ mod tests {
         let mut sections = IndexMap::new();
         sections.insert(
             "lan".into(),
-            Section::Named(crate::models::NamedSection {
+            Section::Named(crate::models::SectionData {
                 section_type: "interface".into(),
                 options: IndexMap::new(),
             }),
@@ -580,7 +580,7 @@ mod tests {
         let mut sections = IndexMap::new();
         sections.insert(
             "lan".into(),
-            Section::Named(crate::models::NamedSection {
+            Section::Named(crate::models::SectionData {
                 section_type: "interface".into(),
                 options: IndexMap::new(),
             }),

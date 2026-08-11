@@ -22,7 +22,7 @@ fn validate_section_options(
     for (opt_name, opt_val) in options {
         if !is_valid_uci_identifier(opt_name) {
             return Err(ConfigError::Validation(format!(
-                "Invalid option '{opt_name}' in {config_name}.{section_path}: only [a-zA-Z0-9_-] allowed"
+                "Invalid option '{opt_name}' in {config_name}.{section_path}: only [a-zA-Z0-9_] allowed"
             )));
         }
         if matches!(opt_val, Value::Null) {
@@ -133,309 +133,198 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{AnonymousSection, NamedSection, Section};
+    use crate::models::{Section, SectionData};
     use indexmap::IndexMap;
 
-    #[test]
-    fn validate_rejects_hyphen_in_config_name() {
-        let root = Root {
+    fn empty_root() -> Root {
+        Root {
             package_manager: "opkg".into(),
-            settings: IndexMap::from([("network-config".into(), IndexMap::new())]),
+            settings: IndexMap::new(),
             packages: None,
             package_sources: None,
             ssh_keys: vec![],
             secrets: None,
             raw_uci: None,
             files: None,
-        };
-        let err = validate_root(&root).unwrap_err();
-        assert!(format!("{err}").contains("Invalid config name"));
+        }
     }
 
-    #[test]
-    fn validate_allows_hyphen_in_type() {
-        let root = Root {
-            package_manager: "opkg".into(),
+    fn named_cfg(
+        config: &str,
+        section: &str,
+        section_type: &str,
+        options: IndexMap<String, Value>,
+    ) -> Root {
+        Root {
             settings: IndexMap::from([(
-                "wireless".into(),
+                config.into(),
                 IndexMap::from([(
-                    "radio0".into(),
-                    Section::Named(NamedSection {
-                        section_type: "wifi-iface".into(),
-                        options: IndexMap::new(),
-                    }),
-                )]),
-            )]),
-            packages: None,
-            package_sources: None,
-            ssh_keys: vec![],
-            secrets: None,
-            raw_uci: None,
-            files: None,
-        };
-        assert!(validate_root(&root).is_ok());
-    }
-
-    #[test]
-    fn validate_rejects_hyphen_in_option_name() {
-        let mut options = IndexMap::new();
-        options.insert("ip-address".into(), Value::String("192.168.1.1".into()));
-        let root = Root {
-            package_manager: "opkg".into(),
-            settings: IndexMap::from([(
-                "network".into(),
-                IndexMap::from([(
-                    "lan".into(),
-                    Section::Named(NamedSection {
-                        section_type: "interface".into(),
+                    section.into(),
+                    Section::Named(SectionData {
+                        section_type: section_type.into(),
                         options,
                     }),
                 )]),
             )]),
-            packages: None,
-            package_sources: None,
-            ssh_keys: vec![],
-            secrets: None,
-            raw_uci: None,
-            files: None,
-        };
-        let err = validate_root(&root).unwrap_err();
-        assert!(format!("{err}").contains("Invalid option"));
+            ..empty_root()
+        }
     }
 
-    #[test]
-    fn validate_rejects_hyphen_in_section_name() {
-        let root = Root {
-            package_manager: "opkg".into(),
+    fn anon_cfg(
+        config: &str,
+        section: &str,
+        section_type: &str,
+        options: IndexMap<String, Value>,
+    ) -> Root {
+        Root {
             settings: IndexMap::from([(
-                "network".into(),
+                config.into(),
                 IndexMap::from([(
-                    "my-section".into(),
-                    Section::Named(NamedSection {
-                        section_type: "interface".into(),
-                        options: IndexMap::new(),
-                    }),
-                )]),
-            )]),
-            packages: None,
-            package_sources: None,
-            ssh_keys: vec![],
-            secrets: None,
-            raw_uci: None,
-            files: None,
-        };
-        let err = validate_root(&root).unwrap_err();
-        assert!(format!("{err}").contains("Invalid section"));
-    }
-
-    #[test]
-    fn validate_rejects_null_value() {
-        let mut options = IndexMap::new();
-        options.insert("proto".into(), Value::Null);
-        let root = Root {
-            package_manager: "opkg".into(),
-            settings: IndexMap::from([(
-                "network".into(),
-                IndexMap::from([(
-                    "lan".into(),
-                    Section::Named(NamedSection {
-                        section_type: "interface".into(),
+                    section.into(),
+                    Section::List(vec![SectionData {
+                        section_type: section_type.into(),
                         options,
-                    }),
-                )]),
-            )]),
-            packages: None,
-            package_sources: None,
-            ssh_keys: vec![],
-            secrets: None,
-            raw_uci: None,
-            files: None,
-        };
-        let err = validate_root(&root).unwrap_err();
-        assert!(format!("{err}").contains("null value"));
-    }
-
-    #[test]
-    fn validate_rejects_invalid_type() {
-        let root = Root {
-            package_manager: "opkg".into(),
-            settings: IndexMap::from([(
-                "network".into(),
-                IndexMap::from([(
-                    "lan".into(),
-                    Section::Named(NamedSection {
-                        section_type: "bad type!".into(),
-                        options: IndexMap::new(),
-                    }),
-                )]),
-            )]),
-            packages: None,
-            package_sources: None,
-            ssh_keys: vec![],
-            secrets: None,
-            raw_uci: None,
-            files: None,
-        };
-        let err = validate_root(&root).unwrap_err();
-        assert!(format!("{err}").contains("Invalid type"));
-    }
-
-    #[test]
-    fn validate_list_invalid_type() {
-        let root = Root {
-            package_manager: "opkg".into(),
-            settings: IndexMap::from([(
-                "dropbear".into(),
-                IndexMap::from([(
-                    "dropbear".into(),
-                    Section::List(vec![AnonymousSection {
-                        section_type: "bad type!".into(),
-                        options: IndexMap::new(),
                     }]),
                 )]),
             )]),
-            packages: None,
-            package_sources: None,
-            ssh_keys: vec![],
-            secrets: None,
-            raw_uci: None,
-            files: None,
-        };
-        let err = validate_root(&root).unwrap_err();
-        assert!(format!("{err}").contains("Invalid type"));
+            ..empty_root()
+        }
+    }
+
+    fn opts(items: &[(&str, Value)]) -> IndexMap<String, Value> {
+        items
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    fn assert_rejects(root: &Root, expected: &str) {
+        let err = validate_root(root).unwrap_err();
+        assert!(
+            format!("{err}").contains(expected),
+            "expected '{expected}' in '{err}'"
+        );
     }
 
     #[test]
-    fn validate_rejects_empty_list_section() {
+    fn rejects_invalid_named_identifiers() {
+        for (config, section, ty, options, expected) in [
+            (
+                "network-config",
+                "lan",
+                "interface",
+                IndexMap::new(),
+                "Invalid config name",
+            ),
+            (
+                "3network",
+                "lan",
+                "interface",
+                IndexMap::new(),
+                "Invalid config name",
+            ),
+            (
+                "network",
+                "my-section",
+                "interface",
+                IndexMap::new(),
+                "Invalid section",
+            ),
+            (
+                "network",
+                "lan",
+                "bad type!",
+                IndexMap::new(),
+                "Invalid type",
+            ),
+            (
+                "network",
+                "lan",
+                "interface",
+                opts(&[("ip-address", "1.1.1.1".into())]),
+                "Invalid option",
+            ),
+            (
+                "network",
+                "lan",
+                "interface",
+                opts(&[("0proto", "static".into())]),
+                "Invalid option",
+            ),
+        ] {
+            assert_rejects(&named_cfg(config, section, ty, options), expected);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_list_identifiers() {
+        for (config, section, ty, options, expected) in [
+            (
+                "dropbear",
+                "dropbear",
+                "bad type!",
+                IndexMap::new(),
+                "Invalid type",
+            ),
+            (
+                "dropbear",
+                "dropbear",
+                "dropbear",
+                opts(&[("listen-port", "22".into())]),
+                "Invalid option",
+            ),
+        ] {
+            assert_rejects(&anon_cfg(config, section, ty, options), expected);
+        }
+    }
+
+    #[test]
+    fn rejects_null_value_and_empty_list() {
+        assert_rejects(
+            &named_cfg(
+                "network",
+                "lan",
+                "interface",
+                opts(&[("proto", Value::Null)]),
+            ),
+            "null value",
+        );
         let root = Root {
-            package_manager: "opkg".into(),
             settings: IndexMap::from([(
                 "wireless".into(),
                 IndexMap::from([("wifi-iface".into(), Section::List(vec![]))]),
             )]),
-            packages: None,
-            package_sources: None,
-            ssh_keys: vec![],
-            secrets: None,
-            raw_uci: None,
-            files: None,
+            ..empty_root()
         };
-        let err = validate_root(&root).unwrap_err();
-        assert!(format!("{err}").contains("Empty list section"));
+        assert_rejects(&root, "Empty list section");
     }
 
     #[test]
-    fn validate_list_rejects_hyphen_in_option() {
-        let mut options = IndexMap::new();
-        options.insert("listen-port".into(), Value::String("22".into()));
-        let root = Root {
-            package_manager: "opkg".into(),
-            settings: IndexMap::from([(
-                "dropbear".into(),
-                IndexMap::from([(
-                    "dropbear".into(),
-                    Section::List(vec![AnonymousSection {
-                        section_type: "dropbear".into(),
-                        options,
-                    }]),
-                )]),
-            )]),
-            packages: None,
-            package_sources: None,
-            ssh_keys: vec![],
-            secrets: None,
-            raw_uci: None,
-            files: None,
-        };
-        let err = validate_root(&root).unwrap_err();
-        assert!(format!("{err}").contains("Invalid option"));
+    fn allows_valid_configs() {
+        assert!(validate_root(&empty_root()).is_ok());
+        // Types may contain hyphens (wifi-iface), identifiers may not.
+        assert!(
+            validate_root(&named_cfg(
+                "wireless",
+                "radio0",
+                "wifi-iface",
+                IndexMap::new()
+            ))
+            .is_ok()
+        );
     }
 
     #[test]
-    fn validate_empty_settings_ok() {
+    fn validates_raw_uci() {
         let root = Root {
-            package_manager: "opkg".into(),
-            settings: IndexMap::new(),
-            packages: None,
-            package_sources: None,
-            ssh_keys: vec![],
-            secrets: None,
-            raw_uci: None,
-            files: None,
-        };
-        assert!(validate_root(&root).is_ok());
-    }
-
-    #[test]
-    fn validate_rejects_digit_start_in_config_name() {
-        let root = Root {
-            package_manager: "opkg".into(),
-            settings: IndexMap::from([("3network".into(), IndexMap::new())]),
-            packages: None,
-            package_sources: None,
-            ssh_keys: vec![],
-            secrets: None,
-            raw_uci: None,
-            files: None,
-        };
-        let err = validate_root(&root).unwrap_err();
-        assert!(format!("{err}").contains("Invalid config name"));
-    }
-
-    #[test]
-    fn validate_rejects_digit_start_in_option() {
-        let mut options = IndexMap::new();
-        options.insert("0proto".into(), Value::String("static".into()));
-        let root = Root {
-            package_manager: "opkg".into(),
-            settings: IndexMap::from([(
-                "network".into(),
-                IndexMap::from([(
-                    "lan".into(),
-                    Section::Named(NamedSection {
-                        section_type: "interface".into(),
-                        options,
-                    }),
-                )]),
-            )]),
-            packages: None,
-            package_sources: None,
-            ssh_keys: vec![],
-            secrets: None,
-            raw_uci: None,
-            files: None,
-        };
-        let err = validate_root(&root).unwrap_err();
-        assert!(format!("{err}").contains("Invalid option"));
-    }
-
-    #[test]
-    fn validate_rejects_raw_uci_not_starting_with_uci() {
-        let root = Root {
-            package_manager: "opkg".into(),
-            settings: IndexMap::new(),
-            packages: None,
-            package_sources: None,
-            ssh_keys: vec![],
-            secrets: None,
             raw_uci: Some(vec!["rm -rf /".into()]),
-            files: None,
+            ..empty_root()
         };
-        let err = validate_root(&root).unwrap_err();
-        assert!(format!("{err}").contains("must be a 'uci' command"));
-    }
+        assert_rejects(&root, "must be a 'uci' command");
 
-    #[test]
-    fn validate_allows_raw_uci_rename() {
         let root = Root {
-            package_manager: "opkg".into(),
-            settings: IndexMap::new(),
-            packages: None,
-            package_sources: None,
-            ssh_keys: vec![],
-            secrets: None,
             raw_uci: Some(vec!["uci rename network.lan=lan2".into()]),
-            files: None,
+            ..empty_root()
         };
         assert!(validate_root(&root).is_ok());
     }

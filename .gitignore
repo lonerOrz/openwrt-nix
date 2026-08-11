@@ -16,3 +16,6 @@ __pycache__/
 
 # mdBook build output
 /book
+
+# Integration test artifacts (dynamically generated)
+tests/secrets.enc.json
