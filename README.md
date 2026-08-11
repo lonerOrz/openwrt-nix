@@ -1,80 +1,35 @@
 # nuci
 
-**Declarative OpenWrt configuration** — write it in Nix, compile to UCI with
-Rust, and deploy it over SSH.
+Declarative OpenWrt configuration — write in Nix, compile with Rust, deploy over SSH.
 
 ```text
-  Nix module (writeUci)
-        │  eval: validate, decrypt SOPS, serialize UCI
-        ▼
-     uci.json  ──────────────┐
-        │                    │
-        ▼                    ▼
-   nuci compile        nuci diff (read-only preview)
-        │                    │
-        ▼                    ▼
-   uci batch script ──►  nuci deploy ──► SSH ──► Router
-                              │
-                              ├─ snapshot /etc/config  (rollback backup)
-                              ├─ apply uci batch + files + packages
-                              ├─ smart service reload (procd / init.d)
-                              └─ watchdog + boot hook (anti-brick)
+Nix (writeUci) ──► uci.json ──► nuci compile/diff/deploy ──► SSH ──► Router
 ```
-
-The router only runs a small shell script. All the thinking — validation,
-secret decryption, UCI serialization — happens on your machine.
-
-## Why nuci?
-
-| Alternative       | Problem                                                   |
-| ----------------- | --------------------------------------------------------- |
-| LuCI (web UI)     | No version control, no review, config drifts silently.    |
-| Ansible / generic | Too heavy for a 128 MB router; rarely idempotent on UCI.  |
-| Pure NixOS        | NixOS does not run on OpenWrt — the userspace is busybox. |
-
-`nuci` keeps your config in Nix (typed, reviewable, reproducible) and ships a
-plain `uci batch` script to the device.
 
 ## Features
 
-- **Declarative UCI** — scalar/list options, named & anonymous sections, fully
-  rebuilt idempotently so removed options are removed on the router.
-- **Package management** — opkg / apk backends, custom feeds, local `.ipk`/`.apk`.
-- **Secrets** — SOPS + age decryption at compile time (`@placeholder@` syntax).
-- **Arbitrary files** — write any file via `files`, including binary (base64)
-  and checksum-guarded idempotent writes.
-- **Safety net** — rollback watchdog + self-deleting boot hook prevent bricking.
-- **Escape hatch** — `rawUci` for directives the typed model can't express.
+- **Declarative UCI**: Idempotent named (delete+set) and anonymous (while delete) section rebuilding.
+- **Package Management**: opkg & apk backends. Package removals (`-pkg`) execute before installs.
+- **SOPS Secrets**: In-memory age decryption at compile time (`@placeholder@`). `--no-sops` pure compiler mode.
+- **Arbitrary Files**: Text via POSIX cat heredocs, binary via base64 `-d`, SHA256 checksum idempotency.
+- **Safety Net**: 60s watchdog (`trap '' HUP`) + self-deleting `S15nuci_rollback` boot hook.
+- **Async Reload**: Background subshell `(sleep 1; reload) &` prevents SSH disconnects (exit status 255).
+- **Lockout Prevention**: Auto-appends active deployer's SSH agent key if missing.
 
-## Quick start
-
-```bash
-nuci diff   ./uci.json --target root@router   # read-only preview
-nuci deploy ./uci.json --target root@router --force
-```
-
-Or via the Nix flake:
+## Quick Start
 
 ```bash
-nix run .#example -- "root@router"   # full deploy to $ROUTER_HOST
+nuci diff   ./uci.json --target root@router          # Read-only diff
+nuci deploy ./uci.json --target root@router --force  # Deploy with rollback net
+nix run .#example -- "root@router"                   # Flake one-shot deploy
 ```
 
 ## Documentation
 
-Full architecture, design philosophy, and copy-paste Nix examples are on the
-documentation site:
-
-> https://lonerOrz.github.io/openwrt-nix/
-
-The source for the docs lives in [`docs/`](docs/).
-
-## Testing
-
-```bash
-just test-unit          # cargo unit tests
-just test-integration   # real OpenWrt containers (Podman)
-just test-all           # both
-```
+- [Index](docs/index.md) — Overview & quick start
+- [Architecture](docs/arch.md) — Domain layout, UCI idempotency, safety net, async reload
+- [Nix Options](docs/nix-options.md) — Exact Nix module option specifications
+- [Examples](docs/examples.md) — Copy-paste configuration snippets
 
 ## License
 
