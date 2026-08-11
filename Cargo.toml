@@ -3,6 +3,10 @@ name = "nuci"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "nuci"
+path = "src/lib.rs"
+
 [[bin]]
 name = "nuci"
 path = "src/main.rs"
@@ -13,3 +17,13 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 indexmap = { version = "2", features = ["serde"] }
 tempfile = "3"
+tar = "0.4"
+
+[dev-dependencies]
+testcontainers = "0.28"
+tokio = { version = "1", features = ["full", "macros"] }
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+libc = "0.2"

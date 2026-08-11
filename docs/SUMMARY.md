@@ -1,6 +1,6 @@
 # Summary
 
-- [Introduction](index.md)
-- [Architecture & Internals](architecture.md)
-- [Features & Design Philosophy](features.md)
-- [Nix Configuration Examples](examples.md)
+- [Overview](index.md)
+- [Architecture](arch.md)
+- [Nix Module Options](nix-options.md)
+- [Examples](examples.md)

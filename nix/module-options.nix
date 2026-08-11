@@ -58,7 +58,8 @@
               description = "Absolute destination path on the target device.";
             };
             content = lib.mkOption {
-              type = lib.types.str;
+              default = null;
+              type = lib.types.nullOr lib.types.str;
               description = "Text content to write. Use `base64` instead for binary content.";
             };
             base64 = lib.mkOption {

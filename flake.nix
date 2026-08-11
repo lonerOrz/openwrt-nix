@@ -17,9 +17,7 @@
   outputs =
     inputs@{
       self,
-      nixpkgs,
       flake-parts,
-      treefmt-nix,
       openwrt-imagebuilder,
       ...
     }:
@@ -41,8 +39,8 @@
         let
           uci = pkgs.callPackage ./nix { inherit openwrt-imagebuilder; };
           uciConfig = uci.writeUci ./example.nix;
-          testConfig = uci.writeUci ./test/test_config.nix;
-          testConfigApk = uci.writeUci ./test/test_config_apk.nix;
+          testConfig = uci.writeUci ./tests/test_config.nix;
+          testConfigApk = uci.writeUci ./tests/test_config_apk.nix;
           isX86Linux = pkgs.stdenv.hostPlatform.isLinux && pkgs.stdenv.hostPlatform.isx86_64;
           exampleFirmware =
             if isX86Linux then
@@ -62,8 +60,6 @@
               shfmt.enable = true;
               yamlfmt.enable = true;
               prettier.enable = true;
-              ruff-check.enable = true;
-              ruff-format.enable = true;
             };
             settings.formatter.prettier.includes = [
               "*.md"
@@ -71,7 +67,7 @@
             ];
             settings.global.excludes = [
               "secrets.yml"
-              "test/secrets.enc.json"
+              "tests/secrets.enc.json"
             ];
           };
 
@@ -91,14 +87,6 @@
               type = "app";
               program = toString uciConfig.command;
             };
-            test-deploy = {
-              type = "app";
-              program = toString testConfig.command;
-            };
-            test-deploy-apk = {
-              type = "app";
-              program = toString testConfigApk.command;
-            };
             default = {
               type = "app";
               program = toString uciConfig.command;
@@ -111,11 +99,10 @@
               sops
               openssh
               mdbook
-              sshpass
               cargo
               rustc
-              python3
-              python3Packages.pytest
+              clippy
+              rustfmt
               config.treefmt.build.wrapper
             ];
           };

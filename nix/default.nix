@@ -41,8 +41,10 @@ in
               {
                 base64 = f.base64;
               }
+            else if f.content != null then
+              f.content
             else
-              f.content;
+              "";
         }
         // (lib.optionalAttrs (f.checksum != null) {
           inherit (f) checksum;
@@ -72,9 +74,11 @@ in
           ]
         }:$PATH"
         if [ "$#" -lt 1 ]; then
-          ${nuci}/bin/nuci compile "${json}"
+          ${nuci}/bin/nuci compile "${json}" "$@"
         else
-          ${nuci}/bin/nuci deploy "${json}" --target "$1" --watchdog-timeout "${toString res.config.uci.watchdogTimeout}"
+          TARGET="$1"
+          shift
+          ${nuci}/bin/nuci deploy "${json}" --target "$TARGET" --watchdog-timeout "${toString res.config.uci.watchdogTimeout}" "$@"
         fi
       '';
     };

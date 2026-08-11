@@ -1,0 +1,36 @@
+# Hardware Kernel Limitation: Dropbear binary in OpenWrt 22.03/23.05 crashes with "Bad buf_getptr"
+# on modern host kernels. OpenSSH is substituted as the transport daemon while preserving
+# genuine opkg/uci binaries.
+ARG OPENWRT_VERSION=x86-64-23.05.5
+FROM docker.io/openwrt/rootfs:${OPENWRT_VERSION}
+
+RUN mkdir -p /var/lock /var/run /etc/dropbear /etc/ssh /root/.ssh /etc/opkg
+RUN touch /etc/config/system /etc/config/wireless /etc/config/network
+RUN mkdir -p /etc/opkg
+
+# Install SSH, CA certs (for real HTTPS feeds), and test utilities.
+RUN opkg update && opkg install openssh-server openssl-util coreutils-base64 tcpdump ca-certificates ca-bundle
+
+# Clear default distfeeds so nuci's configured feeds are the only ones used.
+RUN printf '' > /etc/opkg/distfeeds.conf
+
+RUN ln -sf /etc/dropbear/authorized_keys /root/.ssh/authorized_keys && \
+    sed -i 's/#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config && \
+    sed -i 's/#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+
+RUN printf '#!/bin/sh\nread line; user=$(echo "$line" | cut -d: -f1); pass=$(echo "$line" | cut -d: -f2-); sha=$(openssl passwd -6 "$pass" 2>/dev/null || echo "$pass"); sed -i "s|^${user}:.*|${user}:${sha}:0:0:99999:7:::|" /etc/shadow\n' \
+    > /usr/sbin/chpasswd && chmod +x /usr/sbin/chpasswd
+
+RUN printf 'root\nroot\n' | passwd root
+
+EXPOSE 22
+
+# Container Rootfs Limitation: OpenWrt rootfs containers do not run procd as PID 1,
+# requiring a mocked /sbin/reload_config that directly reloads init.d scripts without
+# severing dropbear SSH.
+RUN printf '#!/bin/sh\nfor s in /etc/init.d/*; do\n  case "$s" in\n    /etc/init.d/dropbear|/etc/init.d/nuci_rollback) ;;\n    *) [ -x "$s" ] && "$s" reload >/dev/null 2>&1 ;;\n  esac\ndone\nexit 0\n' \
+    > /sbin/reload_config && chmod +x /sbin/reload_config
+
+RUN printf '#!/bin/sh\n# Fix DNS resolution for HTTPS feeds (OpenWrt rootfs defaults to 127.0.0.1).\nprintf "nameserver 1.1.1.1\\nnameserver 8.8.8.8\\n" > /etc/resolv.conf\nmkdir -p /var/run/sshd\nexec /usr/sbin/sshd -D -e\n' \
+    > /start.sh && chmod +x /start.sh
+CMD ["/start.sh"]

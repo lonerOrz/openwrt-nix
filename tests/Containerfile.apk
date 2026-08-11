@@ -12,6 +12,12 @@ RUN if ! command -v apk >/dev/null 2>&1; then \
       opkg install apk-tools >/dev/null 2>&1 || true; \
     fi
 
+# Pre-install tcpdump (for -tcpdump removal tests) and ca-certificates (for HTTPS feeds).
+RUN apk add --no-cache tcpdump ca-certificates
+
+# Clear default distfeeds so nuci's configured feeds are the only ones used.
+RUN printf '' > /etc/apk/repositories.d/distfeeds.list
+
 # Real chpasswd: genuine sha512 via openssl.
 RUN printf '#!/bin/sh\nread line; user=$(echo "$line" | cut -d: -f1); pass=$(echo "$line" | cut -d: -f2-); sha=$(openssl passwd -6 "$pass" 2>/dev/null || echo "$pass"); sed -i "s|^${user}:.*|${user}:${sha}:0:0:99999:7:::|" /etc/shadow\n' \
     > /usr/sbin/chpasswd && chmod +x /usr/sbin/chpasswd
@@ -24,9 +30,12 @@ RUN uci set dropbear.@dropbear[0].PasswordAuth='off' && \
 
 EXPOSE 22
 
+# Container Rootfs Limitation: OpenWrt rootfs containers do not run procd as PID 1,
+# requiring a mocked /sbin/reload_config that directly reloads init.d scripts without
+# severing dropbear SSH.
 RUN printf '#!/bin/sh\nfor s in /etc/init.d/*; do\n  case "$s" in\n    /etc/init.d/dropbear|/etc/init.d/nuci_rollback) ;;\n    *) [ -x "$s" ] && "$s" reload >/dev/null 2>&1 ;;\n  esac\ndone\nexit 0\n' \
     > /sbin/reload_config && chmod +x /sbin/reload_config
 
-RUN printf '#!/bin/sh\n/usr/sbin/dropbear -F -E -p 22 -R\nexec sleep infinity\n' \
+RUN printf '#!/bin/sh\n# Fix DNS resolution for HTTPS feeds (OpenWrt rootfs defaults to 127.0.0.1).\nprintf "nameserver 1.1.1.1\\nnameserver 8.8.8.8\\n" > /etc/resolv.conf\n/usr/sbin/dropbear -F -E -p 22 -R\nexec sleep infinity\n' \
     > /start.sh && chmod +x /start.sh
 CMD ["/start.sh"]

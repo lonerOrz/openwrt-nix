@@ -35,9 +35,12 @@ jobs:
             ~/.cargo/git/db/
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      - name: Run Rust unit tests
-        run: nix develop --command cargo test
-      - name: Run integration tests (opkg + apk)
+      - name: Build test container images
+        run: |
+          docker build -t openwrt-test-opkg-env -f tests/Containerfile.opkg .
+          docker build -t openwrt-test-apk-env -f tests/Containerfile.apk .
+          docker build -t openwrt-agent-test-env -f tests/Containerfile.agent-test .
+      - name: Run all Rust tests (Zero-Skip Enforcement)
         env:
           CONTAINER_ENGINE: docker
-        run: nix develop --command python3 -m pytest test/integration_test.py -v --tb=short
+        run: nix develop --command cargo test -- --test-threads=1

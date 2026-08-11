@@ -42,6 +42,26 @@
 
       # 2. Generate JSON — secrets field omitted so nuci sees no SOPS metadata
       #    Any @placeholder@ in settings will cause compile to error (good — catches misconfig early)
+      filesJson = map (
+        f:
+        {
+          path = f.path;
+          executable = f.executable;
+          content =
+            if f.base64 != null then
+              {
+                base64 = f.base64;
+              }
+            else if f.content != null then
+              f.content
+            else
+              "";
+        }
+        // (lib.optionalAttrs (f.checksum != null) {
+          inherit (f) checksum;
+        })
+      ) cfg.files;
+
       uciJson = (formats.json { }).generate "uci.json" {
         inherit (cfg)
           packageManager
@@ -49,7 +69,9 @@
           packages
           packageSources
           sshKeys
+          rawUci
           ;
+        files = filesJson;
       };
 
       # 3. uci-defaults bootstrap script — single derivation, no IFD

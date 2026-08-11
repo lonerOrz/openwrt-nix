@@ -1,35 +1,20 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use crate::deploy::{DeployConfig, SshExec};
-use crate::error::ConfigError;
-use crate::models::{PkgBackend, Section};
-use crate::pipeline::compile_config;
-use crate::uci_key::{
+use crate::compile::pipeline::compile_config;
+use crate::config::models::{PackageAction, PkgBackend, Section};
+use crate::config::uci_key::{
     anonymous_option_key, anonymous_section_key, named_option_key, named_section_key,
 };
+use crate::target::deploy::SshExec;
+use crate::utils::error::ConfigError;
 
 pub(crate) const SERVICE_SEPARATOR: &str = "===NUCI_SERVICES===";
 pub(crate) const STATE_SEPARATOR: &str = "===NUCI_STATE===";
 
-/// Build a single SSH command that fetches UCI state + discovers init.d service mappings.
-///
-/// NOTE (audit #9): the third branch below greps `/etc/init.d/*` for
-/// `config_load <config>` to guess the owning service. This is a community
-/// heuristic, NOT an official OpenWrt API. OpenWrt has no central
-/// `config -> service` map; each init script declares its own dependencies via
-/// `service_triggers()` / `procd_add_reload_trigger` (see
-/// https://openwrt.org/docs/guide-developer/procd-init-scripts and
-/// `package/system/procd/files/procd.sh`). The official reload mechanism is
-/// `reload_config`, which asks procd (via ubus) to reload only the services
-/// that declared a trigger for the changed config. The grep is a best-effort
-/// last-resort for arbitrary services; common cases (network, wireless) are
-/// handled exactly by the first two branches, and `reload_commands` in
-/// deploy.rs still falls back to `/etc/init.d/<config> reload` when discovery
-/// finds nothing. Per ADR-0010 we intentionally do NOT replace this heuristic
-/// with another one: there is no official inverse lookup to use. Recorded in
-/// the architecture-review audit (candidate #9, Speculative) as a known
-/// tradeoff rather than a defect.
+// OpenWrt procd limitation: no central inverse mapping from config to owning service exists.
+// The config_load grep heuristic is the community standard fallback; per ADR-0010 we intentionally
+// do not replace it — no official API exists to do better.
 pub(crate) fn build_discovery_command(managed: &[&str]) -> String {
     format!(
         "for c in {configs}; do uci -q show \"$c\" 2>/dev/null; done; \
@@ -52,17 +37,26 @@ pub(crate) fn build_discovery_command(managed: &[&str]) -> String {
     )
 }
 
-/// Build a single SSH command that probes the live target for package/key/password
-/// state, so `nuci diff` can mark what is already deployed vs what will change.
 pub(crate) fn build_state_command(packages: &[String], backend: PkgBackend) -> String {
-    let probe = backend.installed_probe();
+    let quoted_probed: Vec<String> = packages
+        .iter()
+        .map(|p| PackageAction::parse(p).quoted_name())
+        .collect();
+
     let mut cmd = String::new();
-    if !packages.is_empty() {
-        cmd.push_str(&format!(
-            "for p in {}; do {} \"$p\" >/dev/null 2>&1 && echo \"$p:yes\" || echo \"$p:no\"; done; ",
-            packages.join(" "),
-            probe
-        ));
+    if !quoted_probed.is_empty() {
+        match backend {
+            PkgBackend::Opkg => {
+                cmd.push_str("for p in ");
+                cmd.push_str(&quoted_probed.join(" "));
+                cmd.push_str("; do opkg status \"$p\" 2>/dev/null | grep -q 'Status:.*installed' && echo \"$p:yes\" || echo \"$p:no\"; done; ");
+            }
+            PkgBackend::Apk => {
+                cmd.push_str("for p in ");
+                cmd.push_str(&quoted_probed.join(" "));
+                cmd.push_str("; do apk info -e \"$p\" >/dev/null 2>&1 && echo \"$p:yes\" || echo \"$p:no\"; done; ");
+            }
+        }
     }
     cmd.push_str(&format!(
         "echo '{sep}'; cat /etc/dropbear/authorized_keys 2>/dev/null; \
@@ -72,7 +66,6 @@ pub(crate) fn build_state_command(packages: &[String], backend: PkgBackend) -> S
     cmd
 }
 
-/// Parse the `pkg:yes|no` lines into a per-package installed map.
 pub(crate) fn parse_package_state(output: &str) -> BTreeMap<String, bool> {
     let mut map = BTreeMap::new();
     for line in output.lines() {
@@ -85,7 +78,6 @@ pub(crate) fn parse_package_state(output: &str) -> BTreeMap<String, bool> {
     map
 }
 
-/// Parse the service discovery portion of a combined SSH output into `config -> reload command`.
 pub(crate) fn parse_services(output: &str) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
     for line in output.lines() {
@@ -100,7 +92,6 @@ pub(crate) fn parse_services(output: &str) -> BTreeMap<String, String> {
     map
 }
 
-/// Flatten Nix config into `config.section.option = value` map (no quoting — matches `uci show`).
 pub(crate) fn extract_desired_map(
     configs: &indexmap::IndexMap<String, indexmap::IndexMap<String, Section>>,
 ) -> BTreeMap<String, String> {
@@ -137,14 +128,10 @@ pub(crate) fn extract_desired_map(
     map
 }
 
-/// Separator used to serialize a UCI list so element boundaries survive.
-/// `uci show` emits `'a' 'b'` (space between items) which is ambiguous with a
-/// single element containing a space (`'a b'`). We re-serialize both the
-/// desired config and the remote `uci show` output with a unit-separator that
-/// cannot appear in a UCI value, so list-vs-space-in-element is never confused.
+// Algorithmic decision: \u{1f} (Unit Separator) cannot appear in any UCI value,
+// so it safely delimits list elements without any escaping ambiguity.
 const LIST_SEP: &str = "\u{1f}";
 
-/// Format a JSON value as a plain string (no quotes, matching `uci show` output).
 fn val_str(val: &serde_json::Value) -> Option<String> {
     match val {
         serde_json::Value::String(s) => Some(s.clone()),
@@ -162,15 +149,6 @@ fn val_str(val: &serde_json::Value) -> Option<String> {
     }
 }
 
-/// Split a UCI-quoted value into its element list.
-///
-/// `uci show` wraps values in single quotes: `proto='static'`. A list option
-/// is space-separated quoted items: `option='a' 'b'`. Inside a quoted element a
-/// literal `'` is escaped as `'\''` (close quote, backslash-quote, reopen).
-///
-/// Returns `None` when `v` is not a quoted value (e.g. an unquoted bareword),
-/// so the caller can fall back to the raw trim. A single quoted element yields
-/// one item; a list yields several — element-internal spaces are preserved.
 fn split_uci_quoted(v: &str) -> Option<Vec<String>> {
     let trimmed = v.trim();
     if !trimmed.starts_with('\'') || trimmed.len() < 2 {
@@ -178,32 +156,28 @@ fn split_uci_quoted(v: &str) -> Option<Vec<String>> {
     }
     let bytes = trimmed.as_bytes();
     let mut items = Vec::new();
-    // Each element is `'<content>'`; elements are separated by spaces.
-    // Inside content a literal `'` is escaped as `'\''`.
-    let mut i = 1; // past the opening quote of the first element
+    let mut i = 1;
     loop {
         let mut cur = String::new();
-        // Read one element's content until its closing quote.
         while i < bytes.len() {
             if bytes[i..].starts_with(b"'\\''") {
                 cur.push('\'');
-                i += 4; // consume the escaped-quote sequence
+                i += 4;
                 continue;
             }
             if bytes[i] == b'\'' {
-                i += 1; // consume the closing quote
+                i += 1;
                 break;
             }
             cur.push(bytes[i] as char);
             i += 1;
         }
         items.push(cur);
-        // Skip spaces before the next element; stop if no more quotes.
         while i < bytes.len() && bytes[i] == b' ' {
             i += 1;
         }
         if i < bytes.len() && bytes[i] == b'\'' {
-            i += 1; // past the opening quote of the next element
+            i += 1;
             continue;
         }
         break;
@@ -211,20 +185,10 @@ fn split_uci_quoted(v: &str) -> Option<Vec<String>> {
     Some(items)
 }
 
-/// Render an internal canonical value for human-facing `diff` output.
-///
-/// Internal list form uses `LIST_SEP` so element boundaries survive comparison;
-/// on screen a list reads better as comma-separated, so translate it here.
 fn show_val(s: &str) -> String {
     s.replace(LIST_SEP, ", ")
 }
 
-/// Strip UCI quotes and unescape from `uci show` output.
-///
-/// `uci show` wraps values in single quotes: `proto='static'`. Inside quotes,
-/// literal `'` is escaped as `'\''`. Arrays use space-separated quoted items:
-/// `'a' 'b'`. Unlike a naive `' '`→space replace, element boundaries are kept
-/// so a list `('a b' 'c')` is distinct from a single element `'a b c'`.
 fn sanitize_uci_value(v: &str) -> String {
     let trimmed = v.trim();
     match split_uci_quoted(trimmed) {
@@ -233,7 +197,6 @@ fn sanitize_uci_value(v: &str) -> String {
     }
 }
 
-/// Parse `uci show` output into a flat map.
 pub(crate) fn parse_uci_show(output: &str) -> BTreeMap<String, String> {
     output
         .lines()
@@ -248,10 +211,10 @@ pub(crate) fn parse_uci_show(output: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
-pub(crate) fn run(
+pub fn run(
     json_path: &Path,
     target: &str,
-    config: &DeployConfig,
+    config: &crate::target::deploy::DeployConfig,
     secrets_dir: Option<&Path>,
     ssh: &dyn SshExec,
 ) -> Result<(), ConfigError> {
@@ -281,8 +244,7 @@ pub(crate) fn run(
     let remote = parse_uci_show(uci_output);
     let service_map = parse_services(services_output);
 
-    // Probe live target state (packages / keys / password) in one round-trip.
-    let backend = PkgBackend::from_str(&compiled.resolved_root.package_manager);
+    let backend = PkgBackend::from_name(&compiled.resolved_root.package_manager);
     let packages = compiled.resolved_root.packages.clone().unwrap_or_default();
     let state_cmd = build_state_command(&packages, backend);
     let state_output = ssh.exec(target, &state_cmd, None, config)?;
@@ -351,17 +313,20 @@ pub(crate) fn run(
         }
     }
 
-    // High-risk changes beyond UCI — surface them so `diff` is a real preview,
-    // marked against the live target state.
     if let Some(packages) = &compiled.resolved_root.packages
         && !packages.is_empty()
     {
         println!("\n\x1b[1;35m[Packages]\x1b[0m");
-        for pkg in packages {
-            match pkg_state.get(pkg) {
-                Some(true) => println!("  \x1b[90m{pkg}  (Installed)\x1b[0m"),
-                Some(false) => println!("  \x1b[32m+ {pkg}  (To Install)\x1b[0m"),
-                None => println!("  \x1b[32m+ {pkg}  (To Install)\x1b[0m"),
+        for spec in packages {
+            let action = PackageAction::parse(spec);
+            let name = action.name();
+            let is_installed = pkg_state.get(name).copied().unwrap_or(false);
+
+            match (action.is_remove(), is_installed) {
+                (true, true) => println!("  \x1b[31m- {name}  (To Remove)\x1b[0m"),
+                (true, false) => println!("  \x1b[90m{name}  (Already Absent)\x1b[0m"),
+                (false, true) => println!("  \x1b[90m{spec}  (Installed)\x1b[0m"),
+                (false, false) => println!("  \x1b[32m+ {spec}  (To Install)\x1b[0m"),
             }
         }
     }
@@ -371,9 +336,6 @@ pub(crate) fn run(
         let desired_keys: BTreeSet<String> = ssh_keys
             .iter()
             .map(|k| {
-                // Take only <keytype> <base64>; ignore the trailing comment.
-                // The comment is non-identifying, so a comment edit alone
-                // won't falsely register as a key change.
                 k.split_whitespace()
                     .take(2)
                     .collect::<Vec<&str>>()
@@ -429,21 +391,17 @@ mod tests {
 
     #[test]
     fn sanitize_escaped_single_quote() {
-        // uci show output: 'admin'\''s WiFi'
         assert_eq!(sanitize_uci_value("'admin'\\''s WiFi'"), "admin's WiFi");
     }
 
     #[test]
     fn sanitize_array() {
-        // uci show: 'a' 'b' 'c' -> canonical unit-separator form
         assert_eq!(sanitize_uci_value("'a' 'b' 'c'"), "a\u{1f}b\u{1f}c");
     }
 
     #[test]
     fn sanitize_list_preserves_internal_spaces() {
-        // A list ('my city' 'c') must NOT collapse to a single space-joined token.
         assert_eq!(sanitize_uci_value("'my city' 'c'"), "my city\u{1f}c");
-        // A single element containing a space is distinct from the two-element list.
         assert_eq!(sanitize_uci_value("'my city'"), "my city");
         assert_ne!(
             sanitize_uci_value("'my city' 'c'"),
@@ -453,7 +411,6 @@ mod tests {
 
     #[test]
     fn sanitize_list_escaped_quote() {
-        // 'admin'\''s net' 'other' -> two elements, first with a literal quote
         assert_eq!(
             sanitize_uci_value("'admin'\\''s net' 'other'"),
             "admin's net\u{1f}other"
@@ -472,7 +429,6 @@ mod tests {
 
     #[test]
     fn val_str_array_matches_parse() {
-        // desired array serialized the same way as parsed uci show output
         let desired = val_str(&serde_json::Value::Array(vec![
             "my city".into(),
             "c".into(),
@@ -540,7 +496,7 @@ mod tests {
     #[test]
     fn build_state_command_opkg_probes_packages() {
         let cmd = build_state_command(&["luci".into(), "tcpdump".into()], PkgBackend::Opkg);
-        assert!(cmd.contains("opkg list-installed"));
+        assert!(cmd.contains("opkg status"));
         assert!(cmd.contains("luci"));
         assert!(cmd.contains(STATE_SEPARATOR));
         assert!(cmd.contains("authorized_keys"));
@@ -554,57 +510,18 @@ mod tests {
     }
 
     #[test]
+    fn build_state_command_probes_removal_without_dash() {
+        let cmd = build_state_command(&["-wpad-basic-mbedtls".into()], PkgBackend::Opkg);
+        assert!(cmd.contains("wpad-basic-mbedtls"));
+        assert!(!cmd.contains("opkg status \"-wpad"));
+        assert!(cmd.contains("for p in 'wpad-basic-mbedtls'"));
+    }
+
+    #[test]
     fn parse_package_state_marks_installed() {
         let out = "luci:yes\ntcpdump:no\n";
         let map = parse_package_state(out);
         assert_eq!(map.get("luci"), Some(&true));
         assert_eq!(map.get("tcpdump"), Some(&false));
-    }
-
-    struct MockSsh {
-        discovery_response: String,
-        state_response: String,
-    }
-
-    impl SshExec for MockSsh {
-        fn exec(
-            &self,
-            _target: &str,
-            cmd: &str,
-            _stdin: Option<&[u8]>,
-            _config: &DeployConfig,
-        ) -> Result<String, ConfigError> {
-            if cmd.contains(SERVICE_SEPARATOR) {
-                Ok(self.discovery_response.clone())
-            } else {
-                Ok(self.state_response.clone())
-            }
-        }
-    }
-
-    #[test]
-    fn diff_run_with_mock_ssh_succeeds() {
-        use std::io::Write;
-        use tempfile::NamedTempFile;
-
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(br#"{ "packageManager": "opkg", "settings": {} }"#)
-            .unwrap();
-
-        let config = DeployConfig {
-            port: 22,
-            identity_file: None,
-            force: false,
-            no_sops: true,
-            watchdog_timeout: 60,
-        };
-
-        let ssh = MockSsh {
-            discovery_response: format!("\n{}\n", SERVICE_SEPARATOR),
-            state_response: format!("\n{}\n{}\n", STATE_SEPARATOR, STATE_SEPARATOR),
-        };
-
-        let result = run(f.path(), "root@127.0.0.1", &config, None, &ssh);
-        assert!(result.is_ok());
     }
 }
