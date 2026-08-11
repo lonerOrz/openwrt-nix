@@ -159,24 +159,19 @@ fn transfer_packages(
     }
 
     eprintln!("Bundling {} local package(s)...", local_pkgs.len());
-    let tar_bytes = Command::new("tar")
-        .arg("-cf")
-        .arg("-")
-        .arg("-C")
-        .arg(staging.path())
-        .arg(".")
-        .output()
-        .map_err(|e| ConfigError::Deploy(format!("Failed to run local tar: {e}")))?;
-
-    if !tar_bytes.status.success() {
-        return Err(ConfigError::Deploy(format!(
-            "Local tar failed: {}",
-            String::from_utf8_lossy(&tar_bytes.stderr)
-        )));
+    let mut tar_bytes = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut tar_bytes);
+        builder
+            .append_dir_all(".", staging.path())
+            .map_err(|e| ConfigError::Deploy(format!("Failed to build tar archive: {e}")))?;
+        builder
+            .finish()
+            .map_err(|e| ConfigError::Deploy(format!("Failed to finalize tar archive: {e}")))?;
     }
 
     eprintln!("Transferring to {target}:/tmp/ via SSH stream...");
-    ssh_exec(target, "tar -xf - -C /tmp", Some(&tar_bytes.stdout), config)?;
+    ssh_exec(target, "tar -xf - -C /tmp", Some(&tar_bytes), config)?;
     Ok(())
 }
 
