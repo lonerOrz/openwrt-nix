@@ -14,6 +14,10 @@ every third-party package.
   custom `packageSources.feeds`, and `packageSources.localPackages` for real
   `.ipk` / `.apk` files. opkg installs are guarded by `opkg list-installed
 <name>`; apk installs the file directly with `apk add --allow-untrusted`.
+  A `-pkg` entry in `packages` **removes** a package before installs run
+  (ImageBuilder convention) — e.g. `packages = [ "-wpad-basic-mbedtls"
+"wpad-mbedtls" ]` to swap in the full wpad, which opkg/apk would otherwise
+  reject with a dependency conflict.
 - **Secrets (SOPS)** — `secrets.sops.files = [ ./secrets.yml ]` decrypts with
   `sops` + age at compile time. Placeholders use `@name@` syntax
   (`key = "@wifi_password@"`); a missing placeholder is a **compile error**,

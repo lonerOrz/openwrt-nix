@@ -29,16 +29,22 @@
     };
   };
   uci.packages = [
-    "tcpdump"
+    "-tcpdump"
+    "htop"
   ];
   uci.packageSources = {
     feeds = [
-      "https://example.com/packages"
-    ];
-    localPackages = [
-      "./packages/libuci20250120.apk"
+      "https://downloads.openwrt.org/snapshots/packages/x86_64/base/packages.adb"
+      "https://downloads.openwrt.org/snapshots/packages/x86_64/packages/packages.adb"
     ];
   };
+  uci.files = [
+    {
+      path = "/etc/nuci-managed.txt";
+      content = "nuci-managed-file-apk-ok\n";
+      executable = false;
+    }
+  ];
   uci.secrets =
     if builtins.pathExists ./secrets.enc.json then { sops.files = [ ./secrets.enc.json ]; } else { };
   uci.rawUci = [

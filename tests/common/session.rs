@@ -1,11 +1,14 @@
 use super::target::Target;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 use tokio::sync::OnceCell;
 
-/// Session-scoped artifacts shared across all integration tests.
+// Performance Decision: Sandbox creates dynamic test artifacts in /tmp/nuci_test_sandbox_*
+// to prevent Git working tree pollution and ensure parallel isolation across test sessions.
 pub struct SessionArtifacts {
+    #[allow(dead_code)]
+    pub session_dir: PathBuf,
     pub ssh_key: PathBuf,
     pub sops_key_dir: PathBuf,
     pub opkg_json: PathBuf,
@@ -13,205 +16,300 @@ pub struct SessionArtifacts {
 }
 
 static ARTIFACTS: OnceLock<SessionArtifacts> = OnceLock::new();
-static OPKG_TARGET: OnceCell<Option<Target>> = OnceCell::const_new();
-static APK_TARGET: OnceCell<Option<Target>> = OnceCell::const_new();
-
-/// Cleanup hook registered via atexit — removes dynamic test artifacts.
-extern "C" fn cleanup_session_artifacts() {
-    eprintln!("DEBUG[cleanup]: HOOK CALLED!");
-    let _ = std::fs::write("/tmp/nuci_cleanup_ran", "yes");
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-
-    // Remove dynamically generated SOPS-encrypted secrets file.
-    let _ = std::fs::remove_file(manifest_dir.join("tests/secrets.enc.json"));
-
-    // Restore Nix configs that were modified to inject SSH keys and rawUci.
-    let _ = Command::new("git")
-        .args([
-            "restore",
-            "tests/test_config.nix",
-            "tests/test_config_apk.nix",
-        ])
-        .status();
-}
+static OPKG_TARGET: OnceCell<Target> = OnceCell::const_new();
+static APK_TARGET: OnceCell<Target> = OnceCell::const_new();
 
 pub fn get_session_artifacts() -> &'static SessionArtifacts {
     ARTIFACTS.get_or_init(|| {
-        // Register atexit hook on first access.
-        eprintln!("DEBUG: registering atexit hook");
-        unsafe { libc::atexit(cleanup_session_artifacts); }
-
         let session_id = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let ssh_key = PathBuf::from(format!("/tmp/nuci_key_{session_id}"));
-        let sops_key_dir = PathBuf::from(format!("/tmp/nuci_sops_{session_id}"));
-        let encrypted_secrets = manifest_dir.join("tests/secrets.enc.json");
+        let session_dir = PathBuf::from(format!("/tmp/nuci_test_sandbox_{session_id}"));
+        std::fs::create_dir_all(&session_dir).expect("Failed to create test sandbox dir");
 
-        // 1. Generate SSH keypair.
-        if !ssh_key.exists() {
-            let out = Command::new("ssh-keygen")
-                .args(["-t", "ed25519", "-N", "", "-f", ssh_key.to_str().unwrap(), "-C", "openwrt-test", "-q"])
-                .output().expect("ssh-keygen failed");
-            assert!(out.status.success(), "ssh-keygen failed");
-        }
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+        let src_tests = manifest_dir.join("tests");
+        copy_tests_to_sandbox(&src_tests, &session_dir);
+
+        let ssh_key = session_dir.join("ssh_key");
+        let sops_key_dir = session_dir.join("sops_keys");
+        let encrypted_secrets = session_dir.join("secrets.enc.json");
+
+        generate_ssh_keypair(&ssh_key);
         let pub_key = std::fs::read_to_string(ssh_key.with_extension("pub")).expect("read pub key");
 
-        // 2. Generate SOPS/age keypair and encrypt secrets.
-        std::fs::create_dir_all(&sops_key_dir).unwrap();
-        let age_key_file = sops_key_dir.join("keys.txt");
-        if !age_key_file.exists() {
-            let out = Command::new("age-keygen")
-                .output()
-                .or_else(|_| {
-                    Command::new("nix")
-                        .args(["shell", "nixpkgs#age", "-c", "age-keygen"])
-                        .output()
-                })
-                .expect("Failed to run age-keygen");
+        let age_key_file = generate_sops_key(&sops_key_dir);
+        let age_pubkey = extract_age_pubkey(&age_key_file);
+        encrypt_mock_secrets(&age_key_file, &age_pubkey, &encrypted_secrets, &session_dir);
 
-            assert!(out.status.success(), "age-keygen failed: {}", String::from_utf8_lossy(&out.stderr));
-            std::fs::write(&age_key_file, &out.stdout).unwrap();
+        let temp_opkg_nix = prepare_nix_file(
+            &session_dir,
+            "test_config.nix",
+            &pub_key,
+            &encrypted_secrets,
+        );
+        let temp_apk_nix = prepare_nix_file(
+            &session_dir,
+            "test_config_apk.nix",
+            &pub_key,
+            &encrypted_secrets,
+        );
+
+        // Performance Decision: nix build uses --impure --expr to evaluate dynamic sandbox nix configs without creating git flakes.
+        let opkg_json = eval_nix_json(&manifest_dir, &temp_opkg_nix);
+        let apk_json = eval_nix_json(&manifest_dir, &temp_apk_nix);
+
+        SessionArtifacts {
+            session_dir,
+            ssh_key,
+            sops_key_dir,
+            opkg_json,
+            apk_json,
         }
-        let keys_content = std::fs::read_to_string(&age_key_file).unwrap();
-        let age_pubkey = keys_content
-            .split_whitespace()
-            .find(|s| s.starts_with("age1"))
-            .expect("Failed to extract age public key")
-            .to_string();
-
-        let _ = Command::new("sops")
-            .env("SOPS_AGE_KEY_FILE", &age_key_file)
-            .args([
-                "--config", "/dev/null", "--encrypt", "--age", &age_pubkey,
-                "--input-type", "json", "--output-type", "json",
-                "--output", encrypted_secrets.to_str().unwrap(),
-                manifest_dir.join("tests/mock_secrets/secrets.json").to_str().unwrap(),
-            ])
-            .status()
-            .or_else(|_| {
-                Command::new("nix")
-                    .env("SOPS_AGE_KEY_FILE", &age_key_file)
-                    .args([
-                        "shell", "nixpkgs#sops", "-c", "sops",
-                        "--config", "/dev/null",
-                        "--encrypt", "--age", &age_pubkey,
-                        "--input-type", "json", "--output-type", "json",
-                        "--output", encrypted_secrets.to_str().unwrap(),
-                        manifest_dir.join("tests/mock_secrets/secrets.json").to_str().unwrap(),
-                    ])
-                    .status()
-            });
-
-        // 3. Inject SSH key + rawUci escape hatch into Nix test configs.
-        for cfg in ["tests/test_config.nix", "tests/test_config_apk.nix"] {
-            let cfg_path = manifest_dir.join(cfg);
-            if let Ok(content) = std::fs::read_to_string(&cfg_path) {
-                let updated = content.replace(
-                    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAvctZwmsE8Bxt0WYnHZAdRKERk0YKwwidsG32rY6cf2 openwrt-test",
-                    pub_key.trim(),
-                );
-                let updated = if !updated.contains("nuci_test.marker") {
-                    updated.replace(
-                        "uci.sshKeys = [",
-                        "uci.rawUci = [ \"uci set nuci_test.marker=escaped\" \"uci commit nuci_test\" ];\n  uci.sshKeys = [",
-                    )
-                } else {
-                    updated
-                };
-                std::fs::write(&cfg_path, updated).unwrap();
-            }
-        }
-
-        // 4. Build Nix JSON configs.
-        let build_json = |attr: &str| -> PathBuf {
-            let out = Command::new("nix")
-                .args(["build", &format!("path:.#{attr}"), "--print-out-paths", "--no-link"])
-                .output().expect("nix build failed");
-            PathBuf::from(String::from_utf8(out.stdout).expect("invalid utf8").trim().to_string())
-        };
-        let opkg_json = build_json("test-json");
-        let apk_json = build_json("test-json-apk");
-
-        SessionArtifacts { ssh_key, sops_key_dir, opkg_json, apk_json }
     })
 }
 
-/// Returns the path to the SOPS age key file.
+fn generate_ssh_keypair(ssh_key: &Path) {
+    if !ssh_key.exists() {
+        let out = Command::new("ssh-keygen")
+            .args([
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-f",
+                ssh_key.to_str().unwrap(),
+                "-C",
+                "openwrt-test",
+                "-q",
+            ])
+            .output()
+            .expect("ssh-keygen failed");
+        assert!(out.status.success(), "ssh-keygen failed");
+    }
+}
+
+fn generate_sops_key(sops_key_dir: &Path) -> PathBuf {
+    std::fs::create_dir_all(sops_key_dir).expect("Failed to create sops_key_dir");
+    let age_key_file = sops_key_dir.join("keys.txt");
+    if !age_key_file.exists() {
+        let out = Command::new("age-keygen")
+            .output()
+            .or_else(|_| {
+                Command::new("nix")
+                    .args(["shell", "nixpkgs#age", "-c", "age-keygen"])
+                    .output()
+            })
+            .expect("Failed to run age-keygen");
+        assert!(
+            out.status.success(),
+            "age-keygen failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::fs::write(&age_key_file, &out.stdout).unwrap();
+    }
+    age_key_file
+}
+
+fn extract_age_pubkey(age_key_file: &Path) -> String {
+    let keys_content = std::fs::read_to_string(age_key_file).unwrap();
+    keys_content
+        .split_whitespace()
+        .find(|s| s.starts_with("age1"))
+        .expect("Failed to extract age public key")
+        .to_string()
+}
+
+fn encrypt_mock_secrets(
+    age_key_file: &Path,
+    age_pubkey: &str,
+    encrypted_secrets: &Path,
+    session_dir: &Path,
+) {
+    let mock_secrets_path = session_dir.join("mock_secrets/secrets.json");
+    assert!(
+        mock_secrets_path.exists(),
+        "mock_secrets/secrets.json must exist in sandbox at {}",
+        mock_secrets_path.display()
+    );
+
+    let status = Command::new("sops")
+        .env("SOPS_AGE_KEY_FILE", age_key_file)
+        .args([
+            "--config",
+            "/dev/null",
+            "--encrypt",
+            "--age",
+            age_pubkey,
+            "--input-type",
+            "json",
+            "--output-type",
+            "json",
+            "--output",
+            encrypted_secrets.to_str().unwrap(),
+            mock_secrets_path.to_str().unwrap(),
+        ])
+        .status()
+        .or_else(|_| {
+            Command::new("nix")
+                .env("SOPS_AGE_KEY_FILE", age_key_file)
+                .args([
+                    "shell",
+                    "nixpkgs#sops",
+                    "-c",
+                    "sops",
+                    "--config",
+                    "/dev/null",
+                    "--encrypt",
+                    "--age",
+                    age_pubkey,
+                    "--input-type",
+                    "json",
+                    "--output-type",
+                    "json",
+                    "--output",
+                    encrypted_secrets.to_str().unwrap(),
+                    mock_secrets_path.to_str().unwrap(),
+                ])
+                .status()
+        })
+        .expect("Failed to execute sops command");
+
+    assert!(
+        status.success() && encrypted_secrets.exists(),
+        "SOPS encryption failed; encrypted secrets file was not created at {}",
+        encrypted_secrets.display()
+    );
+}
+
+fn copy_tests_to_sandbox(src_tests: &Path, session_dir: &Path) {
+    copy_dir_all(src_tests, session_dir).expect("Failed to copy tests directory to sandbox");
+}
+
+fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result<()> {
+    std::fs::create_dir_all(&dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        if ty.is_dir() {
+            copy_dir_all(entry.path(), dst.as_ref().join(entry.file_name()))?;
+        } else {
+            std::fs::copy(entry.path(), dst.as_ref().join(entry.file_name()))?;
+        }
+    }
+    Ok(())
+}
+
+fn prepare_nix_file(
+    session_dir: &Path,
+    dest_name: &str,
+    pub_key: &str,
+    encrypted_secrets: &Path,
+) -> PathBuf {
+    let dest_path = session_dir.join(dest_name);
+    let content = std::fs::read_to_string(&dest_path).unwrap_or_else(|e| {
+        panic!(
+            "Read nix test template failed at {}: {e}",
+            dest_path.display()
+        )
+    });
+
+    let updated = content.replace(
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEGPJpRJiBIHwzjGVJxKYGO8nCrhAbHnqHox3X+qkRM8 openwrt-test",
+        pub_key.trim(),
+    );
+    let updated = updated.replace("./secrets.enc.json", encrypted_secrets.to_str().unwrap());
+    let updated = if !updated.contains("nuci_test.marker") {
+        updated.replace(
+            "uci.sshKeys = [",
+            "uci.rawUci = [ \"uci set nuci_test.marker=escaped\" \"uci commit nuci_test\" ];\n  uci.sshKeys = [",
+        )
+    } else {
+        updated
+    };
+    std::fs::write(&dest_path, updated).unwrap();
+    dest_path
+}
+
+fn eval_nix_json(manifest_dir: &Path, nix_file_path: &Path) -> PathBuf {
+    let expr = format!(
+        "let pkgs = import <nixpkgs> {{}}; uci = pkgs.callPackage {}/nix {{}}; in (uci.writeUci {}).json",
+        manifest_dir.display(),
+        nix_file_path.display()
+    );
+    let out = Command::new("nix")
+        .args([
+            "build",
+            "--impure",
+            "--expr",
+            &expr,
+            "--print-out-paths",
+            "--no-link",
+        ])
+        .output()
+        .expect("nix build failed");
+    assert!(
+        out.status.success(),
+        "nix build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    PathBuf::from(
+        String::from_utf8(out.stdout)
+            .expect("invalid utf8")
+            .trim()
+            .to_string(),
+    )
+}
+
 pub fn sops_key_file() -> PathBuf {
     get_session_artifacts().sops_key_dir.join("keys.txt")
 }
 
-/// Returns the shared opkg test container, lazily started once per test session.
-pub async fn get_opkg_target() -> Option<&'static Target> {
+pub async fn get_opkg_target() -> &'static Target {
     OPKG_TARGET
-        .get_or_init(|| async { Target::new("opkg").await })
+        .get_or_init(|| async {
+            Target::new("opkg")
+                .await
+                .expect("FATAL: Failed to initialize OPKG container environment!")
+        })
         .await
-        .as_ref()
 }
 
-/// Returns the shared apk test container, lazily started once per test session.
-pub async fn get_apk_target() -> Option<&'static Target> {
+pub async fn get_apk_target() -> &'static Target {
     APK_TARGET
-        .get_or_init(|| async { Target::new("apk").await })
+        .get_or_init(|| async {
+            Target::new("apk")
+                .await
+                .expect("FATAL: Failed to initialize APK container environment!")
+        })
         .await
-        .as_ref()
 }
 
-/// Returns the path to the opkg test JSON config.
 pub fn opkg_json_path() -> PathBuf {
     get_session_artifacts().opkg_json.clone()
 }
 
-/// Returns the path to the apk test JSON config.
 pub fn apk_json_path() -> PathBuf {
     get_session_artifacts().apk_json.clone()
 }
 
-/// Returns the SSH key path.
 pub fn ssh_key_path() -> PathBuf {
     get_session_artifacts().ssh_key.clone()
 }
 
-/// Counts anonymous-section headers (`@name[idx]=`) in UCI show output.
 pub fn count_uci_sections(uci_show: &str) -> usize {
-    let mut count = 0;
-    let bytes = uci_show.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'@' {
-            // Check if preceded by config name (not start of line)
-            let config_end = if i == 0 {
-                0
-            } else {
-                bytes[..i]
-                    .iter()
-                    .rev()
-                    .position(|&b| b == b'.')
-                    .map(|p| i - p)
-                    .unwrap_or(i)
-            };
-            let config_name = &uci_show[config_end..i];
-            if !config_name.is_empty()
-                && config_name
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    uci_show
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let (key, val) = line.split_once('=')?;
+            let (_, section_id) = key.split_once('.')?;
+            if !section_id.contains('.')
+                && val.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
             {
-                // Look for [idx]=
-                let rest = &uci_show[i + 1..];
-                if let Some(bracket_start) = rest.find('[') {
-                    let after_bracket = &rest[bracket_start + 1..];
-                    if let Some(bracket_end) = after_bracket.find(']') {
-                        let idx_str = &after_bracket[..bracket_end];
-                        if idx_str.bytes().all(|b| b.is_ascii_digit())
-                            && after_bracket[bracket_end..].starts_with("=")
-                        {
-                            count += 1;
-                        }
-                    }
-                }
+                Some(())
+            } else {
+                None
             }
-        }
-        i += 1;
-    }
-    count
+        })
+        .count()
 }

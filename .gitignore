@@ -19,3 +19,4 @@ __pycache__/
 
 # Integration test artifacts (dynamically generated)
 tests/secrets.enc.json
+tests/packages/

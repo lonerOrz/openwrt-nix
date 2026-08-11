@@ -1,5 +1,3 @@
-//! Common test infrastructure for nuci integration tests.
-
 pub mod session;
 pub mod target;
 

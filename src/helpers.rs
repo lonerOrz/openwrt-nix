@@ -1,5 +1,36 @@
-pub(crate) fn escape_single_quotes(s: &str) -> String {
-    s.replace('\'', "'\\''")
+use std::borrow::Cow;
+
+#[allow(dead_code)]
+pub(crate) fn escape_single_quotes(s: &str) -> Cow<'_, str> {
+    if s.contains('\'') {
+        Cow::Owned(s.replace('\'', "'\\''"))
+    } else {
+        Cow::Borrowed(s)
+    }
+}
+
+/// Write an optionally-escaped string directly into `out`.
+/// Zero allocation when `s` contains no single quotes.
+pub(crate) fn push_escaped_single_quotes(out: &mut String, s: &str) {
+    if !s.contains('\'') {
+        out.push_str(s);
+        return;
+    }
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+}
+
+pub(crate) fn shell_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    push_escaped_single_quotes(&mut out, s);
+    out.push('\'');
+    out
 }
 
 pub(crate) fn extract_package_name(file_name: &str) -> &str {
@@ -35,10 +66,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn escape_single_quotes_roundtrip() {
-        for (input, expected) in [("hello", "hello"), ("it's", "it'\\''s")] {
-            assert_eq!(escape_single_quotes(input), expected);
-        }
+    fn escape_single_quotes_zero_copy() {
+        let plain = "hello";
+        assert!(matches!(escape_single_quotes(plain), Cow::Borrowed(_)));
+
+        let escaped = "it's";
+        assert_eq!(escape_single_quotes(escaped).as_ref(), "it'\\''s");
+    }
+
+    #[test]
+    fn push_escaped_single_quotes_no_alloc() {
+        let mut out = String::new();
+        push_escaped_single_quotes(&mut out, "hello");
+        assert_eq!(out, "hello");
+
+        out.clear();
+        push_escaped_single_quotes(&mut out, "it's");
+        assert_eq!(out, "it'\\''s");
     }
 
     #[test]

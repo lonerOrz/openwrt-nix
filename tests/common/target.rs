@@ -9,30 +9,24 @@ use std::time::Duration;
 use testcontainers::ImageExt;
 use testcontainers::runners::AsyncRunner;
 
-/// A running OpenWrt test container (opkg or apk).
-///
-/// The container is started via testcontainers-rs for lifecycle management
-/// (auto-cleanup on drop), but shell/UCI commands are executed via the
-/// docker/podman CLI since testcontainers-rs v0.28 does not expose exec.
+// Safety Invariant: DOCKER_HOST is set once per process for the test harness.
+// Rootless Podman's API socket lives under the user's runtime dir, not /run/podman/podman.sock.
 pub struct Target {
     pub role: String,
     pub host: String,
     pub port: u16,
-    /// Container name (used for CLI exec calls).
     pub name: String,
-    /// The testcontainers handle — dropping it stops/removes the container.
     pub _container: Option<testcontainers::ContainerAsync<testcontainers::GenericImage>>,
 }
 
 impl Target {
-    /// Spawn a new container for the given role ("opkg" or "apk").
-    ///
-    /// Returns `None` if the container cannot be started.
     pub async fn new(role: &str) -> Option<Self> {
         let engine = std::env::var("CONTAINER_ENGINE").unwrap_or_else(|_| "podman".to_string());
+
         let docker_host = std::env::var("DOCKER_HOST").unwrap_or_else(|_| {
             if engine == "podman" {
-                "unix:///run/podman/podman.sock".to_string()
+                let uid = unsafe { libc::getuid() };
+                format!("unix:///run/user/{uid}/podman/podman.sock")
             } else {
                 "unix:///var/run/docker.sock".to_string()
             }
@@ -49,7 +43,7 @@ impl Target {
         };
 
         if !ensure_image(&engine, image_name, role) {
-            return None;
+            panic!("FATAL: Failed to build or inspect container image '{image_name}' via {engine}");
         }
 
         let name = format!("nuci-{role}-{}", uuid::Uuid::new_v4());
@@ -57,22 +51,26 @@ impl Target {
             .with_exposed_port(testcontainers::core::ContainerPort::Tcp(22))
             .with_container_name(&name);
 
-        let container = image.start().await.ok()?;
+        let container = image.start().await.unwrap_or_else(|e| {
+            panic!("FATAL: Failed to start testcontainer '{name}': {e}");
+        });
 
-        let host = container.get_host().await.ok()?;
+        let host = container
+            .get_host()
+            .await
+            .expect("Failed to get container host");
         let port = container
             .get_host_port_ipv4(testcontainers::core::ContainerPort::Tcp(22))
             .await
-            .ok()?;
+            .expect("Failed to get container SSH port");
 
-        // Inject SSH key (skip for agent role).
         if role != "agent" {
             inject_ssh_key(&engine, &name, &ssh_key_path()).await;
-        }
-
-        // Wait for SSH to be ready.
-        if !wait_for_ssh(port, Duration::from_secs(30)) {
-            return None;
+            if !wait_for_ssh(port, Duration::from_secs(30)) {
+                panic!(
+                    "FATAL: Timed out waiting for SSH connection on container '{name}' (port {port})"
+                );
+            }
         }
 
         Some(Self {
@@ -84,7 +82,6 @@ impl Target {
         })
     }
 
-    /// Run a shell command inside the container.
     pub fn sh(&self, cmd: &str) -> String {
         let engine = detect_engine();
         let output = Command::new(engine)
@@ -94,7 +91,6 @@ impl Target {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
-    /// Run a command and return true if it succeeds.
     pub fn sh_ok(&self, cmd: &str) -> bool {
         let engine = detect_engine();
         Command::new(engine)
@@ -104,18 +100,15 @@ impl Target {
             .unwrap_or(false)
     }
 
-    /// Get a UCI value from the container.
     pub fn uci_get(&self, path: &str) -> Option<String> {
         let out = self.sh(&format!("uci get {path}"));
         if out.is_empty() { None } else { Some(out) }
     }
 
-    /// Check if a UCI path exists.
     pub fn uci_exists(&self, path: &str) -> bool {
         self.sh_ok(&format!("uci get {path}"))
     }
 
-    /// Spawn SSH to the container with the test SSH key.
     #[allow(dead_code)]
     pub fn ssh_cmd(&self, cmd: &str) -> String {
         let output = Command::new("ssh")
@@ -163,7 +156,6 @@ impl Target {
             .unwrap_or(false)
     }
 
-    /// Wait for SSH to become available (polling).
     pub fn wait_ssh(&self, timeout: Duration) -> bool {
         let start = std::time::Instant::now();
         while start.elapsed() < timeout {
@@ -175,7 +167,6 @@ impl Target {
         false
     }
 
-    /// Deploy the appropriate test config to this target with --force.
     pub fn nuci_deploy(&self, json_path: &Path) {
         let artifacts = get_session_artifacts();
         let config = DeployConfig {
@@ -186,13 +177,15 @@ impl Target {
             watchdog_timeout: 10,
         };
         let target = format!("root@{}", self.host);
+
+        // Safety Invariant: Single-threaded scope setting for SOPS age key file during container deploy.
         unsafe {
             std::env::set_var("SOPS_AGE_KEY_FILE", sops_key_file().to_str().unwrap());
         }
-        let _ = deploy::run(json_path, &target, &config, None, &RealSsh);
+        deploy::run(json_path, &target, &config, None, &RealSsh)
+            .expect("nuci deploy failed during integration test");
     }
 
-    /// Reset UCI state by redeploying with --force (idempotent).
     pub fn reset_uci_state(&self) {
         let json = if self.role == "opkg" {
             opkg_json_path()
@@ -222,7 +215,9 @@ fn detect_engine() -> &'static str {
     })
 }
 
-/// The reload_config mock script baked into the containerfiles.
+// Container Rootfs Limitation: OpenWrt rootfs containers do not run procd as PID 1,
+// requiring a mocked /sbin/reload_config that directly reloads init.d scripts without
+// severing dropbear SSH.
 const RELOAD_CONFIG_ORIGINAL: &str = "#!/bin/sh\n\
      for s in /etc/init.d/*; do\n\
      case \"$s\" in\n\
@@ -298,6 +293,7 @@ async fn inject_ssh_key(engine: &str, name: &str, ssh_key: &Path) {
 }
 
 fn wait_for_ssh(port: u16, timeout: Duration) -> bool {
+    let key = ssh_key_path();
     let start = std::time::Instant::now();
     while start.elapsed() < timeout {
         let ok = Command::new("ssh")
@@ -310,6 +306,8 @@ fn wait_for_ssh(port: u16, timeout: Duration) -> bool {
                 "UserKnownHostsFile=/dev/null",
                 "-o",
                 "ConnectTimeout=3",
+                "-i",
+                key.to_str().unwrap(),
                 "-p",
                 &port.to_string(),
                 "root@127.0.0.1",

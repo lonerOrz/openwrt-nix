@@ -1,6 +1,6 @@
 use crate::error::ConfigError;
-use crate::helpers::{escape_single_quotes, extract_package_name};
-use crate::models::{PackageSources, PkgBackend, Section};
+use crate::helpers::{extract_package_name, push_escaped_single_quotes, shell_quote};
+use crate::models::{PackageAction, PackageSources, PkgBackend, Section};
 use crate::uci_key::{anonymous_option_key, named_option_key};
 use indexmap::IndexMap;
 use serde_json::Value;
@@ -8,79 +8,79 @@ use std::borrow::Cow;
 use std::fmt::Write as FmtWrite;
 use std::path::Path;
 
-/// Backend-specific package-manager command fragments.
-///
-/// The opkg/apk branches used to be copy-pasted `match backend` blocks at every
-/// call site in `serialize_package_management`; centralizing them here means a
-/// third backend adds one method per concern instead of editing four sites.
 impl PkgBackend {
-    /// Command that probes whether a package is already installed.
-    pub(crate) fn installed_probe(&self) -> &'static str {
-        match self {
-            PkgBackend::Opkg => "opkg list-installed",
-            PkgBackend::Apk => "apk info -e",
-        }
-    }
-
-    /// The install line run when at least one package is missing.
-    pub(crate) fn install_expr(&self, pkgs: &[String]) -> String {
+    pub(crate) fn is_installed_cmd(&self, pkg: &str) -> String {
         match self {
             PkgBackend::Opkg => {
-                format!(
-                    "if [ \"$NEED_INSTALL\" = true ]; then opkg update && opkg install {}; fi",
-                    pkgs.join(" ")
-                )
+                format!("opkg status {pkg} 2>/dev/null | grep -q 'Status:.*installed'")
             }
-            PkgBackend::Apk => {
-                format!(
-                    "if [ \"$NEED_INSTALL\" = true ]; then apk -U add {}; fi",
-                    pkgs.join(" ")
-                )
-            }
+            PkgBackend::Apk => format!("apk info -e {pkg} >/dev/null 2>&1"),
         }
     }
 
-    /// The `if ! installed; then install /tmp/<file>; fi` block for a local package.
-    ///
-    /// For opkg the package name is reliably derivable from the filename
-    /// (`name_version_arch.ipk`), so we guard with `opkg list-installed`.
-    /// For apk the filename stem is NOT a reliable package name (e.g.
-    /// `libfoo-bar-1.0-r1.apk`), and `apk info <file>` returns nothing for a
-    /// bare local package, so a name-based probe would be guesswork that can
-    /// silently skip a package (false positive) or re-add it every run (false
-    /// negative). `apk add` is idempotent for an already-installed identical
-    /// package, so we install the file directly with no name probe — see
-    /// audit candidate #10.
-    pub(crate) fn local_install_block(&self, pkg_name: &str, file_name: &str) -> String {
+    pub(crate) fn install_expr(&self, pkgs: &[String]) -> String {
         match self {
             PkgBackend::Opkg => format!(
-                "\nif ! opkg list-installed \"{pkg_name}\" >/dev/null 2>&1; then\n    opkg install /tmp/{file_name}\nfi"
+                "if [ \"$NEED_INSTALL\" = true ]; then opkg update && opkg install {}; fi",
+                pkgs.join(" ")
             ),
+            PkgBackend::Apk => format!(
+                "if [ \"$NEED_INSTALL\" = true ]; then apk add {}; fi",
+                pkgs.join(" ")
+            ),
+        }
+    }
+
+    // Package names are shell-quoted to prevent injection.
+    pub(crate) fn remove_expr(&self, pkgs: &[String]) -> String {
+        let quoted: Vec<String> = pkgs.iter().map(|p| shell_quote(p)).collect();
+        match self {
+            PkgBackend::Opkg => format!(
+                "if [ \"$NEED_REMOVE\" = true ]; then opkg remove {}; \
+                 if [ $? -ne 0 ]; then exit 1; fi; fi",
+                quoted.join(" ")
+            ),
+            PkgBackend::Apk => format!(
+                "if [ \"$NEED_REMOVE\" = true ]; then apk del {}; \
+                 if [ $? -ne 0 ]; then exit 1; fi; fi",
+                quoted.join(" ")
+            ),
+        }
+    }
+
+    /// For opkg the package name is reliably derivable from the filename;
+    /// for apk the filename stem is NOT reliable (`libfoo-bar-1.0-r1.apk`),
+    /// so `apk add` is used directly — it is idempotent for an identical
+    /// already-installed package.
+    pub(crate) fn local_install_block(&self, pkg_name: &str, file_name: &str) -> String {
+        let probe = self.is_installed_cmd(pkg_name);
+        match self {
+            PkgBackend::Opkg => {
+                format!("\nif ! {probe}; then\n    opkg install /tmp/{file_name}\nfi")
+            }
             PkgBackend::Apk => format!("\napk add --allow-untrusted /tmp/{file_name}"),
         }
     }
 
-    /// Shell lines that (re)write the custom-feed repository file.
     pub(crate) fn feed_lines(&self, feeds: &[String]) -> String {
         match self {
             PkgBackend::Opkg => {
                 let mut out = String::from("\nprintf '' > /etc/opkg/customfeeds.conf");
                 for feed in feeds {
-                    out.push_str(&format!(
-                        "\nprintf '%s\\n' '{}' >> /etc/opkg/customfeeds.conf",
-                        escape_single_quotes(feed)
-                    ));
+                    out.push_str("\nprintf '%s\\n' '");
+                    push_escaped_single_quotes(&mut out, feed);
+                    out.push_str("' >> /etc/opkg/customfeeds.conf");
                 }
                 out
             }
             PkgBackend::Apk => {
-                let mut out = String::from("\nmkdir -p /etc/apk/repositories.d");
-                out.push_str("\nprintf '' > /etc/apk/repositories.d/customfeeds.list");
+                let mut out = String::from(
+                    "\nmkdir -p /etc/apk/repositories.d\nprintf '' > /etc/apk/repositories.d/customfeeds.list",
+                );
                 for feed in feeds {
-                    out.push_str(&format!(
-                        "\nprintf '%s\\n' '{}' >> /etc/apk/repositories.d/customfeeds.list",
-                        escape_single_quotes(feed)
-                    ));
+                    out.push_str("\nprintf '%s\\n' '");
+                    push_escaped_single_quotes(&mut out, feed);
+                    out.push_str("' >> /etc/apk/repositories.d/customfeeds.list");
                 }
                 out
             }
@@ -91,20 +91,16 @@ impl PkgBackend {
 fn serialize_option_val(writer: &mut String, key: &str, val: &Value) -> Result<(), ConfigError> {
     match val {
         Value::String(s) => {
-            writeln!(writer, "set {}='{}'", key, escape_single_quotes(s)).unwrap();
+            write!(writer, "set {key}='").unwrap();
+            push_escaped_single_quotes(writer, s);
+            writeln!(writer, "'").unwrap();
         }
         Value::Number(n) => {
-            writeln!(
-                writer,
-                "set {}='{}'",
-                key,
-                escape_single_quotes(&n.to_string())
-            )
-            .unwrap();
+            writeln!(writer, "set {key}='{n}'").unwrap();
         }
         Value::Bool(b) => {
             let bool_str = if *b { "1" } else { "0" };
-            writeln!(writer, "set {}='{}'", key, escape_single_quotes(bool_str)).unwrap();
+            writeln!(writer, "set {key}='{bool_str}'").unwrap();
         }
         Value::Array(arr) => {
             for item in arr {
@@ -119,7 +115,9 @@ fn serialize_option_val(writer: &mut String, key: &str, val: &Value) -> Result<(
                         )));
                     }
                 };
-                writeln!(writer, "add_list {}='{}'", key, escape_single_quotes(&s)).unwrap();
+                write!(writer, "add_list {key}='").unwrap();
+                push_escaped_single_quotes(writer, &s);
+                writeln!(writer, "'").unwrap();
             }
         }
         _ => {
@@ -143,23 +141,20 @@ pub(crate) fn serialize_uci(
         for (section_name, section) in sections {
             match section {
                 Section::List(arr) => {
-                    let list_ty = if let Some(first) = arr.first() {
-                        first.section_type.as_str()
-                    } else {
-                        section_name
-                    };
+                    let list_ty = arr
+                        .first()
+                        .map(|f| f.section_type.as_str())
+                        .unwrap_or(section_name.as_str());
 
                     writeln!(
                         shell_cmds,
-                        "while uci -q delete {}.@{}[0]; do :; done",
-                        config_name, list_ty
+                        "while uci -q delete {config_name}.@{list_ty}[0]; do :; done"
                     )
                     .unwrap();
 
                     for (idx, list_obj) in arr.iter().enumerate() {
                         let ty = &list_obj.section_type;
-
-                        writeln!(uci_cmds, "add {} {}", config_name, ty).unwrap();
+                        writeln!(uci_cmds, "add {config_name} {ty}").unwrap();
 
                         for (option_name, option) in &list_obj.options {
                             let key = anonymous_option_key(config_name, ty, idx, option_name);
@@ -169,9 +164,8 @@ pub(crate) fn serialize_uci(
                 }
                 Section::Named(section) => {
                     let ty = &section.section_type;
-
-                    writeln!(uci_cmds, "delete {}.{}", config_name, section_name).unwrap();
-                    writeln!(uci_cmds, "set {}.{}={}", config_name, section_name, ty).unwrap();
+                    writeln!(uci_cmds, "delete {config_name}.{section_name}").unwrap();
+                    writeln!(uci_cmds, "set {config_name}.{section_name}={ty}").unwrap();
 
                     for (option_name, option) in &section.options {
                         let key = named_option_key(config_name, section_name, option_name);
@@ -181,17 +175,15 @@ pub(crate) fn serialize_uci(
             }
         }
 
-        write!(writer, "{}", shell_cmds).unwrap();
+        write!(writer, "{shell_cmds}").unwrap();
 
         if !uci_cmds.is_empty() {
-            // Ensure the config file exists before running batch — UCI won't
-            // accept set/add commands for a config whose file is missing on
-            // disk (the file is created on first commit, but the batch
-            // commands themselves silently fail if the file doesn't exist).
-            writeln!(writer, "touch /etc/config/{}", config_name).unwrap();
+            // Unrecoverable OpenWrt API limitation: `uci batch` silently fails
+            // for set/add commands when /etc/config/<file> does not exist on disk.
+            writeln!(writer, "touch /etc/config/{config_name}").unwrap();
             writeln!(writer, "uci -q batch <<'UCI_EOF'").unwrap();
-            write!(writer, "{}", uci_cmds).unwrap();
-            writeln!(writer, "commit {}", config_name).unwrap();
+            write!(writer, "{uci_cmds}").unwrap();
+            writeln!(writer, "commit {config_name}").unwrap();
             writeln!(writer, "UCI_EOF").unwrap();
         }
     }
@@ -205,25 +197,52 @@ pub(crate) fn serialize_package_management(
     sources: Option<&PackageSources>,
     packages: Option<&[String]>,
 ) -> Result<(), ConfigError> {
-    // Install packages BEFORE injecting custom feeds. Package installs only
-    // need the default repos; a dead/example custom feed must not poison the
-    // `apk -U` cache refresh that precedes the install (apk updates every
-    // configured repository, so writing the feed first makes repo installs
-    // flaky when the feed is unreachable).
     if let Some(pkgs) = packages
         && !pkgs.is_empty()
     {
-        writeln!(writer, "\nNEED_INSTALL=false").unwrap();
-        writeln!(writer, "for pkg in {}; do", pkgs.join(" ")).unwrap();
-        writeln!(
-            writer,
-            "    if ! {} \"$pkg\" >/dev/null 2>&1; then NEED_INSTALL=true; break; fi",
-            backend.installed_probe()
-        )
-        .unwrap();
-        writeln!(writer, "done").unwrap();
+        let actions: Vec<PackageAction> = pkgs.iter().map(|p| PackageAction::parse(p)).collect();
+        let (removes, installs): (Vec<PackageAction>, Vec<PackageAction>) =
+            actions.into_iter().partition(|a| a.is_remove());
 
-        writeln!(writer, "{}", backend.install_expr(pkgs)).unwrap();
+        if !removes.is_empty() {
+            let names: Vec<String> = removes.iter().map(|a| a.name().to_string()).collect();
+            let quoted_names: Vec<String> = removes.iter().map(|a| a.quoted_name()).collect();
+
+            writeln!(writer, "\nNEED_REMOVE=false").unwrap();
+            writeln!(writer, "for pkg in {}; do", quoted_names.join(" ")).unwrap();
+            match backend {
+                PkgBackend::Opkg => writeln!(
+                    writer,
+                    "    if opkg status \"$pkg\" 2>/dev/null | grep -q 'Status:.*installed'; then NEED_REMOVE=true; break; fi"
+                ).unwrap(),
+                PkgBackend::Apk => writeln!(
+                    writer,
+                    "    if apk info -e \"$pkg\" >/dev/null 2>&1; then NEED_REMOVE=true; break; fi"
+                ).unwrap(),
+            }
+            writeln!(writer, "done").unwrap();
+            writeln!(writer, "{}", backend.remove_expr(&names)).unwrap();
+        }
+
+        if !installs.is_empty() {
+            let names: Vec<String> = installs.iter().map(|a| a.name().to_string()).collect();
+            let quoted_names: Vec<String> = installs.iter().map(|a| a.quoted_name()).collect();
+
+            writeln!(writer, "\nNEED_INSTALL=false").unwrap();
+            writeln!(writer, "for pkg in {}; do", quoted_names.join(" ")).unwrap();
+            match backend {
+                PkgBackend::Opkg => writeln!(
+                    writer,
+                    "    if ! opkg status \"$pkg\" 2>/dev/null | grep -q 'Status:.*installed'; then NEED_INSTALL=true; break; fi"
+                ).unwrap(),
+                PkgBackend::Apk => writeln!(
+                    writer,
+                    "    if ! apk info -e \"$pkg\" >/dev/null 2>&1; then NEED_INSTALL=true; break; fi"
+                ).unwrap(),
+            };
+            writeln!(writer, "done").unwrap();
+            writeln!(writer, "{}", backend.install_expr(&names)).unwrap();
+        }
     }
 
     if let Some(src_val) = sources
@@ -507,7 +526,7 @@ mod tests {
         let pkgs = vec!["luci".into(), "tcpdump".into()];
         serialize_package_management(&mut w, PkgBackend::Opkg, None, Some(&pkgs)).unwrap();
         assert!(w.contains("NEED_INSTALL=false"));
-        assert!(w.contains("opkg list-installed"));
+        assert!(w.contains("opkg status"));
         assert!(w.contains("opkg update && opkg install luci tcpdump"));
     }
 
@@ -518,7 +537,47 @@ mod tests {
         serialize_package_management(&mut w, PkgBackend::Apk, None, Some(&pkgs)).unwrap();
         assert!(w.contains("NEED_INSTALL=false"));
         assert!(w.contains("apk info -e"));
-        assert!(w.contains("apk -U add luci tcpdump"));
+        assert!(w.contains("apk add luci tcpdump"));
+    }
+
+    #[test]
+    fn test_serialize_remove_before_install_opkg() {
+        let mut w = String::new();
+        let pkgs = vec!["-wpad-basic-mbedtls".into(), "wpad-mbedtls".into()];
+        serialize_package_management(&mut w, PkgBackend::Opkg, None, Some(&pkgs)).unwrap();
+        assert!(w.contains("NEED_REMOVE=false"));
+        assert!(w.contains("opkg remove 'wpad-basic-mbedtls'"));
+        assert!(w.contains("opkg update && opkg install wpad-mbedtls"));
+        assert!(
+            w.find("opkg remove").unwrap() < w.find("opkg update").unwrap(),
+            "removal must be emitted before install"
+        );
+        assert!(!w.contains("opkg install -wpad"));
+    }
+
+    #[test]
+    fn test_serialize_remove_before_install_apk() {
+        let mut w = String::new();
+        let pkgs = vec!["-wpad-basic-mbedtls".into(), "wpad-mbedtls".into()];
+        serialize_package_management(&mut w, PkgBackend::Apk, None, Some(&pkgs)).unwrap();
+        assert!(w.contains("NEED_REMOVE=false"));
+        assert!(w.contains("apk del 'wpad-basic-mbedtls'"));
+        assert!(w.contains("apk add wpad-mbedtls"));
+        assert!(
+            w.find("apk del").unwrap() < w.find("apk add").unwrap(),
+            "removal must be emitted before install"
+        );
+        assert!(!w.contains("apk add -wpad"));
+    }
+
+    #[test]
+    fn test_serialize_remove_only_skips_install_block() {
+        let mut w = String::new();
+        let pkgs = vec!["-wpad-basic-mbedtls".into()];
+        serialize_package_management(&mut w, PkgBackend::Opkg, None, Some(&pkgs)).unwrap();
+        assert!(w.contains("NEED_REMOVE=false"));
+        assert!(w.contains("opkg remove 'wpad-basic-mbedtls'"));
+        assert!(!w.contains("NEED_INSTALL"));
     }
 
     #[test]
@@ -529,7 +588,7 @@ mod tests {
             local_packages: Some(vec!["./packages/test_1.0_all.ipk".into()]),
         };
         serialize_package_management(&mut w, PkgBackend::Opkg, Some(&sources), None).unwrap();
-        assert!(w.contains("opkg list-installed \"test\""));
+        assert!(w.contains("opkg status test"));
         assert!(w.contains("opkg install /tmp/test_1.0_all.ipk"));
     }
 

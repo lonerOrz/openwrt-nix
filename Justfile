@@ -22,7 +22,7 @@ test-all:
 
 # Run Rust integration tests (requires Docker/Podman)
 test-integration:
-	cargo test --test integration_test -- --test-threads=1
+	cargo test --test integration_test -- --test-threads=1 --nocapture
 
 # Run Rust unit tests only
 test-unit:
@@ -43,6 +43,11 @@ clippy:
 # Clean rust compilation targets
 clean:
 	cargo clean
+
+# Rebuild test container images
+build-containers:
+	podman build -q -t openwrt-test-opkg-env -f tests/Containerfile.opkg .
+	podman build -q -t openwrt-test-apk-env -f tests/Containerfile.apk .
 
 # Build the documentation site (mdBook) into ./book
 docs:
