@@ -14,7 +14,6 @@ pub struct Root {
     pub ssh_keys: Vec<String>,
     #[serde(default)]
     pub secrets: Option<SopsConfig>,
-    /// Each entry must be a complete `uci ...` command; this is the one place raw shell reaches the target.
     #[serde(default, rename = "rawUci")]
     pub raw_uci: Option<Vec<String>>,
     #[serde(default, rename = "files")]
@@ -143,7 +142,7 @@ impl PackageAction {
     }
 
     pub fn quoted_name(&self) -> String {
-        crate::helpers::shell_quote(self.name())
+        crate::utils::helpers::shell_quote(self.name())
     }
 
     pub fn is_remove(&self) -> bool {

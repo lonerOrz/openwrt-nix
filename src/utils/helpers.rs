@@ -9,8 +9,6 @@ pub(crate) fn escape_single_quotes(s: &str) -> Cow<'_, str> {
     }
 }
 
-/// Write an optionally-escaped string directly into `out`.
-/// Zero allocation when `s` contains no single quotes.
 pub(crate) fn push_escaped_single_quotes(out: &mut String, s: &str) {
     if !s.contains('\'') {
         out.push_str(s);
@@ -42,8 +40,6 @@ pub(crate) fn extract_package_name(file_name: &str) -> &str {
     if file_name.ends_with(".ipk") || without_ext.contains('_') {
         without_ext.split('_').next().unwrap_or(without_ext)
     } else {
-        // Standard APK format: zlib-1.3.1-r1 or luci-theme-proton2025-1.2.9-r1.
-        // The version is the first dash-part (after the name) starting with a digit.
         let parts: Vec<&str> = without_ext.split('-').collect();
         let split_idx = parts
             .iter()
@@ -51,7 +47,6 @@ pub(crate) fn extract_package_name(file_name: &str) -> &str {
             .position(|p| p.as_bytes().first().is_some_and(u8::is_ascii_digit))
             .map_or(parts.len(), |i| i + 1);
         if split_idx == parts.len() {
-            // No version part (e.g. foo-bar.apk): the whole stem is the name
             without_ext
         } else {
             let name_len =

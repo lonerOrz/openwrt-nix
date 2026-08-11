@@ -1,5 +1,4 @@
-use crate::error::ConfigError;
-use crate::models::{Root, Section};
+use crate::config::models::{Root, Section};
 use serde_json::Value;
 
 fn is_valid_uci_identifier(s: &str) -> bool {
@@ -18,17 +17,19 @@ fn validate_section_options(
     options: &indexmap::IndexMap<String, Value>,
     config_name: &str,
     section_path: &str,
-) -> Result<(), ConfigError> {
+) -> Result<(), super::super::utils::error::ConfigError> {
     for (opt_name, opt_val) in options {
         if !is_valid_uci_identifier(opt_name) {
-            return Err(ConfigError::Validation(format!(
-                "Invalid option '{opt_name}' in {config_name}.{section_path}: only [a-zA-Z0-9_] allowed"
-            )));
+            return Err(super::super::utils::error::ConfigError::Validation(
+                format!(
+                    "Invalid option '{opt_name}' in {config_name}.{section_path}: only [a-zA-Z0-9_] allowed"
+                ),
+            ));
         }
         if matches!(opt_val, Value::Null) {
-            return Err(ConfigError::Validation(format!(
-                "{config_name}.{section_path}.{opt_name} has null value"
-            )));
+            return Err(super::super::utils::error::ConfigError::Validation(
+                format!("{config_name}.{section_path}.{opt_name} has null value"),
+            ));
         }
         if let Value::String(s) = opt_val
             && s.is_empty()
@@ -41,34 +42,42 @@ fn validate_section_options(
     Ok(())
 }
 
-pub(crate) fn validate_root(root: &Root) -> Result<(), ConfigError> {
+pub(crate) fn validate_root(root: &Root) -> Result<(), super::super::utils::error::ConfigError> {
     for (config_name, sections) in &root.settings {
         if !is_valid_uci_identifier(config_name) {
-            return Err(ConfigError::Validation(format!(
-                "Invalid config name '{config_name}': only [a-zA-Z0-9_] allowed (no digits at start)"
-            )));
+            return Err(super::super::utils::error::ConfigError::Validation(
+                format!(
+                    "Invalid config name '{config_name}': only [a-zA-Z0-9_] allowed (no digits at start)"
+                ),
+            ));
         }
 
         for (section_name, section) in sections {
             match section {
                 Section::List(arr) => {
                     if arr.is_empty() {
-                        return Err(ConfigError::Validation(format!(
-                            "Empty list section '{section_name}' in config '{config_name}' is not supported: its UCI type cannot be determined. To remove a section, omit it from your Nix configuration."
-                        )));
+                        return Err(super::super::utils::error::ConfigError::Validation(
+                            format!(
+                                "Empty list section '{section_name}' in config '{config_name}' is not supported: its UCI type cannot be determined. To remove a section, omit it from your Nix configuration."
+                            ),
+                        ));
                     }
                     if !is_valid_uci_type(section_name) {
-                        return Err(ConfigError::Validation(format!(
-                            "Invalid list identifier '{section_name}' in config '{config_name}': only [a-zA-Z0-9_-] allowed"
-                        )));
+                        return Err(super::super::utils::error::ConfigError::Validation(
+                            format!(
+                                "Invalid list identifier '{section_name}' in config '{config_name}': only [a-zA-Z0-9_-] allowed"
+                            ),
+                        ));
                     }
 
                     for (idx, item) in arr.iter().enumerate() {
                         if !is_valid_uci_type(&item.section_type) {
-                            return Err(ConfigError::Validation(format!(
-                                "Invalid type '{}' in {config_name}.@{section_name}[{idx}]",
-                                item.section_type
-                            )));
+                            return Err(super::super::utils::error::ConfigError::Validation(
+                                format!(
+                                    "Invalid type '{}' in {config_name}.@{section_name}[{idx}]",
+                                    item.section_type
+                                ),
+                            ));
                         }
                         let path = format!("@{section_name}[{idx}]");
                         validate_section_options(&item.options, config_name, &path)?;
@@ -76,15 +85,19 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), ConfigError> {
                 }
                 Section::Named(section) => {
                     if !is_valid_uci_identifier(section_name) {
-                        return Err(ConfigError::Validation(format!(
-                            "Invalid section '{section_name}' in config '{config_name}': only [a-zA-Z0-9_] allowed (no digits at start)"
-                        )));
+                        return Err(super::super::utils::error::ConfigError::Validation(
+                            format!(
+                                "Invalid section '{section_name}' in config '{config_name}': only [a-zA-Z0-9_] allowed (no digits at start)"
+                            ),
+                        ));
                     }
                     if !is_valid_uci_type(&section.section_type) {
-                        return Err(ConfigError::Validation(format!(
-                            "Invalid type '{}' in {config_name}.{section_name}",
-                            section.section_type
-                        )));
+                        return Err(super::super::utils::error::ConfigError::Validation(
+                            format!(
+                                "Invalid type '{}' in {config_name}.{section_name}",
+                                section.section_type
+                            ),
+                        ));
                     }
                     validate_section_options(&section.options, config_name, section_name)?;
                 }
@@ -96,12 +109,14 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), ConfigError> {
         for (i, line) in raw.iter().enumerate() {
             let trimmed = line.trim();
             if trimmed.is_empty() {
-                return Err(ConfigError::Validation(format!("rawUci[{i}] is empty")));
+                return Err(super::super::utils::error::ConfigError::Validation(
+                    format!("rawUci[{i}] is empty"),
+                ));
             }
             if !trimmed.starts_with("uci ") {
-                return Err(ConfigError::Validation(format!(
-                    "rawUci[{i}] must be a 'uci' command, got: {trimmed}"
-                )));
+                return Err(super::super::utils::error::ConfigError::Validation(
+                    format!("rawUci[{i}] must be a 'uci' command, got: {trimmed}"),
+                ));
             }
         }
     }
@@ -110,19 +125,19 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), ConfigError> {
         for (i, file) in files.iter().enumerate() {
             let path = &file.path;
             if !path.starts_with('/') {
-                return Err(ConfigError::Validation(format!(
-                    "files[{i}].path must be absolute, got: {path}"
-                )));
+                return Err(super::super::utils::error::ConfigError::Validation(
+                    format!("files[{i}].path must be absolute, got: {path}"),
+                ));
             }
             if path.contains("..") {
-                return Err(ConfigError::Validation(format!(
-                    "files[{i}].path must not contain '..': {path}"
-                )));
+                return Err(super::super::utils::error::ConfigError::Validation(
+                    format!("files[{i}].path must not contain '..': {path}"),
+                ));
             }
             if file.content.is_empty() {
-                return Err(ConfigError::Validation(format!(
-                    "files[{i}].path={path} has empty content"
-                )));
+                return Err(super::super::utils::error::ConfigError::Validation(
+                    format!("files[{i}].path={path} has empty content"),
+                ));
             }
         }
     }
@@ -133,7 +148,7 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{Section, SectionData};
+    use crate::config::models::{Section, SectionData};
     use indexmap::IndexMap;
 
     fn empty_root() -> Root {
@@ -302,7 +317,6 @@ mod tests {
     #[test]
     fn allows_valid_configs() {
         assert!(validate_root(&empty_root()).is_ok());
-        // Types may contain hyphens (wifi-iface), identifiers may not.
         assert!(
             validate_root(&named_cfg(
                 "wireless",

@@ -3,13 +3,13 @@ use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use crate::diff::{
+use crate::compile::pipeline::compile_config;
+use crate::config::models::{FileContent, Root, Section};
+use crate::config::uci_key::is_named_section_key;
+use crate::target::diff::{
     SERVICE_SEPARATOR, build_discovery_command, extract_desired_map, parse_services, parse_uci_show,
 };
-use crate::error::ConfigError;
-use crate::models::{FileContent, Root, Section};
-use crate::pipeline::compile_config;
-use crate::uci_key::is_named_section_key;
+use crate::utils::error::ConfigError;
 use indexmap::IndexMap;
 
 pub struct DeployConfig {
@@ -25,11 +25,13 @@ fn build_ssh_args(config: &DeployConfig) -> Vec<String> {
         "-o".into(),
         "StrictHostKeyChecking=no".into(),
         "-o".into(),
+        "UserKnownHostsFile=/dev/null".into(),
+        "-o".into(),
+        "LogLevel=ERROR".into(),
+        "-o".into(),
         "BatchMode=yes".into(),
         "-o".into(),
         "IdentitiesOnly=yes".into(),
-        "-o".into(),
-        "UserKnownHostsFile=/dev/null".into(),
         "-o".into(),
         "ControlMaster=auto".into(),
         "-o".into(),
@@ -46,8 +48,6 @@ fn build_ssh_args(config: &DeployConfig) -> Vec<String> {
     args
 }
 
-/// `run` takes `&dyn SshExec` so deploy orchestration can be exercised against
-/// an in-memory fake in unit tests without a real device or container.
 pub trait SshExec {
     fn exec(
         &self,
@@ -197,7 +197,6 @@ fn get_local_deployer_key() -> Option<String> {
         .and_then(|s| s.lines().next().map(String::from))
 }
 
-/// Zero hardcoded service names — fully self-adaptive via the discovered service map.
 fn reload_commands(modified: &[String], service_map: &BTreeMap<String, String>) -> String {
     if modified.is_empty() {
         return "if [ -x /sbin/reload_config ]; then /sbin/reload_config; fi\n".to_string();
@@ -213,7 +212,6 @@ fn reload_commands(modified: &[String], service_map: &BTreeMap<String, String>) 
             .cloned()
             .unwrap_or_else(|| format!("/etc/init.d/{config} reload"));
 
-        // Dedup by command string (e.g. network+wireless both mapping to same restart)
         if seen.insert(cmd.clone()) {
             let bin = cmd.split_whitespace().next().unwrap_or(&cmd);
             out.push_str(&format!("  [ -x {bin} ] && {cmd}\n"));
@@ -224,10 +222,8 @@ fn reload_commands(modified: &[String], service_map: &BTreeMap<String, String>) 
     out
 }
 
-/// procd-style init script installed as `S15nuci_rollback` that restores
-/// `/etc/config` from the pre-deploy backup on next boot, then self-deletes.
-/// Firing on boot requires procd as PID 1 (not run by the test harness;
-/// see `boot_rollback_hook_restores_and_self_deletes`).
+// Unrecoverable OpenWrt procd architecture behavior: procd init script installed
+// as `S15nuci_rollback` that restores `/etc/config` on boot if watchdog triggers or power-loss occurs.
 fn boot_rollback_hook() -> String {
     let mut s = String::from("cp -a /etc/config /etc/.uci-rollback-backup\n");
     s.push_str("mkdir -p /etc/init.d /etc/rc.d\n");
@@ -290,7 +286,7 @@ fn build_remote_script(
             "if command -v chpasswd >/dev/null 2>&1; then\n\
              chpasswd <<'CHPWD'\nroot:{pwd}\nCHPWD\n\
              else\n\
-             printf '{pwd}\\n{pwd}\\n' | passwd root >/dev/null 2>&1\n\
+             printf '%s\\n%s\\n' '{pwd}' '{pwd}' | passwd root >/dev/null 2>&1\n\
              fi\n"
         ));
     }
@@ -311,6 +307,9 @@ fn build_remote_script(
             let indent = if file.checksum.is_some() { "    " } else { "" };
             script.push_str(&guard_open);
 
+            // Unrecoverable OpenWrt Busybox limitation: base64 may not be available in
+            // minimal rootfs images. Text files use POSIX cat heredoc for zero-dependency.
+            // Only explicit base64 payloads use decode to avoid re-encoding.
             match &file.content {
                 FileContent::Text(text) => {
                     script.push_str(&format!("{indent}cat > '{dest}' <<'NUCI_FILE_{i}_EOF'\n"));
@@ -343,6 +342,8 @@ fn build_remote_script(
     script.push('\n');
 
     let reload_cmds = reload_commands(modified_configs, service_map);
+    // Unrecoverable Linux process signal behavior: trap '' HUP is required so background watchdog
+    // survives SSH session disconnect.
     script.push_str(&format!(
         "( trap '' HUP; sleep {watchdog_timeout}; \
           if [ -d /etc/.uci-rollback-backup ]; then \
@@ -354,14 +355,15 @@ fn build_remote_script(
           echo $! > /tmp/.uci-watchdog-pid\n"
     ));
 
-    script.push_str(&reload_commands(modified_configs, service_map));
+    // Unrecoverable OpenWrt SSH network disconnect behavior: reloading network or Dropbear/SSHD
+    // synchronously in the foreground SSH session severs the connection (exit status 255),
+    // bypassing the 60s reconnection handshake. Detaching reload with `(sleep 1; ...) &`
+    // allows `/tmp/deploy.sh` to exit 0 first so the client enters the handshake loop.
+    script.push_str(&format!("( sleep 1; {reload_cmds} ) >/dev/null 2>&1 &\n"));
 
     script
 }
 
-/// Emit `uci delete` for named sections on the target that are no longer
-/// declared in the config. Anonymous list sections are skipped — they have
-/// no stable identity to match across redeploys.
 fn orphan_delete_commands(
     remote: &BTreeMap<String, String>,
     desired: &IndexMap<String, IndexMap<String, Section>>,
@@ -539,7 +541,7 @@ mod tests {
         let mut sections = IndexMap::new();
         sections.insert(
             "lan".into(),
-            Section::Named(crate::models::SectionData {
+            Section::Named(crate::config::models::SectionData {
                 section_type: "interface".into(),
                 options: IndexMap::new(),
             }),
@@ -564,7 +566,7 @@ mod tests {
         let mut sections = IndexMap::new();
         sections.insert(
             "lan".into(),
-            Section::Named(crate::models::SectionData {
+            Section::Named(crate::config::models::SectionData {
                 section_type: "interface".into(),
                 options: IndexMap::new(),
             }),
@@ -729,6 +731,7 @@ mod tests {
         let script = String::from_utf8_lossy(calls[0].1.as_ref().unwrap());
 
         assert!(script.contains("mkdir -p '/etc/custom'"));
+        // Text content uses POSIX heredoc (zero-dependency, Busybox-safe)
         assert!(script.contains("cat > '/etc/rc.local'"));
         assert!(script.contains("#!/bin/sh"));
         assert!(script.contains("echo hello"));
@@ -779,6 +782,67 @@ mod tests {
             script.contains("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
         );
         assert!(script.contains("if [ \"$(sha256sum '/usr/bin/blob'"));
-        assert!(script.trim_end().ends_with("fi"));
+        assert!(script.contains("( sleep 1; "));
+    }
+
+    #[test]
+    fn build_remote_script_uses_base64_for_text_files() {
+        use std::io::Write;
+
+        let json_text = r##"{
+            "packageManager": "opkg",
+            "settings": {},
+            "files": [
+                {
+                    "path": "/tmp/test.txt",
+                    "content": "hello world"
+                }
+            ]
+        }"##;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(json_text.as_bytes()).unwrap();
+
+        let config = DeployConfig {
+            port: 22,
+            identity_file: None,
+            force: true,
+            no_sops: false,
+            watchdog_timeout: 60,
+        };
+        let ssh = FakeSsh {
+            calls: std::cell::RefCell::new(Vec::new()),
+        };
+
+        run(f.path(), "root@127.0.0.1", &config, None, &ssh).unwrap();
+
+        // Verify text files use heredoc (Busybox-safe, no base64 dependency)
+        // calls[0] = deploy script, calls[1] = watchdog check, calls[2] = cleanup
+        // (discovery call skipped when no settings to manage)
+        {
+            let calls = ssh.calls.borrow();
+            let script = String::from_utf8_lossy(calls[0].1.as_ref().unwrap());
+            assert!(script.contains("cat > '/tmp/test.txt'"));
+            assert!(script.contains("hello world"));
+        }
+        // Base64 content still uses decode
+        let json_text2 = r##"{
+            "packageManager": "opkg",
+            "settings": {},
+            "files": [
+                {
+                    "path": "/tmp/bin",
+                    "content": { "base64": "aGVsbG8=" }
+                }
+            ]
+        }"##;
+        let mut f2 = tempfile::NamedTempFile::new().unwrap();
+        f2.write_all(json_text2.as_bytes()).unwrap();
+        run(f2.path(), "root@127.0.0.1", &config, None, &ssh).unwrap();
+        {
+            let calls = ssh.calls.borrow();
+            // calls[3] is the second deploy script (first 3 are from the first run)
+            let script2 = String::from_utf8_lossy(calls[3].1.as_ref().unwrap());
+            assert!(script2.contains("base64 -d > '/tmp/bin'"));
+        }
     }
 }

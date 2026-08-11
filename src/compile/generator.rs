@@ -1,7 +1,7 @@
-use crate::error::ConfigError;
-use crate::helpers::{extract_package_name, push_escaped_single_quotes, shell_quote};
-use crate::models::{PackageAction, PackageSources, PkgBackend, Section};
-use crate::uci_key::{anonymous_option_key, named_option_key};
+use crate::config::models::{PackageAction, PackageSources, PkgBackend, Section};
+use crate::config::uci_key::{anonymous_option_key, named_option_key};
+use crate::utils::error::ConfigError;
+use crate::utils::helpers::{extract_package_name, push_escaped_single_quotes, shell_quote};
 use indexmap::IndexMap;
 use serde_json::Value;
 use std::borrow::Cow;
@@ -31,7 +31,6 @@ impl PkgBackend {
         }
     }
 
-    // Package names are shell-quoted to prevent injection.
     pub(crate) fn remove_expr(&self, pkgs: &[String]) -> String {
         let quoted: Vec<String> = pkgs.iter().map(|p| shell_quote(p)).collect();
         match self {
@@ -48,10 +47,6 @@ impl PkgBackend {
         }
     }
 
-    /// For opkg the package name is reliably derivable from the filename;
-    /// for apk the filename stem is NOT reliable (`libfoo-bar-1.0-r1.apk`),
-    /// so `apk add` is used directly — it is idempotent for an identical
-    /// already-installed package.
     pub(crate) fn local_install_block(&self, pkg_name: &str, file_name: &str) -> String {
         let probe = self.is_installed_cmd(pkg_name);
         match self {
@@ -275,7 +270,7 @@ pub(crate) fn serialize_package_management(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::SectionData;
+    use crate::config::models::SectionData;
 
     #[test]
     fn serialize_string_val() {
@@ -398,9 +393,6 @@ mod tests {
 
     #[test]
     fn serialize_named_section_empty_type_succeeds() {
-        // section_type is guaranteed by Serde deserialization; serialization
-        // just uses it verbatim. An empty section_type produces valid (but
-        // semantically wrong) UCI — validation catches it before this point.
         let mut configs = IndexMap::new();
         let mut sections = IndexMap::new();
         sections.insert(

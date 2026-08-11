@@ -17,6 +17,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 indexmap = { version = "2", features = ["serde"] }
 tempfile = "3"
+base64 = "0.22"
 
 [dev-dependencies]
 testcontainers = "0.28"

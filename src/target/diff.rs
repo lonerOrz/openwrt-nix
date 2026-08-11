@@ -1,13 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use crate::deploy::{DeployConfig, SshExec};
-use crate::error::ConfigError;
-use crate::models::{PackageAction, PkgBackend, Section};
-use crate::pipeline::compile_config;
-use crate::uci_key::{
+use crate::compile::pipeline::compile_config;
+use crate::config::models::{PackageAction, PkgBackend, Section};
+use crate::config::uci_key::{
     anonymous_option_key, anonymous_section_key, named_option_key, named_section_key,
 };
+use crate::target::deploy::SshExec;
+use crate::utils::error::ConfigError;
 
 pub(crate) const SERVICE_SEPARATOR: &str = "===NUCI_SERVICES===";
 pub(crate) const STATE_SEPARATOR: &str = "===NUCI_STATE===";
@@ -214,7 +214,7 @@ pub(crate) fn parse_uci_show(output: &str) -> BTreeMap<String, String> {
 pub fn run(
     json_path: &Path,
     target: &str,
-    config: &DeployConfig,
+    config: &crate::target::deploy::DeployConfig,
     secrets_dir: Option<&Path>,
     ssh: &dyn SshExec,
 ) -> Result<(), ConfigError> {
@@ -336,8 +336,6 @@ pub fn run(
         let desired_keys: BTreeSet<String> = ssh_keys
             .iter()
             .map(|k| {
-                // Only the <keytype> <base64> portion is identity-bearing;
-                // a comment-only edit must not register as a key change.
                 k.split_whitespace()
                     .take(2)
                     .collect::<Vec<&str>>()

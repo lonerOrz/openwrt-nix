@@ -5,9 +5,9 @@ use common::{
     Target, apk_json_path, count_uci_sections, get_apk_target, get_opkg_target,
     get_session_artifacts, opkg_json_path, sops_key_file,
 };
-use nuci::deploy::{DeployConfig, RealSsh};
-use nuci::diff;
-use nuci::pipeline::compile_config;
+use nuci::compile::pipeline::compile_config;
+use nuci::target::deploy::{DeployConfig, RealSsh};
+use nuci::target::diff;
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -433,7 +433,9 @@ async fn test_smart_reload_fallback() {
     }
     target.sh("rm -f /tmp/reload_history");
     target.reset_uci_state();
+    // The reload is now async (delayed 1s background). Wait for it to complete.
     target.wait_ssh(Duration::from_secs(10));
+    std::thread::sleep(Duration::from_secs(3));
     let hist = target.sh("cat /tmp/reload_history 2>/dev/null");
     assert!(
         hist.contains("network called"),
@@ -460,7 +462,9 @@ async fn test_smart_reload_primary() {
     target.sh("printf '#!/bin/sh\\ntouch /tmp/.reload_config_primary\\n' > /sbin/reload_config && chmod +x /sbin/reload_config");
     target.sh("rm -f /tmp/.reload_config_primary");
     target.reset_uci_state();
+    // Wait for async reload to fire (1s delay + processing time)
     target.wait_ssh(Duration::from_secs(10));
+    std::thread::sleep(Duration::from_secs(3));
     assert!(
         target.sh_ok("test -f /tmp/.reload_config_primary"),
         "reload_config primary not executed"

@@ -1,7 +1,7 @@
 use super::session::{
     apk_json_path, get_session_artifacts, opkg_json_path, sops_key_file, ssh_key_path,
 };
-use nuci::deploy::{self, DeployConfig, RealSsh};
+use nuci::target::deploy::{self, DeployConfig, RealSsh};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -116,9 +116,11 @@ impl Target {
                 "-o",
                 "StrictHostKeyChecking=no",
                 "-o",
-                "BatchMode=yes",
-                "-o",
                 "UserKnownHostsFile=/dev/null",
+                "-o",
+                "LogLevel=ERROR",
+                "-o",
+                "BatchMode=yes",
                 "-o",
                 "ConnectTimeout=10",
                 "-p",
@@ -139,9 +141,11 @@ impl Target {
                 "-o",
                 "StrictHostKeyChecking=no",
                 "-o",
-                "BatchMode=yes",
-                "-o",
                 "UserKnownHostsFile=/dev/null",
+                "-o",
+                "LogLevel=ERROR",
+                "-o",
+                "BatchMode=yes",
                 "-o",
                 "ConnectTimeout=10",
                 "-p",
@@ -301,9 +305,11 @@ fn wait_for_ssh(port: u16, timeout: Duration) -> bool {
                 "-o",
                 "StrictHostKeyChecking=no",
                 "-o",
-                "BatchMode=yes",
-                "-o",
                 "UserKnownHostsFile=/dev/null",
+                "-o",
+                "LogLevel=ERROR",
+                "-o",
+                "BatchMode=yes",
                 "-o",
                 "ConnectTimeout=3",
                 "-i",

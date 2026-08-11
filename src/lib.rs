@@ -1,10 +1,9 @@
-pub mod deploy;
-pub mod diff;
-pub mod error;
-pub mod generator;
-pub mod helpers;
-pub mod models;
-pub mod pipeline;
-pub mod secrets;
-pub mod uci_key;
-pub mod validation;
+pub mod compile;
+pub mod config;
+pub mod target;
+pub mod utils;
+
+pub use compile::pipeline;
+pub use config::{models, uci_key, validation};
+pub use target::{deploy, diff};
+pub use utils::{error, helpers};

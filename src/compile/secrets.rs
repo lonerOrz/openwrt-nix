@@ -1,5 +1,5 @@
-use crate::error::ConfigError;
-use crate::models::{Root, Section};
+use crate::config::models::{Root, Section};
+use crate::utils::error::ConfigError;
 use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -204,7 +204,7 @@ pub(crate) fn decrypt_sops_mem(root: &Root) -> Result<HashMap<String, String>, C
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{PackageSources, Section, SectionData};
+    use crate::config::models::{PackageSources, Section, SectionData};
     use indexmap::IndexMap;
     use std::fs;
     use tempfile::TempDir;
@@ -504,11 +504,9 @@ mod tests {
 
     #[test]
     fn unclosed_marker_passthrough() {
-        // @ in middle of string without matching closing @ → treated as plain text
         let s = interpolate_secrets("my@unclosed", &HashMap::new()).unwrap();
         assert_eq!(s.as_ref(), "my@unclosed");
 
-        // Odd number of @ but @in@ is a valid placeholder → errors on missing secret
         let err = interpolate_secrets("has@in@middle@here", &HashMap::new()).unwrap_err();
         assert!(format!("{err}").contains("in"));
     }
