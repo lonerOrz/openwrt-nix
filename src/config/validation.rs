@@ -134,11 +134,7 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), super::super::utils::erro
                     format!("files[{i}].path must not contain '..': {path}"),
                 ));
             }
-            if file.content.is_empty() {
-                return Err(super::super::utils::error::ConfigError::Validation(
-                    format!("files[{i}].path={path} has empty content"),
-                ));
-            }
+            // Empty content allowed — writes a zero-byte file (touch-style flags).
         }
     }
 
@@ -326,6 +322,44 @@ mod tests {
             ))
             .is_ok()
         );
+    }
+
+    #[test]
+    fn allows_empty_file_content() {
+        use crate::config::models::FileContent;
+
+        let ok = Root {
+            files: Some(vec![crate::config::models::File {
+                path: "/etc/flag".into(),
+                content: FileContent::Text(String::new()),
+                executable: false,
+                checksum: None,
+            }]),
+            ..empty_root()
+        };
+        assert!(validate_root(&ok).is_ok(), "empty file content is allowed");
+
+        let rel = Root {
+            files: Some(vec![crate::config::models::File {
+                path: "etc/flag".into(),
+                content: FileContent::Text("x".into()),
+                executable: false,
+                checksum: None,
+            }]),
+            ..empty_root()
+        };
+        assert_rejects(&rel, "must be absolute");
+
+        let dotdot = Root {
+            files: Some(vec![crate::config::models::File {
+                path: "/etc/../flag".into(),
+                content: FileContent::Text("x".into()),
+                executable: false,
+                checksum: None,
+            }]),
+            ..empty_root()
+        };
+        assert_rejects(&dotdot, "must not contain '..'");
     }
 
     #[test]

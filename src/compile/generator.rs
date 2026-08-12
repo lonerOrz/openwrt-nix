@@ -1,4 +1,4 @@
-use crate::config::models::{PackageAction, PackageSources, PkgBackend, Section};
+use crate::config::models::{PackageAction, PackageSources, PkgBackend, Section, SectionData};
 use crate::config::uci_key::{anonymous_option_key, named_option_key};
 use crate::utils::error::ConfigError;
 use crate::utils::helpers::{extract_package_name, push_escaped_single_quotes, shell_quote};
@@ -53,7 +53,11 @@ impl PkgBackend {
             PkgBackend::Opkg => {
                 format!("\nif ! {probe}; then\n    opkg install /tmp/{file_name}\nfi")
             }
-            PkgBackend::Apk => format!("\napk add --allow-untrusted /tmp/{file_name}"),
+            // ponytail: if extract_package_name fails, probe stays false and apk reinstalls
+            // every deploy — safe, just not idempotent.
+            PkgBackend::Apk => {
+                format!("\nif ! {probe}; then\n    apk add --allow-untrusted /tmp/{file_name}\nfi")
+            }
         }
     }
 
@@ -125,6 +129,14 @@ fn serialize_option_val(writer: &mut String, key: &str, val: &Value) -> Result<(
     Ok(())
 }
 
+fn list_type_of<'a>(item: &'a SectionData, fallback: &'a str) -> &'a str {
+    if item.section_type.is_empty() {
+        fallback
+    } else {
+        &item.section_type
+    }
+}
+
 pub(crate) fn serialize_uci(
     writer: &mut String,
     configs: &IndexMap<String, IndexMap<String, Section>>,
@@ -136,19 +148,21 @@ pub(crate) fn serialize_uci(
         for (section_name, section) in sections {
             match section {
                 Section::List(arr) => {
-                    let list_ty = arr
-                        .first()
-                        .map(|f| f.section_type.as_str())
-                        .unwrap_or(section_name.as_str());
-
-                    writeln!(
-                        shell_cmds,
-                        "while uci -q delete {config_name}.@{list_ty}[0]; do :; done"
-                    )
-                    .unwrap();
+                    // Heterogeneous lists: wipe every distinct type that appears
+                    let mut wiped_types = std::collections::HashSet::new();
+                    for list_obj in arr {
+                        let list_ty = list_type_of(list_obj, section_name);
+                        if wiped_types.insert(list_ty) {
+                            writeln!(
+                                shell_cmds,
+                                "while uci -q delete {config_name}.@{list_ty}[0]; do :; done"
+                            )
+                            .unwrap();
+                        }
+                    }
 
                     for (idx, list_obj) in arr.iter().enumerate() {
-                        let ty = &list_obj.section_type;
+                        let ty = list_type_of(list_obj, section_name);
                         writeln!(uci_cmds, "add {config_name} {ty}").unwrap();
 
                         for (option_name, option) in &list_obj.options {
@@ -392,6 +406,36 @@ mod tests {
     }
 
     #[test]
+    fn serialize_heterogeneous_list_wipes_each_type() {
+        let mut configs = IndexMap::new();
+        let mut sections = IndexMap::new();
+        sections.insert(
+            "firewall".into(),
+            Section::List(vec![
+                SectionData {
+                    section_type: "rule".into(),
+                    options: IndexMap::from([("target".into(), Value::String("ACCEPT".into()))]),
+                },
+                SectionData {
+                    section_type: "redirect".into(),
+                    options: IndexMap::from([("dest".into(), Value::String("lan".into()))]),
+                },
+            ]),
+        );
+        configs.insert("firewall".into(), sections);
+
+        let mut w = String::new();
+        serialize_uci(&mut w, &configs).unwrap();
+
+        assert!(w.contains("while uci -q delete firewall.@rule[0]; do :; done"));
+        assert!(w.contains("while uci -q delete firewall.@redirect[0]; do :; done"));
+        assert!(w.contains("add firewall rule"));
+        assert!(w.contains("add firewall redirect"));
+        assert!(w.contains("set firewall.@rule[0]"));
+        assert!(w.contains("set firewall.@redirect[1]"));
+    }
+
+    #[test]
     fn serialize_named_section_empty_type_succeeds() {
         let mut configs = IndexMap::new();
         let mut sections = IndexMap::new();
@@ -592,7 +636,7 @@ mod tests {
             local_packages: Some(vec!["./packages/test_1.0_all.apk".into()]),
         };
         serialize_package_management(&mut w, PkgBackend::Apk, Some(&sources), None).unwrap();
-        assert!(!w.contains("apk info -e"));
+        assert!(w.contains("if ! apk info -e test >/dev/null 2>&1; then"));
         assert!(w.contains("apk add --allow-untrusted /tmp/test_1.0_all.apk"));
     }
 

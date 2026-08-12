@@ -52,12 +52,15 @@ pub fn compile_config(
         let mut needed: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for line in raw {
             let trimmed = line.trim();
-            if let Some(rest) = trimmed
-                .strip_prefix("uci set ")
-                .or_else(|| trimmed.strip_prefix("uci add "))
-                && let Some(cfg) = rest.split('.').next().filter(|c| !c.is_empty())
-            {
-                needed.insert(cfg);
+            if let Some(rest) = trimmed.strip_prefix("uci set ") {
+                if let Some(cfg) = rest.split('.').next().filter(|c| !c.is_empty()) {
+                    needed.insert(cfg);
+                }
+            } else if let Some(rest) = trimmed.strip_prefix("uci add ") {
+                // `uci add <config> <type>` — config is the first whitespace token
+                if let Some(cfg) = rest.split_whitespace().next().filter(|c| !c.is_empty()) {
+                    needed.insert(cfg);
+                }
             }
         }
 
@@ -117,6 +120,24 @@ mod tests {
         let raw_pos = out.uci_batch.find("uci rename").unwrap();
         let typed_pos = out.uci_batch.find("add system system").unwrap();
         assert!(raw_pos > typed_pos, "rawUci should follow typed uci batch");
+    }
+
+    #[test]
+    fn raw_uci_add_touches_single_config() {
+        let json = write_json(
+            r#"{
+                "packageManager": "opkg",
+                "settings": {},
+                "rawUci": [ "uci add dropbear dropbear", "uci set network.lan.proto='static'" ]
+            }"#,
+        );
+        let out = compile_config(json.path(), None, true).unwrap();
+        assert!(out.uci_batch.contains("touch /etc/config/dropbear\n"));
+        assert!(out.uci_batch.contains("touch /etc/config/network\n"));
+        assert!(
+            !out.uci_batch
+                .contains("touch /etc/config/dropbear dropbear")
+        );
     }
 
     #[test]
