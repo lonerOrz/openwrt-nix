@@ -19,13 +19,13 @@ Verified 1:1 against `nix/module-options.nix` and `nix/default.nix`.
 
 ### `uci.files.*` Submodule Options
 
-| Option       | Type         | Default      | Description                                              |
-| :----------- | :----------- | :----------- | :------------------------------------------------------- |
-| `path`       | `str`        | _(required)_ | Absolute destination path on target.                     |
-| `content`    | `nullOr str` | `null`       | Text content (written via POSIX `cat` heredoc).          |
-| `base64`     | `nullOr str` | `null`       | Base64 binary payload (decoded via `base64 -d`).         |
-| `checksum`   | `nullOr str` | `null`       | Expected SHA256 hex. Skips write if target hash matches. |
-| `executable` | `bool`       | `false`      | File mode (`true` → `0755`, `false` → `0644`).           |
+| Option       | Type         | Default      | Description                                                                            |
+| :----------- | :----------- | :----------- | :------------------------------------------------------------------------------------- |
+| `path`       | `str`        | _(required)_ | Absolute destination path on target.                                                   |
+| `content`    | `nullOr str` | `null`       | Text content (written via POSIX `cat` heredoc). Empty string creates a zero-byte file. |
+| `base64`     | `nullOr str` | `null`       | Base64 binary payload (decoded via `base64 -d`). Mutually exclusive with `content`.    |
+| `checksum`   | `nullOr str` | `null`       | Expected SHA256 hex. Skips write if target hash matches.                               |
+| `executable` | `bool`       | `false`      | File mode (`true` → `0755`, `false` → `0644`).                                         |
 
 ## Nix Library Functions (`nix/default.nix`)
 

@@ -65,7 +65,7 @@
             base64 = lib.mkOption {
               default = null;
               type = lib.types.nullOr lib.types.str;
-              description = "Base64-encoded binary content. Takes precedence over `content` when set.";
+              description = "Base64-encoded binary content. Mutually exclusive with `content`.";
             };
             checksum = lib.mkOption {
               default = null;
@@ -80,7 +80,12 @@
           };
         }
       );
-      description = "Arbitrary files to write on the target device.";
+      apply =
+        files:
+        lib.throwIfNot (lib.all (
+          f: f.content == null || f.base64 == null
+        ) files) "uci.files entries cannot set both 'content' and 'base64'" files;
+      description = "Arbitrary files to write on the target device (content and base64 are mutually exclusive).";
     };
   };
 }

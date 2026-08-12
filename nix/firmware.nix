@@ -83,17 +83,16 @@
           ''
             mkdir -p $out/etc/uci-defaults
 
-            ${nuci}/bin/nuci compile --no-sops "${uciJson}" > /tmp/uci_commands
-
+            # nuci compile output is itself a shell script (touch/while/heredocs).
+            # It must NOT be wrapped in `uci batch` — non-uci lines are silently dropped.
             cat > $out/etc/uci-defaults/99-nuci-bootstrap <<'SCRIPT'
             #!/bin/sh
-            uci -q batch <<'UCI'
+            set -e
             SCRIPT
 
-            cat /tmp/uci_commands >> $out/etc/uci-defaults/99-nuci-bootstrap
+            ${nuci}/bin/nuci compile --no-sops "${uciJson}" >> $out/etc/uci-defaults/99-nuci-bootstrap
 
             cat >> $out/etc/uci-defaults/99-nuci-bootstrap <<'SCRIPT'
-            UCI
             uci commit
             rm -f /etc/uci-defaults/99-nuci-bootstrap
             SCRIPT
