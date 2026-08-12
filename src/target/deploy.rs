@@ -416,7 +416,19 @@ pub fn run(
     let orphan_cmds = orphan_delete_commands(&remote_map, &compiled.resolved_root.settings);
     let has_orphans = !orphan_cmds.is_empty();
 
-    if !config.force && !has_orphans && remote_map == desired_map {
+    // Conservative skip: remote_map/desired_map only cover UCI settings, so once any
+    // non-settings resource (files, packages, rawUci, sshKeys, secrets) is declared we
+    // always deploy. ponytail: no remote state tracking for those — safe, just not skip-optimized.
+    let has_non_setting_changes = {
+        let root = &compiled.resolved_root;
+        root.files.as_ref().is_some_and(|f| !f.is_empty())
+            || root.raw_uci.as_ref().is_some_and(|r| !r.is_empty())
+            || root.packages.as_ref().is_some_and(|p| !p.is_empty())
+            || !root.ssh_keys.is_empty()
+            || !compiled.secrets.is_empty()
+    };
+
+    if !config.force && !has_orphans && remote_map == desired_map && !has_non_setting_changes {
         eprintln!("Configuration on {target} is already up-to-date. Skipping deployment.");
         return Ok(());
     }
@@ -778,6 +790,215 @@ mod tests {
         );
         assert!(script.contains("if [ \"$(sha256sum '/usr/bin/blob'"));
         assert!(script.contains("( sleep 1; "));
+    }
+
+    #[test]
+    fn run_skips_when_nothing_to_change() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(br#"{ "packageManager": "opkg", "settings": {} }"#)
+            .unwrap();
+
+        let config = DeployConfig {
+            port: 22,
+            identity_file: None,
+            force: false,
+            no_sops: false,
+            watchdog_timeout: 60,
+        };
+        let ssh = FakeSsh {
+            calls: std::cell::RefCell::new(Vec::new()),
+        };
+
+        run(f.path(), "root@127.0.0.1", &config, None, &ssh).unwrap();
+        assert_eq!(
+            ssh.calls.borrow().len(),
+            0,
+            "empty config must be a no-op skip"
+        );
+    }
+
+    #[test]
+    fn run_does_not_skip_when_files_declared() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(
+            br#"{
+                "packageManager": "opkg",
+                "settings": {},
+                "files": [
+                    { "path": "/etc/flag", "content": "" }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let config = DeployConfig {
+            port: 22,
+            identity_file: None,
+            force: false,
+            no_sops: false,
+            watchdog_timeout: 60,
+        };
+        let ssh = FakeSsh {
+            calls: std::cell::RefCell::new(Vec::new()),
+        };
+
+        run(f.path(), "root@127.0.0.1", &config, None, &ssh).unwrap();
+        let calls = ssh.calls.borrow();
+        assert_eq!(calls.len(), 3, "files declared must bypass the no-op skip");
+        let script = String::from_utf8_lossy(calls[0].1.as_ref().unwrap());
+        assert!(script.contains("cat > '/etc/flag'"));
+    }
+
+    #[test]
+    fn run_does_not_skip_when_raw_uci_declared() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(
+            br#"{
+                "packageManager": "opkg",
+                "settings": {},
+                "rawUci": ["uci set network.lan.proto='static'"]
+            }"#,
+        )
+        .unwrap();
+
+        let config = DeployConfig {
+            port: 22,
+            identity_file: None,
+            force: false,
+            no_sops: false,
+            watchdog_timeout: 60,
+        };
+        let ssh = FakeSsh {
+            calls: std::cell::RefCell::new(Vec::new()),
+        };
+
+        run(f.path(), "root@127.0.0.1", &config, None, &ssh).unwrap();
+        let calls = ssh.calls.borrow();
+        assert_eq!(calls.len(), 3, "rawUci declared must bypass the no-op skip");
+        let script = String::from_utf8_lossy(calls[0].1.as_ref().unwrap());
+        assert!(script.contains("uci set network.lan.proto='static'"));
+    }
+
+    #[test]
+    fn run_does_not_skip_when_packages_declared() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(
+            br#"{
+                "packageManager": "opkg",
+                "settings": {},
+                "packages": ["htop"]
+            }"#,
+        )
+        .unwrap();
+
+        let config = DeployConfig {
+            port: 22,
+            identity_file: None,
+            force: false,
+            no_sops: false,
+            watchdog_timeout: 60,
+        };
+        let ssh = FakeSsh {
+            calls: std::cell::RefCell::new(Vec::new()),
+        };
+
+        run(f.path(), "root@127.0.0.1", &config, None, &ssh).unwrap();
+        let calls = ssh.calls.borrow();
+        assert_eq!(
+            calls.len(),
+            3,
+            "packages declared must bypass the no-op skip"
+        );
+        let script = String::from_utf8_lossy(calls[0].1.as_ref().unwrap());
+        assert!(script.contains("opkg install htop"));
+    }
+
+    #[test]
+    fn run_does_not_skip_when_ssh_keys_declared() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(
+            br#"{
+                "packageManager": "opkg",
+                "settings": {},
+                "sshKeys": ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample test"]
+            }"#,
+        )
+        .unwrap();
+
+        let config = DeployConfig {
+            port: 22,
+            identity_file: None,
+            force: false,
+            no_sops: false,
+            watchdog_timeout: 60,
+        };
+        let ssh = FakeSsh {
+            calls: std::cell::RefCell::new(Vec::new()),
+        };
+
+        run(f.path(), "root@127.0.0.1", &config, None, &ssh).unwrap();
+        let calls = ssh.calls.borrow();
+        assert_eq!(
+            calls.len(),
+            3,
+            "sshKeys declared must bypass the no-op skip"
+        );
+        let script = String::from_utf8_lossy(calls[0].1.as_ref().unwrap());
+        assert!(script.contains("/etc/dropbear/authorized_keys"));
+    }
+
+    #[test]
+    fn run_does_not_skip_when_secrets_loaded() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(br#"{ "packageManager": "opkg", "settings": {} }"#)
+            .unwrap();
+
+        let secrets_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            secrets_dir.path().join("secrets.json"),
+            br#"{"unreferenced_secret": "value"}"#,
+        )
+        .unwrap();
+
+        let config = DeployConfig {
+            port: 22,
+            identity_file: None,
+            force: false,
+            no_sops: false,
+            watchdog_timeout: 60,
+        };
+        let ssh = FakeSsh {
+            calls: std::cell::RefCell::new(Vec::new()),
+        };
+
+        run(
+            f.path(),
+            "root@127.0.0.1",
+            &config,
+            Some(secrets_dir.path()),
+            &ssh,
+        )
+        .unwrap();
+        let calls = ssh.calls.borrow();
+        assert_eq!(calls.len(), 3, "loaded secrets must bypass the no-op skip");
     }
 
     #[test]
