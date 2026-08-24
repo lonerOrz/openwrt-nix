@@ -94,7 +94,6 @@
 
             cat >> $out/etc/uci-defaults/99-nuci-bootstrap <<'SCRIPT'
             uci commit
-            rm -f /etc/uci-defaults/99-nuci-bootstrap
             SCRIPT
 
             chmod +x $out/etc/uci-defaults/99-nuci-bootstrap
