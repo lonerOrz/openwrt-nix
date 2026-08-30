@@ -8,12 +8,57 @@ use std::io::BufReader;
 use std::path::Path;
 use std::process::Command;
 
-fn secret_to_string(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
-        Value::Bool(b) => b.to_string(),
-        _ => v.to_string(),
+fn insert_secrets(
+    secrets: &mut HashMap<String, String>,
+    id_path: &mut Vec<String>,
+    k: String,
+    v: Value,
+) -> Result<(), String> {
+    let secret = match v {
+        Value::String(s) => Some((k, s)),
+        Value::Number(n) => Some((k, n.to_string())),
+        Value::Bool(b) => Some((k, b.to_string())),
+
+        Value::Array(a) => {
+            a.into_iter().enumerate().try_for_each(|(i, elem)| {
+                insert_secrets(secrets, id_path, format!("{}[{}]", k, i), elem)
+            })?;
+
+            None
+        }
+
+        Value::Object(o) => {
+            id_path.push(k);
+
+            let result = o
+                .into_iter()
+                .try_for_each(|(k, v)| insert_secrets(secrets, id_path, k, v));
+
+            id_path.pop();
+            result?;
+
+            None
+        }
+
+        _ => Some((k, v.to_string())),
+    };
+
+    if let Some((k, secret)) = secret {
+        id_path.push(k);
+        let secret_id = id_path.join(".");
+
+        let result = match secrets
+            .insert(secret_id, secret.clone())
+            .filter(|v| *v != secret)
+        {
+            None => Ok(()),
+            Some(err) => Err(err),
+        };
+
+        id_path.pop();
+        result
+    } else {
+        Ok(())
     }
 }
 
@@ -44,9 +89,9 @@ pub(crate) fn interpolate_secrets<'a>(
                 current_pos = end + 1;
             } else {
                 let is_valid_identifier = !secret_name.is_empty()
-                    && secret_name
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '_');
+                    && secret_name.chars().all(|c| {
+                        c.is_ascii_alphanumeric() || ['_', '-', '.', '[', ']'].contains(&c)
+                    });
 
                 if is_valid_identifier {
                     return Err(ConfigError::Validation(format!(
@@ -137,19 +182,18 @@ pub(crate) fn load_secrets_dir(dir_path: &str) -> Result<HashMap<String, String>
             let sec_file = File::open(&path)?;
             let parsed: Value = serde_json::from_reader(BufReader::new(sec_file))?;
 
-            if let Some(obj) = parsed.as_object() {
+            if let Value::Object(obj) = parsed {
+                let mut id_path = Vec::new();
+
                 for (k, v) in obj {
                     if k == "sops" {
                         continue;
                     }
-                    let val_str = secret_to_string(v);
 
-                    if let Some(old_val) = secrets.insert(k.clone(), val_str)
-                        && old_val != secrets[k]
-                    {
+                    if let Err(old_key) = insert_secrets(&mut secrets, &mut id_path, k, v) {
                         return Err(ConfigError::Validation(format!(
                             "Secret key '{}' conflicts with different values across files. File causing conflict: '{}'",
-                            k,
+                            old_key,
                             path.display()
                         )));
                     }
@@ -188,13 +232,15 @@ pub(crate) fn decrypt_sops_mem(root: &Root) -> Result<HashMap<String, String>, C
         let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
             .map_err(|e| ConfigError::Sops(format!("Failed to parse decrypted JSON: {e}")))?;
 
-        if let Some(obj) = parsed.as_object() {
+        if let Value::Object(obj) = parsed {
+            let mut id_path = Vec::new();
+
             for (k, v) in obj {
                 if k == "sops" {
                     continue;
                 }
-                let val = secret_to_string(v);
-                secrets.insert(k.clone(), val);
+
+                let _ = insert_secrets(&mut secrets, &mut id_path, k, v);
             }
         }
     }
