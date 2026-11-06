@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-use crate::config::models::{FileContent, Root};
+use crate::config::models::Root;
 
 /// Build the reload / `reload_config` command block for the modified configs.
 fn reload_commands(modified: &[String], service_map: &BTreeMap<String, String>) -> String {
@@ -110,51 +110,7 @@ pub fn build_remote_script(
     }
 
     if let Some(files) = &root.files {
-        for (i, file) in files.iter().enumerate() {
-            let dest = &file.path;
-            let dir = std::path::Path::new(dest)
-                .parent()
-                .unwrap_or(std::path::Path::new("/"));
-            let dir_str = dir.to_string_lossy();
-            script.push_str(&format!("mkdir -p '{dir_str}'\n"));
-
-            let guard_open = match &file.checksum {
-                Some(sum) => format!(
-                    "if [ \"$(sha256sum '{dest}' 2>/dev/null | cut -d' ' -f1)\" != '{sum}' ]; then\n"
-                ),
-                None => String::new(),
-            };
-            let indent = if file.checksum.is_some() { "    " } else { "" };
-            script.push_str(&guard_open);
-
-            // Unrecoverable OpenWrt Busybox limitation: base64 may not be available in
-            // minimal rootfs images. Text files use POSIX cat heredoc for zero-dependency.
-            // Only explicit base64 payloads use decode to avoid re-encoding.
-            match &file.content {
-                FileContent::Text(text) => {
-                    script.push_str(&format!("{indent}cat > '{dest}' <<'NUCI_FILE_{i}_EOF'\n"));
-                    script.push_str(indent);
-                    script.push_str(text);
-                    if !text.ends_with('\n') {
-                        script.push('\n');
-                    }
-                    script.push_str(&format!("{indent}NUCI_FILE_{i}_EOF\n"));
-                }
-                FileContent::Base64(b64) => {
-                    script.push_str(&format!("{indent}echo '{b64}' | base64 -d > '{dest}'\n"));
-                }
-            }
-
-            if file.executable {
-                script.push_str(&format!("{indent}chmod 755 '{dest}'\n"));
-            } else {
-                script.push_str(&format!("{indent}chmod 644 '{dest}'\n"));
-            }
-
-            if file.checksum.is_some() {
-                script.push_str("fi\n");
-            }
-        }
+        script.push_str(&crate::target::file_transfer::render_file_block(files));
     }
 
     script.push_str(&boot_rollback_hook());

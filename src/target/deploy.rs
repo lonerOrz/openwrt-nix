@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::compile::pipeline::compile_config;
-use crate::config::models::{PkgBackend, Root, Section};
+use crate::config::models::{PkgBackend, Section};
 use crate::config::uci_key::is_named_section_key;
 use crate::target::capabilities::{discover_package_manager, resolve_backend};
 use crate::target::diff::{
@@ -124,65 +124,6 @@ pub fn ssh_exec(
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn transfer_packages(
-    json_path: &Path,
-    target: &str,
-    root: &Root,
-    config: &DeployConfig,
-) -> Result<(), ConfigError> {
-    let local_pkgs = match &root.package_sources {
-        Some(sources) => match &sources.local_packages {
-            Some(pkgs) => pkgs,
-            None => return Ok(()),
-        },
-        None => return Ok(()),
-    };
-
-    if local_pkgs.is_empty() {
-        return Ok(());
-    }
-
-    let staging = tempfile::tempdir()?;
-    let base_dir = json_path.parent().unwrap_or_else(|| Path::new("."));
-    for pkg in local_pkgs {
-        let path = Path::new(pkg);
-        let resolved = if path.is_relative() {
-            let candidate = base_dir.join(path);
-            if candidate.exists() {
-                candidate
-            } else {
-                path.to_path_buf()
-            }
-        } else {
-            path.to_path_buf()
-        };
-        if !resolved.exists() {
-            return Err(ConfigError::Validation(format!(
-                "Local package not found: {}",
-                pkg
-            )));
-        }
-        let filename = resolved.file_name().and_then(|n| n.to_str()).unwrap_or(pkg);
-        std::fs::copy(&resolved, staging.path().join(filename))?;
-    }
-
-    eprintln!("Bundling {} local package(s)...", local_pkgs.len());
-    let mut tar_bytes = Vec::new();
-    {
-        let mut builder = tar::Builder::new(&mut tar_bytes);
-        builder
-            .append_dir_all(".", staging.path())
-            .map_err(|e| ConfigError::Deploy(format!("Failed to build tar archive: {e}")))?;
-        builder
-            .finish()
-            .map_err(|e| ConfigError::Deploy(format!("Failed to finalize tar archive: {e}")))?;
-    }
-
-    eprintln!("Transferring to {target}:/tmp/ via SSH stream...");
-    ssh_exec(target, "tar -xf - -C /tmp", Some(&tar_bytes), config)?;
-    Ok(())
-}
-
 fn get_local_deployer_key() -> Option<String> {
     Command::new("ssh-add")
         .arg("-L")
@@ -293,7 +234,13 @@ pub fn run(
 
     let uci_commands = format!("{orphan_cmds}{}", compiled.uci_batch);
 
-    transfer_packages(json_path, target, &compiled.resolved_root, config)?;
+    crate::target::file_transfer::transfer_packages(
+        json_path,
+        target,
+        &compiled.resolved_root,
+        config,
+        ssh,
+    )?;
 
     let deployer_key = get_local_deployer_key();
     let remote_script = build_remote_script(
