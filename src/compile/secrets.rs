@@ -639,6 +639,140 @@ mod tests {
         assert!(format!("{err}").contains("conflicts"));
         assert!(format!("{err}").contains("key"));
     }
+
+    #[test]
+    fn load_secrets_same_key_same_value_ok() {
+        // Same key with identical value across files is an idempotent merge, not a
+        // conflict: must succeed and keep the value.
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("a.json"), r#"{"key": "same_val"}"#).unwrap();
+        fs::write(dir.path().join("b.json"), r#"{"key": "same_val"}"#).unwrap();
+        let result = load_secrets_dir(dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(result["key"], "same_val");
+    }
+
+    #[test]
+    fn load_secrets_nested_conflict_errors() {
+        // Nested objects: db.password differs across files -> fully-qualified id
+        // 'db.password' must conflict and surface in the error.
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("a.json"),
+            r#"{"db": {"password": "secret_a"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("b.json"),
+            r#"{"db": {"password": "secret_b"}}"#,
+        )
+        .unwrap();
+        let err = load_secrets_dir(dir.path().to_str().unwrap()).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("conflicts"), "expected conflict, got: {msg}");
+        assert!(
+            msg.contains("db.password"),
+            "expected qualified id, got: {msg}"
+        );
+        // Secret plaintext must never leak into the error.
+        assert!(!msg.contains("secret_a"), "plaintext leaked: {msg}");
+        assert!(!msg.contains("secret_b"), "plaintext leaked: {msg}");
+    }
+
+    // The conflict-detection logic lives in insert_secrets and is shared by both
+    // load_secrets_dir and decrypt_sops_mem. These tests pin its semantics without
+    // requiring the sops/age binaries (which may be absent in CI).
+
+    #[test]
+    fn insert_secrets_same_key_same_value_ok() {
+        // Same id with identical value across files -> no conflict (idempotent merge).
+        let mut secrets = HashMap::new();
+        let mut id_path = Vec::new();
+        insert_secrets(
+            &mut secrets,
+            &mut id_path,
+            "key".into(),
+            Value::String("v".into()),
+        )
+        .unwrap();
+        insert_secrets(
+            &mut secrets,
+            &mut id_path,
+            "key".into(),
+            Value::String("v".into()),
+        )
+        .unwrap();
+        assert_eq!(secrets["key"], "v");
+    }
+
+    #[test]
+    fn insert_secrets_same_key_different_value_errors() {
+        let mut secrets = HashMap::new();
+        let mut id_path = Vec::new();
+        insert_secrets(
+            &mut secrets,
+            &mut id_path,
+            "key".into(),
+            Value::String("a".into()),
+        )
+        .unwrap();
+        let err = insert_secrets(
+            &mut secrets,
+            &mut id_path,
+            "key".into(),
+            Value::String("b".into()),
+        )
+        .unwrap_err();
+        assert_eq!(err, "key");
+        // Secret plaintext must never appear in the returned id.
+        assert!(!err.contains('a'));
+        assert!(!err.contains('b'));
+    }
+
+    #[test]
+    fn insert_secrets_nested_conflict_errors() {
+        // Two files both define db.password with different values, nested under
+        // different top-level objects -> the fully-qualified id must conflict.
+        let mut secrets = HashMap::new();
+        let mut id_path = Vec::new();
+        insert_secrets(
+            &mut secrets,
+            &mut id_path,
+            "db".into(),
+            serde_json::json!({ "password": "secret_a" }),
+        )
+        .unwrap();
+        let err = insert_secrets(
+            &mut secrets,
+            &mut id_path,
+            "db".into(),
+            serde_json::json!({ "password": "secret_b" }),
+        )
+        .unwrap_err();
+        assert_eq!(err, "db.password");
+        assert!(!err.contains("secret_a"));
+        assert!(!err.contains("secret_b"));
+    }
+
+    #[test]
+    fn insert_secrets_nested_same_value_ok() {
+        let mut secrets = HashMap::new();
+        let mut id_path = Vec::new();
+        insert_secrets(
+            &mut secrets,
+            &mut id_path,
+            "db".into(),
+            serde_json::json!({ "password": "same" }),
+        )
+        .unwrap();
+        insert_secrets(
+            &mut secrets,
+            &mut id_path,
+            "db".into(),
+            serde_json::json!({ "password": "same" }),
+        )
+        .unwrap();
+        assert_eq!(secrets["db.password"], "same");
+    }
     #[test]
     fn decrypt_sops_mem_conflict_errors() {
         use std::process::Command;
