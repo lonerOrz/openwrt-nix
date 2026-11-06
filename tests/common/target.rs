@@ -23,16 +23,25 @@ impl Target {
     pub async fn new(role: &str) -> Option<Self> {
         let engine = std::env::var("CONTAINER_ENGINE").unwrap_or_else(|_| "podman".to_string());
 
-        let docker_host = std::env::var("DOCKER_HOST").unwrap_or_else(|_| {
-            if engine == "podman" {
-                let uid = unsafe { libc::getuid() };
-                format!("unix:///run/user/{uid}/podman/podman.sock")
+        // Resolution priority: explicit DOCKER_HOST > rootless default > rootful fallback.
+        // An explicitly provided DOCKER_HOST is always respected and never overwritten.
+        let docker_host = if std::env::var("DOCKER_HOST").is_ok() {
+            std::env::var("DOCKER_HOST").unwrap()
+        } else if engine == "podman" {
+            let uid = unsafe { libc::getuid() };
+            let rootless = format!("unix:///run/user/{uid}/podman/podman.sock");
+            if Path::new(&rootless["unix://".len()..]).exists() {
+                rootless
             } else {
-                "unix:///var/run/docker.sock".to_string()
+                "unix:///run/podman/podman.sock".to_string()
             }
-        });
-        unsafe {
-            std::env::set_var("DOCKER_HOST", &docker_host);
+        } else {
+            "unix:///var/run/docker.sock".to_string()
+        };
+        if std::env::var("DOCKER_HOST").is_err() {
+            unsafe {
+                std::env::set_var("DOCKER_HOST", &docker_host);
+            }
         }
 
         let image_name = match role {
@@ -50,7 +59,6 @@ impl Target {
         let image = testcontainers::GenericImage::new(image_name, "latest")
             .with_exposed_port(testcontainers::core::ContainerPort::Tcp(22))
             .with_container_name(&name);
-
         let container = image.start().await.unwrap_or_else(|e| {
             panic!("FATAL: Failed to start testcontainer '{name}': {e}");
         });
