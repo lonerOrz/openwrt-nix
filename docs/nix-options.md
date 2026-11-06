@@ -4,18 +4,18 @@ Verified 1:1 against `nix/module-options.nix` and `nix/default.nix`.
 
 ## Options Reference
 
-| Option                             | Type                          | Default  | Description / Output Mapping                                                                   |
-| :--------------------------------- | :---------------------------- | :------- | :--------------------------------------------------------------------------------------------- |
-| `uci.packageManager`               | `enum [ "opkg" "apk" ]`       | `"opkg"` | Package backend (`opkg` ≤ 23.05, `apk` 24.10+).                                                |
-| `uci.settings`                     | `(pkgs.formats.json {}).type` | `{}`     | UCI configuration attrset (`config → section → option`).                                       |
-| `uci.secrets.sops.files`           | `listOf path`                 | `[]`     | SOPS encrypted files decrypted in-memory at compile time.                                      |
-| `uci.packages`                     | `listOf str`                  | `[]`     | Packages to install. Prefix with `-` to remove (`-pkg`).                                       |
-| `uci.packageSources.feeds`         | `listOf str`                  | `[]`     | Repository lines (`/etc/opkg/customfeeds.conf` or `/etc/apk/repositories.d/customfeeds.list`). |
-| `uci.packageSources.localPackages` | `listOf (either str path)`    | `[]`     | Local `.ipk`/`.apk` paths, streamed via in-memory tar to `/tmp/`.                              |
-| `uci.sshKeys`                      | `listOf str`                  | `[]`     | Public keys deployed to `/etc/dropbear/authorized_keys` (`0600`).                              |
-| `uci.watchdogTimeout`              | `int`                         | `60`     | Rollback watchdog timeout in seconds.                                                          |
-| `uci.rawUci`                       | `listOf str`                  | `[]`     | Raw UCI lines (must start with `"uci "`). Auto-touches missing `/etc/config/<file>`.           |
-| `uci.files`                        | `listOf (submodule)`          | `[]`     | Custom file payloads (spec below).                                                             |
+| Option                             | Type                          | Default  | Description / Output Mapping                                                                                                                                                  |
+| :--------------------------------- | :---------------------------- | :------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `uci.packageManager`               | `enum [ "opkg" "apk" ]`       | `"opkg"` | Backend: `"apk"` for OpenWrt 25.12+ (apk became the default at 24.10); `"opkg"` for older releases still on opkg. Runtime discovery verifies the target actually provides it. |
+| `uci.settings`                     | `(pkgs.formats.json {}).type` | `{}`     | UCI configuration attrset (`config → section → option`).                                                                                                                      |
+| `uci.secrets.sops.files`           | `listOf path`                 | `[]`     | SOPS encrypted files decrypted in-memory at compile time.                                                                                                                     |
+| `uci.packages`                     | `listOf str`                  | `[]`     | Packages to install. Prefix with `-` to remove (`-pkg`).                                                                                                                      |
+| `uci.packageSources.feeds`         | `listOf str`                  | `[]`     | Repository lines (`/etc/opkg/customfeeds.conf` or `/etc/apk/repositories.d/customfeeds.list`).                                                                                |
+| `uci.packageSources.localPackages` | `listOf (either str path)`    | `[]`     | Local `.ipk`/`.apk` paths, streamed via in-memory tar to `/tmp/`.                                                                                                             |
+| `uci.sshKeys`                      | `listOf str`                  | `[]`     | Public keys deployed to `/etc/dropbear/authorized_keys` (`0600`).                                                                                                             |
+| `uci.watchdogTimeout`              | `int`                         | `60`     | Rollback watchdog timeout in seconds.                                                                                                                                         |
+| `uci.rawUci`                       | `listOf str`                  | `[]`     | Raw UCI lines (must start with `"uci "`). Auto-touches missing `/etc/config/<file>`.                                                                                          |
+| `uci.files`                        | `listOf (submodule)`          | `[]`     | Custom file payloads (spec below).                                                                                                                                            |
 
 ### `uci.files.*` Submodule Options
 
