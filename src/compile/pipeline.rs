@@ -78,7 +78,7 @@ pub fn compile_config(
         }
     }
 
-    let backend = PkgBackend::from_name(&resolved_root.package_manager);
+    let backend = PkgBackend::try_from(resolved_root.package_manager.as_str())?;
     serialize_package_management(
         &mut uci_batch,
         backend,
@@ -145,5 +145,23 @@ mod tests {
         let json = write_json(r#"{ "packageManager": "opkg", "settings": {} }"#);
         let out = compile_config(json.path(), None, true).unwrap();
         assert!(!out.uci_batch.contains("Raw UCI escape hatch"));
+    }
+
+    #[test]
+    fn unknown_package_manager_is_rejected() {
+        let json = write_json(r#"{ "packageManager": "apt", "settings": {} }"#);
+        let err = compile_config(json.path(), None, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("Unsupported package manager: apt"),
+            "expected rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn default_package_manager_is_opkg() {
+        // packageManager omitted -> opkg default, compiles without error.
+        let json = write_json(r#"{ "settings": {} }"#);
+        let out = compile_config(json.path(), None, true).unwrap();
+        assert!(out.uci_batch.is_empty());
     }
 }

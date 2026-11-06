@@ -244,7 +244,7 @@ pub fn run(
     let remote = parse_uci_show(uci_output);
     let service_map = parse_services(services_output);
 
-    let backend = PkgBackend::from_name(&compiled.resolved_root.package_manager);
+    let backend = PkgBackend::try_from(compiled.resolved_root.package_manager.as_str())?;
     let packages = compiled.resolved_root.packages.clone().unwrap_or_default();
     let state_cmd = build_state_command(&packages, backend);
     let state_output = ssh.exec(target, &state_cmd, None, config)?;

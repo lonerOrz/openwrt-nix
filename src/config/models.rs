@@ -1,3 +1,4 @@
+use crate::utils::error::ConfigError;
 use indexmap::IndexMap;
 use serde::Deserialize;
 use serde_json::Value;
@@ -42,11 +43,16 @@ pub enum PkgBackend {
     Apk,
 }
 
-impl PkgBackend {
-    pub fn from_name(s: &str) -> Self {
-        match s {
-            "apk" => PkgBackend::Apk,
-            _ => PkgBackend::Opkg,
+impl TryFrom<&str> for PkgBackend {
+    type Error = ConfigError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "apk" => Ok(Self::Apk),
+            "opkg" => Ok(Self::Opkg),
+            _ => Err(ConfigError::Validation(format!(
+                "Unsupported package manager: {value}"
+            ))),
         }
     }
 }
@@ -147,5 +153,28 @@ impl PackageAction {
 
     pub fn is_remove(&self) -> bool {
         matches!(self, PackageAction::Remove(_))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pkg_backend_try_from_known() {
+        assert!(matches!(PkgBackend::try_from("apk"), Ok(PkgBackend::Apk)));
+        assert!(matches!(PkgBackend::try_from("opkg"), Ok(PkgBackend::Opkg)));
+    }
+
+    #[test]
+    fn pkg_backend_try_from_rejects_unknown() {
+        let err = PkgBackend::try_from("apt").unwrap_err();
+        assert!(format!("{err}").contains("Unsupported package manager: apt"));
+    }
+
+    #[test]
+    fn pkg_backend_try_from_rejects_empty() {
+        let err = PkgBackend::try_from("").unwrap_err();
+        assert!(format!("{err}").contains("Unsupported package manager"));
     }
 }
