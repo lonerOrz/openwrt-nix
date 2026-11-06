@@ -47,12 +47,15 @@ fn insert_secrets(
         id_path.push(k);
         let secret_id = id_path.join(".");
 
-        let result = match secrets
-            .insert(secret_id, secret.clone())
-            .filter(|v| *v != secret)
+        let result = if secrets
+            .get(&secret_id)
+            .is_some_and(|existing| existing != secret.as_str())
         {
-            None => Ok(()),
-            Some(err) => Err(err),
+            // Return the conflicting key id, never the plaintext secret value.
+            Err(secret_id)
+        } else {
+            secrets.insert(secret_id, secret.clone());
+            Ok(())
         };
 
         id_path.pop();
@@ -190,10 +193,10 @@ pub(crate) fn load_secrets_dir(dir_path: &str) -> Result<HashMap<String, String>
                         continue;
                     }
 
-                    if let Err(old_key) = insert_secrets(&mut secrets, &mut id_path, k, v) {
+                    if let Err(conflict) = insert_secrets(&mut secrets, &mut id_path, k, v) {
                         return Err(ConfigError::Validation(format!(
                             "Secret key '{}' conflicts with different values across files. File causing conflict: '{}'",
-                            old_key,
+                            conflict,
                             path.display()
                         )));
                     }
@@ -240,7 +243,11 @@ pub(crate) fn decrypt_sops_mem(root: &Root) -> Result<HashMap<String, String>, C
                     continue;
                 }
 
-                let _ = insert_secrets(&mut secrets, &mut id_path, k, v);
+                if let Err(conflict) = insert_secrets(&mut secrets, &mut id_path, k, v) {
+                    return Err(ConfigError::Sops(format!(
+                        "Secret key '{conflict}' conflicts with different values across SOPS files. File causing conflict: '{file}'"
+                    )));
+                }
             }
         }
     }
@@ -250,7 +257,7 @@ pub(crate) fn decrypt_sops_mem(root: &Root) -> Result<HashMap<String, String>, C
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::models::{PackageSources, Section, SectionData};
+    use crate::config::models::{PackageSources, Section, SectionData, SopsConfig, SopsFiles};
     use indexmap::IndexMap;
     use std::fs;
     use tempfile::TempDir;
@@ -500,6 +507,98 @@ mod tests {
         let err = load_secrets_dir(dir.path().to_str().unwrap()).unwrap_err();
         assert!(format!("{err}").contains("conflicts"));
         assert!(format!("{err}").contains("key"));
+    }
+    #[test]
+    fn decrypt_sops_mem_conflict_errors() {
+        use std::process::Command;
+
+        // Skip gracefully when sops/age tooling is unavailable.
+        if Command::new("sops").arg("--version").output().is_err()
+            || Command::new("age-keygen").arg("--help").output().is_err()
+        {
+            eprintln!("skipping decrypt_sops_mem_conflict_errors: sops/age not available");
+            return;
+        }
+
+        // Generate an age key pair.
+        let key_home = TempDir::new().unwrap();
+        let key_file = key_home.path().join("keys.txt");
+        let keygen = Command::new("age-keygen")
+            .args(["-o", key_file.to_str().unwrap()])
+            .output()
+            .expect("age-keygen");
+        let pub_key = String::from_utf8_lossy(&keygen.stderr)
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("Public key:"))
+            .expect("age public key")
+            .trim()
+            .to_string();
+
+        let dir = TempDir::new().unwrap();
+
+        // Encrypt two files that share a key but disagree on the value.
+        let plain_a = dir.path().join("a.json");
+        fs::write(&plain_a, r#"{"key": "val_a"}"#).unwrap();
+        let enc_a = dir.path().join("a.enc.json");
+        Command::new("sops")
+            .env("SOPS_AGE_KEY_FILE", key_file.to_str().unwrap())
+            .args([
+                "--encrypt",
+                "--age",
+                &pub_key,
+                "--output",
+                enc_a.to_str().unwrap(),
+                plain_a.to_str().unwrap(),
+            ])
+            .output()
+            .expect("sops encrypt a");
+
+        let plain_b = dir.path().join("b.json");
+        fs::write(&plain_b, r#"{"key": "val_b"}"#).unwrap();
+        let enc_b = dir.path().join("b.enc.json");
+        Command::new("sops")
+            .env("SOPS_AGE_KEY_FILE", key_file.to_str().unwrap())
+            .args([
+                "--encrypt",
+                "--age",
+                &pub_key,
+                "--output",
+                enc_b.to_str().unwrap(),
+                plain_b.to_str().unwrap(),
+            ])
+            .output()
+            .expect("sops encrypt b");
+
+        // The decryption child process inherits this to locate the age key.
+        unsafe {
+            std::env::set_var("SOPS_AGE_KEY_FILE", key_file.to_str().unwrap());
+        }
+
+        let root = Root {
+            secrets: Some(SopsConfig {
+                sops: Some(SopsFiles {
+                    files: vec![
+                        enc_a.to_str().unwrap().to_string(),
+                        enc_b.to_str().unwrap().to_string(),
+                    ],
+                }),
+            }),
+            ..root(IndexMap::new())
+        };
+
+        let err = decrypt_sops_mem(&root).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("conflicts"),
+            "expected conflict error, got: {msg}"
+        );
+        assert!(
+            msg.contains("key"),
+            "expected key name in error, got: {msg}"
+        );
+        // Ensure secret plaintext never leaks into the error.
+        assert!(!msg.contains("val_a"), "plaintext leaked: {msg}");
+        assert!(!msg.contains("val_b"), "plaintext leaked: {msg}");
     }
 
     #[test]
