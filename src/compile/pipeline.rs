@@ -186,4 +186,54 @@ mod tests {
         let out = compile_config(json.path(), None, true, None).unwrap();
         assert!(out.uci_batch.is_empty());
     }
+
+    #[test]
+    fn secret_interpolation_whitelist_e2e() {
+        // Drives `@name@` resolution through compile_config using a secrets dir,
+        // proving rawUci / files.text / sshKeys are interpolated while settings
+        // and feeds already were. Verifies the whitelist end-to-end.
+        let dir = tempfile::tempdir().unwrap();
+        let secret_path = dir.path().join("secrets.json");
+        std::fs::write(
+            &secret_path,
+            r#"{ "wan_user": "alice", "api_token": "s3cr3t", "pubkey": "AAAAC3NzaC1lZDI1NTE5AAAAIExample" }"#,
+        )
+        .unwrap();
+
+        let json = write_json(
+            r#"{
+                "packageManager": "opkg",
+                "settings": {
+                    "network": { "wan": { "_type": "interface", "username": "@wan_user@" } }
+                },
+                "rawUci": [ "uci set network.wan.password='@wan_user@'" ],
+                "files": [
+                    { "path": "/etc/app/conf", "content": "token=@api_token@" }
+                ],
+                "sshKeys": [ "ssh-ed25519 @pubkey@ user@host" ]
+            }"#,
+        );
+
+        let out = compile_config(json.path(), Some(dir.path()), true, None).unwrap();
+
+        // rawUci interpolated
+        assert!(
+            out.uci_batch
+                .contains("uci set network.wan.password='alice'"),
+            "rawUci should interpolate: {}",
+            out.uci_batch
+        );
+        // settings interpolated
+        assert!(out.uci_batch.contains("set network.wan.username='alice'"));
+        // sshKeys interpolated in the resolved root
+        assert_eq!(
+            out.resolved_root.ssh_keys[0],
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample user@host"
+        );
+        // files.text interpolated in the resolved root
+        match &out.resolved_root.files.unwrap()[0].content {
+            crate::config::models::FileContent::Text(s) => assert_eq!(s, "token=s3cr3t"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
 }

@@ -1,4 +1,4 @@
-use crate::config::models::{Root, Section};
+use crate::config::models::{FileContent, Root, Section};
 use crate::utils::error::ConfigError;
 use serde_json::Value;
 use std::borrow::Cow;
@@ -134,6 +134,23 @@ fn resolve_value(val: &mut Value, secrets: &HashMap<String, String>) -> Result<(
     Ok(())
 }
 
+/// Resolve `@name@` secret placeholders across an explicit field whitelist.
+///
+/// Supported (secrets MAY appear here):
+/// - `settings[*].options[*]` — UCI option values (scalars and list elements).
+/// - `packageSources.opkgFeeds` / `packageSources.apkRepositories` — feed/repo URLs.
+/// - `rawUci[*]` — custom UCI command lines.
+/// - `files[*].content` — only the `Text` variant; never `Base64` (it would corrupt
+///   the encoded bytes).
+/// - `sshKeys[*]` — authorized-key lines.
+///
+/// Deliberately NOT interpolated (not secret-bearing, `@` is not valid there):
+/// - `packages` / `packageSources.localPackages` — package names and paths.
+/// - `files[*].content` `Base64` variant.
+///
+/// The placeholder syntax is `@name@` (a project-local convention, distinct from
+/// sops-nix's `{{name}}` templates). Unknown-but-valid identifiers error; sequences
+/// that are not valid identifiers are left verbatim.
 pub(crate) fn resolve_secrets(
     mut root: Root,
     secrets: &HashMap<String, String>,
@@ -170,6 +187,27 @@ pub(crate) fn resolve_secrets(
                 *feed = interpolated.into_owned();
             }
         }
+    }
+
+    if let Some(raw) = &mut root.raw_uci {
+        for line in raw.iter_mut() {
+            let interpolated = interpolate_secrets(line, secrets)?;
+            *line = interpolated.into_owned();
+        }
+    }
+
+    if let Some(files) = &mut root.files {
+        for file in files.iter_mut() {
+            if let FileContent::Text(text) = &mut file.content {
+                let interpolated = interpolate_secrets(text, secrets)?;
+                file.content = FileContent::Text(interpolated.into_owned());
+            }
+        }
+    }
+
+    for key in root.ssh_keys.iter_mut() {
+        let interpolated = interpolate_secrets(key, secrets)?;
+        *key = interpolated.into_owned();
     }
 
     Ok(root)
@@ -470,6 +508,75 @@ mod tests {
         let resolved = resolve_secrets(root, &secs).unwrap();
         let repos = resolved.package_sources.unwrap().apk_repositories.unwrap();
         assert_eq!(repos[0], "https://downloads.openwrt.org/packages");
+    }
+
+    #[test]
+    fn resolve_secrets_raw_uci() {
+        let root = Root {
+            raw_uci: Some(vec!["uci set network.wan.username='@wan_user@'".into()]),
+            ..root(IndexMap::new())
+        };
+        let secs = secrets(&[("wan_user", "alice")]);
+        let resolved = resolve_secrets(root, &secs).unwrap();
+        assert_eq!(
+            resolved.raw_uci.unwrap()[0],
+            "uci set network.wan.username='alice'"
+        );
+    }
+
+    #[test]
+    fn resolve_secrets_file_text_content() {
+        let root = Root {
+            files: Some(vec![crate::config::models::File {
+                path: "/etc/app/conf".into(),
+                content: FileContent::Text("token=@api_token@".into()),
+                executable: false,
+                checksum: None,
+            }]),
+            ..root(IndexMap::new())
+        };
+        let secs = secrets(&[("api_token", "s3cr3t")]);
+        let resolved = resolve_secrets(root, &secs).unwrap();
+        match &resolved.files.unwrap()[0].content {
+            FileContent::Text(s) => assert_eq!(s, "token=s3cr3t"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_secrets_file_base64_not_interpolated() {
+        // Base64 content must NOT be interpolated: substitution would corrupt the
+        // encoded bytes (an @placeholder@ inside base64 rarely occurs, but the rule
+        // is structural — base64 is never a secret-interpolation target).
+        let root = Root {
+            files: Some(vec![crate::config::models::File {
+                path: "/usr/bin/blob".into(),
+                content: FileContent::Base64("QG5vdF9hX3NlY3JldEA=".into()),
+                executable: true,
+                checksum: None,
+            }]),
+            ..root(IndexMap::new())
+        };
+        let secs = secrets(&[("not_a_secret", "leaked")]);
+        let resolved = resolve_secrets(root, &secs).unwrap();
+        match &resolved.files.unwrap()[0].content {
+            FileContent::Base64(b64) => assert_eq!(b64, "QG5vdF9hX3NlY3JldEA="),
+            other => panic!("expected Base64, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_secrets_ssh_keys() {
+        let root = Root {
+            ssh_keys: vec!["ssh-ed25519 @pubkey@ user@host".into()],
+            ..root(IndexMap::new())
+        };
+        let secs = secrets(&[("pubkey", "AAAAC3NzaC1lZDI1NTE5AAAAIExample")]);
+        let resolved = resolve_secrets(root, &secs).unwrap();
+        assert_eq!(
+            resolved.ssh_keys[0],
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample user@host"
+        );
     }
 
     #[test]

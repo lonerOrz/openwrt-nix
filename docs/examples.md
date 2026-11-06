@@ -18,6 +18,22 @@
 
 ## Wireless & SOPS Secrets
 
+Secrets are referenced with the `@name@` placeholder syntax (project-local; note
+this is **not** sops-nix's `{{name}}` template syntax). At `nuci compile` time the
+placeholder is resolved in-memory from the decrypted SOPS values.
+
+Interpolation applies to an explicit whitelist of fields:
+
+- `settings[*].options[*]` — UCI option values (scalars and list elements).
+- `packageSources.opkgFeeds` / `packageSources.apkRepositories` — feed/repo URLs.
+- `rawUci[*]` — custom UCI command lines.
+- `files[*].content` — only the **text** variant (never `base64`).
+- `sshKeys[*]` — authorized-key lines.
+
+`packages`, `packageSources.localPackages`, and `files[*].content` `base64` are never
+interpolated. Unknown-but-valid placeholder names error; sequences that are not valid
+identifiers are left verbatim.
+
 ```nix
 {
   uci.settings.wireless = {
