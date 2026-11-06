@@ -925,7 +925,7 @@ mod tests {
             "packages declared must bypass the no-op skip"
         );
         let script = String::from_utf8_lossy(calls[0].1.as_ref().unwrap());
-        assert!(script.contains("opkg install htop"));
+        assert!(script.contains("opkg install 'htop'"));
     }
 
     #[test]

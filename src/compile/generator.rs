@@ -19,14 +19,15 @@ impl PkgBackend {
     }
 
     pub(crate) fn install_expr(&self, pkgs: &[String]) -> String {
+        let quoted: Vec<String> = pkgs.iter().map(|p| shell_quote(p)).collect();
         match self {
             PkgBackend::Opkg => format!(
                 "if [ \"$NEED_INSTALL\" = true ]; then opkg update && opkg install {}; fi",
-                pkgs.join(" ")
+                quoted.join(" ")
             ),
             PkgBackend::Apk => format!(
                 "if [ \"$NEED_INSTALL\" = true ]; then apk add {}; fi",
-                pkgs.join(" ")
+                quoted.join(" ")
             ),
         }
     }
@@ -694,7 +695,7 @@ mod tests {
         serialize_package_management(&mut w, PkgBackend::Opkg, None, Some(&pkgs)).unwrap();
         assert!(w.contains("NEED_INSTALL=false"));
         assert!(w.contains("opkg status"));
-        assert!(w.contains("opkg update && opkg install luci tcpdump"));
+        assert!(w.contains("opkg update && opkg install 'luci' 'tcpdump'"));
     }
 
     #[test]
@@ -704,7 +705,7 @@ mod tests {
         serialize_package_management(&mut w, PkgBackend::Apk, None, Some(&pkgs)).unwrap();
         assert!(w.contains("NEED_INSTALL=false"));
         assert!(w.contains("apk info -e"));
-        assert!(w.contains("apk add luci tcpdump"));
+        assert!(w.contains("apk add 'luci' 'tcpdump'"));
     }
 
     #[test]
@@ -714,7 +715,7 @@ mod tests {
         serialize_package_management(&mut w, PkgBackend::Opkg, None, Some(&pkgs)).unwrap();
         assert!(w.contains("NEED_REMOVE=false"));
         assert!(w.contains("opkg remove 'wpad-basic-mbedtls'"));
-        assert!(w.contains("opkg update && opkg install wpad-mbedtls"));
+        assert!(w.contains("opkg update && opkg install 'wpad-mbedtls'"));
         assert!(
             w.find("opkg remove").unwrap() < w.find("opkg update").unwrap(),
             "removal must be emitted before install"
@@ -729,7 +730,7 @@ mod tests {
         serialize_package_management(&mut w, PkgBackend::Apk, None, Some(&pkgs)).unwrap();
         assert!(w.contains("NEED_REMOVE=false"));
         assert!(w.contains("apk del 'wpad-basic-mbedtls'"));
-        assert!(w.contains("apk add wpad-mbedtls"));
+        assert!(w.contains("apk add 'wpad-mbedtls'"));
         assert!(
             w.find("apk del").unwrap() < w.find("apk add").unwrap(),
             "removal must be emitted before install"
@@ -792,5 +793,18 @@ mod tests {
         assert!(w.contains("while uci -q delete dropbear.@dropbear[0]; do :; done"));
         let add_count = w.matches("add dropbear dropbear").count();
         assert_eq!(add_count, 1);
+    }
+
+    #[test]
+    fn install_expr_quotes_every_package_name() {
+        let normal = PkgBackend::Apk.install_expr(&["luci".into(), "tcpdump".into()]);
+        assert!(normal.contains("apk add 'luci' 'tcpdump'"));
+
+        let malicious = PkgBackend::Apk.install_expr(&["$(touch /tmp/pwned)".into(), "a;b".into()]);
+        // Each name must be wrapped in single quotes and escaped, never interpolated bare.
+        assert!(malicious.contains("'$(touch /tmp/pwned)'"));
+        assert!(malicious.contains("'a;b'"));
+        // The payload is wrapped in single quotes, so it cannot be executed by the shell.
+        assert!(!malicious.contains("; touch"));
     }
 }
