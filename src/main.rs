@@ -132,7 +132,7 @@ fn main() {
 }
 
 fn run_compile(json_path: &Path, secrets_dir: Option<&Path>, skip_sops: bool) {
-    match compile_config(json_path, secrets_dir, skip_sops).map(|c| c.uci_batch) {
+    match compile_config(json_path, secrets_dir, skip_sops, None).map(|c| c.uci_batch) {
         Ok(output) => print!("{output}"),
         Err(e) => {
             eprintln!("{e}");

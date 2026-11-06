@@ -6,6 +6,7 @@ use crate::config::models::{PackageAction, PkgBackend, Section};
 use crate::config::uci_key::{
     anonymous_option_key, anonymous_section_key, named_option_key, named_section_key,
 };
+use crate::target::capabilities::{discover_package_manager, resolve_backend};
 use crate::target::deploy::SshExec;
 use crate::utils::error::ConfigError;
 
@@ -218,7 +219,7 @@ pub fn run(
     secrets_dir: Option<&Path>,
     ssh: &dyn SshExec,
 ) -> Result<(), ConfigError> {
-    let compiled = compile_config(json_path, secrets_dir, config.no_sops)?;
+    let compiled = compile_config(json_path, secrets_dir, config.no_sops, None)?;
     let desired = extract_desired_map(&compiled.resolved_root.settings);
 
     let managed: Vec<&str> = compiled
@@ -244,7 +245,23 @@ pub fn run(
     let remote = parse_uci_show(uci_output);
     let service_map = parse_services(services_output);
 
-    let backend = PkgBackend::try_from(compiled.resolved_root.package_manager.as_str())?;
+    // Runtime capability discovery: the package manager actually on the target wins.
+    // Only probe when packages are declared; otherwise the declared field is sufficient.
+    let declared_pm = &compiled.resolved_root.package_manager;
+    let has_packages = compiled.resolved_root.packages.is_some()
+        || compiled.resolved_root.package_sources.is_some();
+    let backend = if has_packages {
+        let discovered = discover_package_manager(ssh, target, config)?;
+        match resolve_backend(declared_pm, discovered) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("Warning: {e}");
+                discovered
+            }
+        }
+    } else {
+        PkgBackend::try_from(declared_pm.as_str())?
+    };
     let packages = compiled.resolved_root.packages.clone().unwrap_or_default();
     let state_cmd = build_state_command(&packages, backend);
     let state_output = ssh.exec(target, &state_cmd, None, config)?;

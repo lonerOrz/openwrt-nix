@@ -117,7 +117,7 @@ fn test_container_image_build_apk() {
 #[test]
 fn test_command_generation_opkg() {
     with_sops_env(|| {
-        let compiled = compile_config(&opkg_json_path(), None, false).unwrap();
+        let compiled = compile_config(&opkg_json_path(), None, false, None).unwrap();
         let out = &compiled.uci_batch;
         assert!(
             out.contains("add system system"),
@@ -145,7 +145,7 @@ fn test_command_generation_opkg() {
 #[test]
 fn test_command_generation_apk() {
     with_sops_env(|| {
-        let compiled = compile_config(&apk_json_path(), None, false).unwrap();
+        let compiled = compile_config(&apk_json_path(), None, false, None).unwrap();
         let out = &compiled.uci_batch;
         assert!(
             out.contains("add system system"),
@@ -605,7 +605,7 @@ fn test_nested_and_null_values() {
     ];
     for (name, json) in cases {
         let path = write_tmp_json(json);
-        let result = compile_config(&path, None, true);
+        let result = compile_config(&path, None, true, None);
         assert!(result.is_err(), "{name} should be rejected");
     }
 }
@@ -618,7 +618,7 @@ async fn test_unified_lifecycle() {
     fs::create_dir_all(&dir).unwrap();
     let boot_path = dir.join("bootstrap.json");
     fs::write(&boot_path, boot_json).unwrap();
-    let compiled = compile_config(&boot_path, None, true).unwrap();
+    let compiled = compile_config(&boot_path, None, true, None).unwrap();
     target.sh(&format!(
         "uci -q batch <<'U'\n{}\nU\nuci commit",
         compiled.uci_batch
@@ -666,7 +666,7 @@ async fn test_custom_file_text_apk() {
 fn test_hyphen_in_config_name_rejected() {
     let json = serde_json::json!({"packageManager": "opkg", "settings": {"my-config": {}}});
     let path = write_tmp_json(json.to_string());
-    let result = compile_config(&path, None, true);
+    let result = compile_config(&path, None, true, None);
     assert!(result.is_err(), "expected error for hyphenated config name");
     assert!(
         result
@@ -680,7 +680,7 @@ fn test_hyphen_in_config_name_rejected() {
 fn test_hyphen_in_option_name_rejected() {
     let json = serde_json::json!({"packageManager": "opkg", "settings": {"network": {"lan": {"_type": "interface", "ip-address": "10.0.0.1"}}}});
     let path = write_tmp_json(json.to_string());
-    let result = compile_config(&path, None, true);
+    let result = compile_config(&path, None, true, None);
     assert!(result.is_err(), "expected error for hyphenated option name");
     assert!(result.unwrap_err().to_string().contains("Invalid option"));
 }

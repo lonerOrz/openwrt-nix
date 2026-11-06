@@ -20,10 +20,29 @@ impl std::fmt::Debug for CompiledConfig {
     }
 }
 
+/// Declared `packageManager` hint plus whether the config actually emits any
+/// package-manager commands (packages or package sources declared). Used to decide
+/// whether runtime capability discovery is required before compiling.
+pub struct PackageHint {
+    pub declared: String,
+    pub needs_pm: bool,
+}
+
+pub fn read_package_manager_hint(json_path: &Path) -> Result<PackageHint, ConfigError> {
+    let file = std::fs::File::open(json_path)?;
+    let root: crate::config::models::Root = serde_json::from_reader(std::io::BufReader::new(file))?;
+    let needs_pm = root.packages.is_some() || root.package_sources.is_some();
+    Ok(PackageHint {
+        declared: root.package_manager,
+        needs_pm,
+    })
+}
+
 pub fn compile_config(
     json_path: &Path,
     secrets_dir: Option<&Path>,
     skip_sops: bool,
+    backend: Option<PkgBackend>,
 ) -> Result<CompiledConfig, ConfigError> {
     let file = std::fs::File::open(json_path)?;
     let root: crate::config::models::Root = serde_json::from_reader(std::io::BufReader::new(file))?;
@@ -78,7 +97,10 @@ pub fn compile_config(
         }
     }
 
-    let backend = PkgBackend::try_from(resolved_root.package_manager.as_str())?;
+    let backend = match backend {
+        Some(b) => b,
+        None => PkgBackend::try_from(resolved_root.package_manager.as_str())?,
+    };
     serialize_package_management(
         &mut uci_batch,
         backend,
@@ -115,7 +137,7 @@ mod tests {
                 "rawUci": [ "uci rename system.@system[0]=sys0" ]
             }"#,
         );
-        let out = compile_config(json.path(), None, true).unwrap();
+        let out = compile_config(json.path(), None, true, None).unwrap();
         assert!(out.uci_batch.contains("uci rename system.@system[0]=sys0"));
         let raw_pos = out.uci_batch.find("uci rename").unwrap();
         let typed_pos = out.uci_batch.find("add system system").unwrap();
@@ -131,7 +153,7 @@ mod tests {
                 "rawUci": [ "uci add dropbear dropbear", "uci set network.lan.proto='static'" ]
             }"#,
         );
-        let out = compile_config(json.path(), None, true).unwrap();
+        let out = compile_config(json.path(), None, true, None).unwrap();
         assert!(out.uci_batch.contains("touch /etc/config/dropbear\n"));
         assert!(out.uci_batch.contains("touch /etc/config/network\n"));
         assert!(
@@ -143,14 +165,14 @@ mod tests {
     #[test]
     fn raw_uci_absent_when_not_declared() {
         let json = write_json(r#"{ "packageManager": "opkg", "settings": {} }"#);
-        let out = compile_config(json.path(), None, true).unwrap();
+        let out = compile_config(json.path(), None, true, None).unwrap();
         assert!(!out.uci_batch.contains("Raw UCI escape hatch"));
     }
 
     #[test]
     fn unknown_package_manager_is_rejected() {
         let json = write_json(r#"{ "packageManager": "apt", "settings": {} }"#);
-        let err = compile_config(json.path(), None, true).unwrap_err();
+        let err = compile_config(json.path(), None, true, None).unwrap_err();
         assert!(
             format!("{err}").contains("Unsupported package manager: apt"),
             "expected rejection, got: {err}"
@@ -161,7 +183,7 @@ mod tests {
     fn default_package_manager_is_opkg() {
         // packageManager omitted -> opkg default, compiles without error.
         let json = write_json(r#"{ "settings": {} }"#);
-        let out = compile_config(json.path(), None, true).unwrap();
+        let out = compile_config(json.path(), None, true, None).unwrap();
         assert!(out.uci_batch.is_empty());
     }
 }

@@ -4,8 +4,9 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::compile::pipeline::compile_config;
-use crate::config::models::{FileContent, Root, Section};
+use crate::config::models::{FileContent, PkgBackend, Root, Section};
 use crate::config::uci_key::is_named_section_key;
+use crate::target::capabilities::{discover_package_manager, resolve_backend};
 use crate::target::diff::{
     SERVICE_SEPARATOR, build_discovery_command, extract_desired_map, parse_services, parse_uci_show,
 };
@@ -395,7 +396,24 @@ pub fn run(
     secrets_dir: Option<&Path>,
     ssh: &dyn SshExec,
 ) -> Result<(), ConfigError> {
-    let compiled = compile_config(json_path, secrets_dir, config.no_sops)?;
+    // Runtime capability discovery: the package manager actually on the target wins.
+    // Only probe when the config actually emits package-manager commands; pure UCI/file
+    // deployments need no extra SSH round-trip. A missing/stale `packageManager` no longer
+    // sends the wrong commands to the box when packages are involved.
+    let hint = crate::compile::pipeline::read_package_manager_hint(json_path)?;
+    let backend = if hint.needs_pm {
+        let discovered = discover_package_manager(ssh, target, config)?;
+        match resolve_backend(&hint.declared, discovered) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("Warning: {e}");
+                discovered
+            }
+        }
+    } else {
+        PkgBackend::try_from(hint.declared.as_str())?
+    };
+    let compiled = compile_config(json_path, secrets_dir, config.no_sops, Some(backend))?;
 
     let managed_configs: Vec<String> = compiled.resolved_root.settings.keys().cloned().collect();
     let managed_refs: Vec<&str> = managed_configs.iter().map(|s| s.as_str()).collect();
@@ -611,6 +629,10 @@ mod tests {
             self.calls
                 .borrow_mut()
                 .push((cmd.to_string(), stdin_data.map(|d| d.to_vec())));
+            // Answer the capability probe so discovery succeeds in offline tests.
+            if cmd.contains("command -v apk") {
+                return Ok("opkg\n".to_string());
+            }
             Ok(String::new())
         }
     }
@@ -928,10 +950,10 @@ mod tests {
         let calls = ssh.calls.borrow();
         assert_eq!(
             calls.len(),
-            3,
-            "packages declared must bypass the no-op skip"
+            4,
+            "capability probe + deploy + watchdog + rollback"
         );
-        let script = String::from_utf8_lossy(calls[0].1.as_ref().unwrap());
+        let script = String::from_utf8_lossy(calls[1].1.as_ref().unwrap());
         assert!(script.contains("opkg install 'htop'"));
     }
 
