@@ -131,34 +131,74 @@ fn render_watchdog(reload_cmds: &str, watchdog_timeout: u64) -> String {
 
 /// Render the full remote script: ssh keys, root password, files, the boot
 /// rollback hook, the UCI command batch, and the detached watchdog that reverts
-/// on timeout. Pure string assembly — no side effects.
-pub fn build_remote_script(
-    root: &Root,
-    secrets: &HashMap<String, String>,
-    uci_commands: &str,
-    deployer_key: Option<&str>,
-    modified_configs: &[String],
-    service_map: &BTreeMap<String, String>,
-    watchdog_timeout: u64,
-) -> String {
+/// on timeout. Pure string assembly — no side effects. When `verbose` is set,
+/// the script enables `set -x` tracing and emits a `[nuci] stage:` banner before
+/// each logical stage so `--verbose` surfaces an ordered, per-stage view.
+/// All inputs needed to render the remote deploy script. Bundling them in one
+/// struct keeps `build_remote_script` a single-argument pure function and avoids
+/// an over-long parameter list.
+pub struct RenderInput<'a> {
+    pub root: &'a Root,
+    pub secrets: &'a HashMap<String, String>,
+    pub uci_commands: String,
+    pub deployer_key: Option<String>,
+    pub managed_configs: Vec<String>,
+    pub service_map: BTreeMap<String, String>,
+    pub watchdog_timeout: u64,
+    pub verbose: bool,
+}
+
+/// Render the full remote script: ssh keys, root password, files, the boot
+/// rollback hook, the UCI command batch, and the detached watchdog that reverts
+/// on timeout. Pure string assembly — no side effects. When `verbose` is set,
+/// the script enables `set -x` tracing and emits a `[nuci] stage:` banner before
+/// each logical stage so `--verbose` surfaces an ordered, per-stage view.
+pub fn build_remote_script(input: &RenderInput) -> String {
+    let RenderInput {
+        root,
+        secrets,
+        uci_commands,
+        deployer_key,
+        managed_configs,
+        service_map,
+        watchdog_timeout,
+        verbose,
+    } = input;
     let mut script = String::with_capacity(4096);
 
-    script.push_str(&render_ssh_keys(&root.ssh_keys, deployer_key));
+    if *verbose {
+        // Trace every command (with its stdout/stderr) to stderr, and emit a
+        // machine-scannable banner before each logical stage so `--verbose`
+        // surfaces an ordered, per-stage view of the deploy instead of silent stdout.
+        script.push_str("set -x\n");
+    }
+    let stage = |script: &mut String, name: &str| {
+        if *verbose {
+            script.push_str(&format!("echo '[nuci] stage: {name}'\n"));
+        }
+    };
+
+    stage(&mut script, "ssh-keys");
+    script.push_str(&render_ssh_keys(&root.ssh_keys, deployer_key.as_deref()));
 
     if let Some(pwd) = secrets.get("root_password") {
+        stage(&mut script, "root-password");
         script.push_str(&render_root_password(pwd));
     }
 
     if let Some(files) = &root.files {
+        stage(&mut script, "files");
         script.push_str(&crate::target::file_transfer::render_file_block(files));
     }
 
+    stage(&mut script, "uci");
     script.push_str(&boot_rollback_hook());
     script.push_str(uci_commands);
     script.push('\n');
 
-    let reload_cmds = reload_commands(modified_configs, service_map);
-    script.push_str(&render_watchdog(&reload_cmds, watchdog_timeout));
+    let reload_cmds = reload_commands(managed_configs, service_map);
+    stage(&mut script, "reload");
+    script.push_str(&render_watchdog(&reload_cmds, *watchdog_timeout));
 
     script
 }
@@ -266,5 +306,64 @@ mod tests {
             !etc.join("rc.d").join("S15nuci_rollback").exists(),
             "rc.d symlink not removed"
         );
+    }
+    #[test]
+    fn verbose_emits_stage_markers_and_set_x() {
+        let json = r#"{
+            "packageManager": "opkg",
+            "settings": {},
+            "sshKeys": ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample test"],
+            "files": [{ "path": "/etc/nuci-managed.txt", "content": "ok" }]
+        }"#;
+        let root: crate::config::models::Root = serde_json::from_str(json).expect("valid root");
+        let secrets = std::collections::HashMap::new();
+
+        let quiet = build_remote_script(&RenderInput {
+            root: &root,
+            secrets: &secrets,
+            uci_commands: "set system.cfg01=system\n".to_string(),
+            deployer_key: None,
+            managed_configs: vec![],
+            service_map: std::collections::BTreeMap::new(),
+            watchdog_timeout: 60,
+            verbose: false,
+        });
+        assert!(!quiet.contains("set -x"), "quiet must not enable tracing");
+        assert!(
+            !quiet.contains("[nuci] stage:"),
+            "quiet must not emit stage banners"
+        );
+
+        let verbose = build_remote_script(&RenderInput {
+            root: &root,
+            secrets: &secrets,
+            uci_commands: "set system.cfg01=system\n".to_string(),
+            deployer_key: None,
+            managed_configs: vec![],
+            service_map: std::collections::BTreeMap::new(),
+            watchdog_timeout: 60,
+            verbose: true,
+        });
+        assert!(verbose.contains("set -x"), "verbose must enable tracing");
+        assert!(
+            verbose.contains("[nuci] stage: ssh-keys"),
+            "verbose must banner ssh-keys stage"
+        );
+        assert!(
+            verbose.contains("[nuci] stage: files"),
+            "verbose must banner files stage"
+        );
+        assert!(
+            verbose.contains("[nuci] stage: uci"),
+            "verbose must banner uci stage"
+        );
+        assert!(
+            verbose.contains("[nuci] stage: reload"),
+            "verbose must banner reload stage"
+        );
+        let pos = |s: &str| verbose.find(s).unwrap();
+        assert!(pos("[nuci] stage: ssh-keys") < pos("[nuci] stage: files"));
+        assert!(pos("[nuci] stage: files") < pos("[nuci] stage: uci"));
+        assert!(pos("[nuci] stage: uci") < pos("[nuci] stage: reload"));
     }
 }

@@ -260,16 +260,18 @@ pub fn run(
     )?;
 
     let deployer_key = get_local_deployer_key();
-    let plan = crate::target::deploy_plan::DeployPlan::new(
-        &compiled.resolved_root,
-        &compiled.secrets,
-        uci_commands,
-        deployer_key,
-        managed_configs,
-        service_map,
-        config.watchdog_timeout,
+    let remote_script = crate::target::remote_script::build_remote_script(
+        &crate::target::remote_script::RenderInput {
+            root: &compiled.resolved_root,
+            secrets: &compiled.secrets,
+            uci_commands,
+            deployer_key,
+            managed_configs,
+            service_map,
+            watchdog_timeout: config.watchdog_timeout,
+            verbose: config.verbose,
+        },
     );
-    let remote_script = plan.render();
     eprintln!("Deploying to {target}...");
     let deploy_out = ssh.exec(
         target,
