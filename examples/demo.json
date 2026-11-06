@@ -1,0 +1,30 @@
+{
+  "packageManager": "apk",
+  "settings": {
+    "system": {
+      "system": {
+        "_type": "system",
+        "hostname": "nuci-demo"
+      }
+    },
+    "network": {
+      "lan": {
+        "_type": "interface",
+        "proto": "static",
+        "ipaddr": "192.168.1.2",
+        "netmask": "255.255.255.0"
+      }
+    }
+  },
+  "files": [
+    {
+      "path": "/etc/nuci-banner.txt",
+      "content": "deployed by nuci\n",
+      "executable": false
+    }
+  ],
+  "sshKeys": [
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIReplaceThisWithYourRealPublicKey user@host"
+  ],
+  "rawUci": ["uci show system"]
+}
