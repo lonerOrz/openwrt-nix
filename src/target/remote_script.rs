@@ -107,6 +107,28 @@ fn render_root_password(root_password: &str) -> String {
     )
 }
 
+/// Render the detach-on-disconnect watchdog plus the foreground reload tail.
+///
+/// The watchdog runs `sleep {watchdog_timeout}` in a `trap '' HUP` subshell so it
+/// survives SSH session loss; if a rollback backup still exists when it fires, it
+/// restores `/etc/config` and re-runs the reload commands before clearing state.
+/// The separate `( sleep 1; {reload_cmds} ) &` tail lets `/tmp/deploy.sh` exit 0
+/// first so a foreground network/Dropbear reload doesn't sever the SSH link.
+/// Pure string assembly — no side effects.
+fn render_watchdog(reload_cmds: &str, watchdog_timeout: u64) -> String {
+    format!(
+        "( trap '' HUP; sleep {watchdog_timeout}; \
+          if [ -d /etc/.uci-rollback-backup ]; then \
+              cp -a /etc/.uci-rollback-backup/* /etc/config/; \
+              {reload_cmds} \
+          fi; \
+          rm -rf /etc/.uci-rollback-backup /etc/init.d/nuci_rollback /etc/rc.d/S15nuci_rollback /tmp/.uci-watchdog-pid \
+        ) >/dev/null 2>&1 </dev/null & \
+          echo $! > /tmp/.uci-watchdog-pid\n\
+         ( sleep 1; {reload_cmds} ) >/dev/null 2>&1 &\n"
+    )
+}
+
 /// Render the full remote script: ssh keys, root password, files, the boot
 /// rollback hook, the UCI command batch, and the detached watchdog that reverts
 /// on timeout. Pure string assembly — no side effects.
@@ -136,24 +158,7 @@ pub fn build_remote_script(
     script.push('\n');
 
     let reload_cmds = reload_commands(modified_configs, service_map);
-    // Unrecoverable Linux process signal behavior: trap '' HUP is required so background watchdog
-    // survives SSH session disconnect.
-    script.push_str(&format!(
-        "( trap '' HUP; sleep {watchdog_timeout}; \
-          if [ -d /etc/.uci-rollback-backup ]; then \
-              cp -a /etc/.uci-rollback-backup/* /etc/config/; \
-              {reload_cmds} \
-          fi; \
-          rm -rf /etc/.uci-rollback-backup /etc/init.d/nuci_rollback /etc/rc.d/S15nuci_rollback /tmp/.uci-watchdog-pid \
-        ) >/dev/null 2>&1 </dev/null & \
-          echo $! > /tmp/.uci-watchdog-pid\n"
-    ));
-
-    // Unrecoverable OpenWrt SSH network disconnect behavior: reloading network or Dropbear/SSHD
-    // synchronously in the foreground SSH session severs the connection (exit status 255),
-    // bypassing the 60s reconnection handshake. Detaching reload with `(sleep 1; ...) &`
-    // allows `/tmp/deploy.sh` to exit 0 first so the client enters the handshake loop.
-    script.push_str(&format!("( sleep 1; {reload_cmds} ) >/dev/null 2>&1 &\n"));
+    script.push_str(&render_watchdog(&reload_cmds, watchdog_timeout));
 
     script
 }
