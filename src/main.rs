@@ -54,6 +54,7 @@ enum Command {
         identity: Option<PathBuf>,
         #[arg(short, long)]
         secrets_dir: Option<PathBuf>,
+        #[arg(long)]
         no_sops: bool,
         #[arg(short, long)]
         verbose: bool,

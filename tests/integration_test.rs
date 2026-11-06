@@ -729,3 +729,87 @@ async fn test_package_matrix_apk_all_scenarios() {
         "apk install htop from official feed failed"
     );
 }
+
+/// B-class proof that `--verbose` actually surfaces remote stdout.
+///
+/// Spawns the real `nuci` binary as a subprocess (isolated stdout, no shared
+/// capture races) against a live container. A `rawUci` probe echoes a unique
+/// marker; the remote command's stdout is captured by `ssh_exec` and, under
+/// `--verbose`, printed by `deploy::run`. Without the flag it must be silent.
+#[tokio::test]
+async fn verbose_echoes_remote_stdout() {
+    let target = get_opkg_target().await;
+    let artifacts = get_session_artifacts();
+
+    let json = r#"{
+            "packageManager": "opkg",
+            "settings": {},
+            "rawUci": ["uci show system"]
+        }"#
+    .to_string();
+    let dir = std::env::temp_dir().join("nuci_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let json_path = dir.join("verbose_probe.json");
+    std::fs::write(&json_path, json).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_nuci");
+    let host = format!("root@{}", target.host);
+    let identity = artifacts.ssh_key.to_string_lossy().into_owned();
+
+    // Verbose: remote stdout must reach the local process stdout.
+    let verbose_out = target.guarded(|| {
+        std::process::Command::new(bin)
+            .args([
+                "deploy",
+                "--target",
+                &host,
+                "--port",
+                &target.port.to_string(),
+                "--identity",
+                &identity,
+                "--force",
+                "--verbose",
+                json_path.to_str().unwrap(),
+            ])
+            .output()
+            .expect("failed to run nuci deploy")
+    });
+    assert!(
+        verbose_out.status.success(),
+        "verbose deploy failed: {}",
+        String::from_utf8_lossy(&verbose_out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&verbose_out.stdout);
+    assert!(
+        stdout.contains("system."),
+        "verbose deploy should echo remote 'uci show system' stdout, got:\n{stdout}"
+    );
+
+    // Non-verbose: the same probe must NOT appear in local stdout.
+    let quiet_out = target.guarded(|| {
+        std::process::Command::new(bin)
+            .args([
+                "deploy",
+                "--target",
+                &host,
+                "--port",
+                &target.port.to_string(),
+                "--identity",
+                &identity,
+                "--force",
+                json_path.to_str().unwrap(),
+            ])
+            .output()
+            .expect("failed to run nuci deploy")
+    });
+    assert!(
+        quiet_out.status.success(),
+        "quiet deploy failed: {}",
+        String::from_utf8_lossy(&quiet_out.stderr)
+    );
+    let quiet_stdout = String::from_utf8_lossy(&quiet_out.stdout);
+    assert!(
+        !quiet_stdout.contains("system."),
+        "non-verbose deploy must not echo remote stdout, got:\n{quiet_stdout}"
+    );
+}
