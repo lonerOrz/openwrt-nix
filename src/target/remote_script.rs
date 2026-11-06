@@ -58,6 +58,55 @@ fn boot_rollback_hook() -> String {
     s
 }
 
+/// Render the authorized-keys block: joins declared SSH keys, appends the active
+/// deployer key to prevent lockout when it isn't already present, and writes
+/// `/etc/dropbear/authorized_keys`. `deployer_key` is `None` when no local agent
+/// key is available — the caller is warned but the block is still emitted for any
+/// configured keys. Pure string assembly — the `eprintln!` warnings are the only
+/// side effect and are preserved from the original inline logic.
+fn render_ssh_keys(keys: &[String], deployer_key: Option<&str>) -> String {
+    if keys.is_empty() {
+        return String::new();
+    }
+
+    let mut joined = keys.join("\n");
+    if let Some(key) = deployer_key {
+        let pub_part: String = key
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<&str>>()
+            .join(" ");
+        if !joined.contains(&pub_part) {
+            eprintln!("⚠ Deployer key not in config, appending to prevent lockout...");
+            joined = format!("{joined}\n{key}");
+        }
+    } else {
+        eprintln!(
+            "⚠ No active SSH keys in local ssh-agent. Ensure root.sshKeys contains your key."
+        );
+    }
+
+    format!(
+        "mkdir -p /etc/dropbear/ && umask 177 && cat > /etc/dropbear/authorized_keys <<'SSHKEYS'\n{joined}\nSSHKEYS\n\
+         chmod 700 /etc/dropbear && chmod 600 /etc/dropbear/authorized_keys\n"
+    )
+}
+
+/// Render the root password block. Uses `chpasswd` when present, otherwise falls
+/// back to `passwd`. Emits nothing when `root_password` is absent or empty.
+fn render_root_password(root_password: &str) -> String {
+    if root_password.is_empty() {
+        return String::new();
+    }
+    format!(
+        "if command -v chpasswd >/dev/null 2>&1; then\n\
+         chpasswd <<'CHPWD'\nroot:{root_password}\nCHPWD\n\
+         else\n\
+         printf '%s\\n%s\\n' '{root_password}' '{root_password}' | passwd root >/dev/null 2>&1\n\
+         fi\n"
+    )
+}
+
 /// Render the full remote script: ssh keys, root password, files, the boot
 /// rollback hook, the UCI command batch, and the detached watchdog that reverts
 /// on timeout. Pure string assembly — no side effects.
@@ -72,41 +121,10 @@ pub fn build_remote_script(
 ) -> String {
     let mut script = String::with_capacity(4096);
 
-    if !root.ssh_keys.is_empty() {
-        let mut keys = root.ssh_keys.join("\n");
+    script.push_str(&render_ssh_keys(&root.ssh_keys, deployer_key));
 
-        if let Some(key) = deployer_key {
-            let pub_part: String = key
-                .split_whitespace()
-                .take(2)
-                .collect::<Vec<&str>>()
-                .join(" ");
-            if !keys.contains(&pub_part) {
-                eprintln!("⚠ Deployer key not in config, appending to prevent lockout...");
-                keys = format!("{keys}\n{key}");
-            }
-        } else {
-            eprintln!(
-                "⚠ No active SSH keys in local ssh-agent. Ensure root.sshKeys contains your key."
-            );
-        }
-
-        script.push_str(&format!(
-            "mkdir -p /etc/dropbear/ && umask 177 && cat > /etc/dropbear/authorized_keys <<'SSHKEYS'\n{keys}\nSSHKEYS\n\
-             chmod 700 /etc/dropbear && chmod 600 /etc/dropbear/authorized_keys\n"
-        ));
-    }
-
-    if let Some(pwd) = secrets.get("root_password")
-        && !pwd.is_empty()
-    {
-        script.push_str(&format!(
-            "if command -v chpasswd >/dev/null 2>&1; then\n\
-             chpasswd <<'CHPWD'\nroot:{pwd}\nCHPWD\n\
-             else\n\
-             printf '%s\\n%s\\n' '{pwd}' '{pwd}' | passwd root >/dev/null 2>&1\n\
-             fi\n"
-        ));
+    if let Some(pwd) = secrets.get("root_password") {
+        script.push_str(&render_root_password(pwd));
     }
 
     if let Some(files) = &root.files {
