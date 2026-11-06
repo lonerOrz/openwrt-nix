@@ -13,10 +13,6 @@ use crate::target::diff::{
 use crate::utils::error::ConfigError;
 use indexmap::IndexMap;
 
-// Re-exported so `run()` and existing call sites keep resolving after the renderer
-// moved to the `remote_script` module.
-pub use crate::target::remote_script::build_remote_script;
-
 pub struct DeployConfig {
     pub port: u16,
     pub identity_file: Option<String>,
@@ -243,15 +239,16 @@ pub fn run(
     )?;
 
     let deployer_key = get_local_deployer_key();
-    let remote_script = build_remote_script(
+    let plan = crate::target::deploy_plan::DeployPlan::new(
         &compiled.resolved_root,
         &compiled.secrets,
-        &uci_commands,
-        deployer_key.as_deref(),
-        &managed_configs,
-        &service_map,
+        uci_commands,
+        deployer_key,
+        managed_configs,
+        service_map,
         config.watchdog_timeout,
     );
+    let remote_script = plan.render();
     eprintln!("Deploying to {target}...");
     ssh.exec(
         target,
