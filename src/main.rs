@@ -36,10 +36,12 @@ enum Command {
         secrets_dir: Option<PathBuf>,
         #[arg(short, long)]
         force: bool,
-        #[arg(long)]
+        #[arg(short, long)]
         no_sops: bool,
         #[arg(long, default_value_t = 60)]
         watchdog_timeout: u64,
+        #[arg(short, long)]
+        verbose: bool,
     },
 
     Diff {
@@ -52,8 +54,9 @@ enum Command {
         identity: Option<PathBuf>,
         #[arg(short, long)]
         secrets_dir: Option<PathBuf>,
-        #[arg(long)]
         no_sops: bool,
+        #[arg(short, long)]
+        verbose: bool,
     },
 }
 
@@ -77,6 +80,7 @@ fn main() {
             force,
             no_sops,
             watchdog_timeout,
+            verbose,
         }) => {
             let config = deploy::DeployConfig {
                 port,
@@ -84,6 +88,7 @@ fn main() {
                 force,
                 no_sops,
                 watchdog_timeout,
+                verbose,
             };
             if let Err(e) = deploy::run(
                 &json,
@@ -103,6 +108,7 @@ fn main() {
             identity,
             secrets_dir,
             no_sops,
+            verbose,
         }) => {
             let config = deploy::DeployConfig {
                 port,
@@ -110,6 +116,7 @@ fn main() {
                 force: false,
                 no_sops,
                 watchdog_timeout: 60,
+                verbose,
             };
             if let Err(e) = diff::run(
                 &json,

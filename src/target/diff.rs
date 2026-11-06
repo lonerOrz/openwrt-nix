@@ -237,6 +237,10 @@ pub fn run(
     let uci_cmd = build_discovery_command(&managed);
     eprintln!("Fetching current configuration & services from {target} (read-only)...");
     let remote_output = ssh.exec(target, &uci_cmd, None, config)?;
+    if config.verbose {
+        eprintln!("-- remote uci output --");
+        eprintln!("{remote_output}");
+    }
 
     let mut parts = remote_output.splitn(2, SERVICE_SEPARATOR);
     let uci_output = parts.next().unwrap_or("");
@@ -265,6 +269,10 @@ pub fn run(
     let packages = compiled.resolved_root.packages.clone().unwrap_or_default();
     let state_cmd = build_state_command(&packages, backend);
     let state_output = ssh.exec(target, &state_cmd, None, config)?;
+    if config.verbose {
+        eprintln!("-- remote state output --");
+        eprintln!("{state_output}");
+    }
     let state_blocks: Vec<&str> = state_output.split(STATE_SEPARATOR).collect();
     let pkg_state = parse_package_state(state_blocks.first().copied().unwrap_or(""));
     let remote_keys = state_blocks

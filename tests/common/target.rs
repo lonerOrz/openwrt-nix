@@ -215,6 +215,7 @@ impl Target {
             force: true,
             no_sops: false,
             watchdog_timeout: 10,
+            verbose: false,
         };
         let target = format!("root@{}", self.host);
 

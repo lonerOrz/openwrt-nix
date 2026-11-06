@@ -249,10 +249,12 @@ pub(crate) fn serialize_uci(
         write!(writer, "{shell_cmds}").unwrap();
 
         if !uci_cmds.is_empty() {
-            // Unrecoverable OpenWrt API limitation: `uci batch` silently fails
-            // for set/add commands when /etc/config/<file> does not exist on disk.
+            // Run the typed UCI ops through `uci batch`. Drop `-q` so a failing
+            // command's diagnostic (`uci: ... at line N`) reaches stderr and the
+            // non-zero exit propagates to run(), which reports it instead of a
+            // false success. Batch still commits atomically on success.
             writeln!(writer, "touch /etc/config/{config_name}").unwrap();
-            writeln!(writer, "uci -q batch <<'UCI_EOF'").unwrap();
+            writeln!(writer, "uci batch <<'UCI_EOF'").unwrap();
             write!(writer, "{uci_cmds}").unwrap();
             writeln!(writer, "commit {config_name}").unwrap();
             writeln!(writer, "UCI_EOF").unwrap();
@@ -439,7 +441,7 @@ mod tests {
         let mut w = String::new();
         serialize_uci(&mut w, &configs).unwrap();
 
-        assert!(w.contains("uci -q batch <<'UCI_EOF'"));
+        assert!(w.contains("uci batch <<'UCI_EOF'"));
         assert!(w.contains("delete network.lan"));
         assert!(w.contains("set network.lan=interface"));
         assert!(w.contains("set network.lan.proto='static'"));
@@ -466,7 +468,7 @@ mod tests {
         serialize_uci(&mut w, &configs).unwrap();
 
         assert!(w.contains("while uci -q delete dropbear.@dropbear[0]; do :; done"));
-        assert!(w.contains("uci -q batch <<'UCI_EOF'"));
+        assert!(w.contains("uci batch <<'UCI_EOF'"));
         assert!(w.contains("add dropbear dropbear"));
         assert!(w.contains("set dropbear.@dropbear[0].Port='22'"));
         assert!(w.contains("commit dropbear"));

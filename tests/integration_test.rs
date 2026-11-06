@@ -221,6 +221,7 @@ async fn test_opkg_full_lifecycle() {
             force: false,
             no_sops: false,
             watchdog_timeout: 10,
+            verbose: false,
         };
         assert!(
             diff::run(
@@ -300,6 +301,7 @@ async fn test_apk_full_lifecycle() {
             force: false,
             no_sops: false,
             watchdog_timeout: 10,
+            verbose: false,
         };
         assert!(
             diff::run(
@@ -405,6 +407,7 @@ async fn test_diff_accuracy() {
             force: false,
             no_sops: false,
             watchdog_timeout: 10,
+            verbose: false,
         };
         assert!(
             diff::run(
@@ -619,10 +622,7 @@ async fn test_unified_lifecycle() {
     let boot_path = dir.join("bootstrap.json");
     fs::write(&boot_path, boot_json).unwrap();
     let compiled = compile_config(&boot_path, None, true, None).unwrap();
-    target.sh(&format!(
-        "uci -q batch <<'U'\n{}\nU\nuci commit",
-        compiled.uci_batch
-    ));
+    target.sh(&format!("set -e\n{}", compiled.uci_batch));
     assert_eq!(
         target.uci_get("wireless.default_radio0.key").as_deref(),
         Some("CHANGE_ME_ON_DEPLOY")

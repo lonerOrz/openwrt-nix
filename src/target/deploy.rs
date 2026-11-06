@@ -19,6 +19,9 @@ pub struct DeployConfig {
     pub force: bool,
     pub no_sops: bool,
     pub watchdog_timeout: u64,
+    /// When true, the captured remote stdout/stderr of deploy/diff operations is
+    /// echoed to the local terminal instead of being discarded.
+    pub verbose: bool,
 }
 
 fn build_ssh_args(config: &DeployConfig) -> Vec<String> {
@@ -94,7 +97,7 @@ pub fn ssh_exec(
             Stdio::inherit()
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| ConfigError::Deploy(format!("Failed to spawn ssh: {e}")))?;
 
@@ -111,10 +114,28 @@ pub fn ssh_exec(
         .map_err(|e| ConfigError::Deploy(format!("Failed to wait for ssh: {e}")))?;
 
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        // Surface the remote diagnostic (e.g. `uci: ... at line N`) so a failed
+        // UCI batch reports exactly which command broke, not just a non-zero exit.
         return Err(ConfigError::Deploy(format!(
-            "SSH command failed on {target}: {cmd} (exit {})",
-            output.status.code().unwrap_or(-1)
+            "SSH command failed on {target} (exit {}): {}{}",
+            output.status.code().unwrap_or(-1),
+            cmd,
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!("\nremote stderr:\n{stderr}")
+            }
         )));
+    }
+    // Stderr is captured (not inherited) so failures can embed the remote
+    // diagnostic in ConfigError. On success, mirror it to local stderr to keep
+    // the prior live visibility of warnings (e.g. opkg "Collected errors: ...").
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
+    if !stderr.is_empty() {
+        eprintln!("{stderr}");
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -250,12 +271,17 @@ pub fn run(
     );
     let remote_script = plan.render();
     eprintln!("Deploying to {target}...");
-    ssh.exec(
+    let deploy_out = ssh.exec(
         target,
         "cat > /tmp/deploy.sh && sh /tmp/deploy.sh",
         Some(remote_script.as_bytes()),
         config,
     )?;
+    if config.verbose {
+        // Echo the captured remote stdout (uci set/add/opkg progress) that would
+        // otherwise be discarded by the deploy flow.
+        print!("{deploy_out}");
+    }
 
     eprintln!("Waiting for target to come back (60s rollback window)...");
     let mut connected = false;
@@ -393,6 +419,7 @@ mod tests {
             force: false,
             no_sops: false,
             watchdog_timeout: 60,
+            verbose: false,
         };
         let ssh = FakeSsh {
             calls: std::cell::RefCell::new(Vec::new()),
@@ -438,6 +465,7 @@ mod tests {
             force: true,
             no_sops: false,
             watchdog_timeout: 60,
+            verbose: false,
         };
         let ssh = FakeSsh {
             calls: std::cell::RefCell::new(Vec::new()),
@@ -483,6 +511,7 @@ mod tests {
             force: true,
             no_sops: false,
             watchdog_timeout: 60,
+            verbose: false,
         };
         let ssh = FakeSsh {
             calls: std::cell::RefCell::new(Vec::new()),
@@ -518,6 +547,7 @@ mod tests {
             force: false,
             no_sops: false,
             watchdog_timeout: 60,
+            verbose: false,
         };
         let ssh = FakeSsh {
             calls: std::cell::RefCell::new(Vec::new()),
@@ -554,6 +584,7 @@ mod tests {
             force: false,
             no_sops: false,
             watchdog_timeout: 60,
+            verbose: false,
         };
         let ssh = FakeSsh {
             calls: std::cell::RefCell::new(Vec::new()),
@@ -587,6 +618,7 @@ mod tests {
             force: false,
             no_sops: false,
             watchdog_timeout: 60,
+            verbose: false,
         };
         let ssh = FakeSsh {
             calls: std::cell::RefCell::new(Vec::new()),
@@ -620,6 +652,7 @@ mod tests {
             force: false,
             no_sops: false,
             watchdog_timeout: 60,
+            verbose: false,
         };
         let ssh = FakeSsh {
             calls: std::cell::RefCell::new(Vec::new()),
@@ -657,6 +690,7 @@ mod tests {
             force: false,
             no_sops: false,
             watchdog_timeout: 60,
+            verbose: false,
         };
         let ssh = FakeSsh {
             calls: std::cell::RefCell::new(Vec::new()),
@@ -695,6 +729,7 @@ mod tests {
             force: false,
             no_sops: false,
             watchdog_timeout: 60,
+            verbose: false,
         };
         let ssh = FakeSsh {
             calls: std::cell::RefCell::new(Vec::new()),
@@ -735,6 +770,7 @@ mod tests {
             force: true,
             no_sops: false,
             watchdog_timeout: 60,
+            verbose: false,
         };
         let ssh = FakeSsh {
             calls: std::cell::RefCell::new(Vec::new()),

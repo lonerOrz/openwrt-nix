@@ -80,6 +80,7 @@ mod tests {
             force: false,
             no_sops: false,
             watchdog_timeout: 60,
+            verbose: false,
         }
     }
 
