@@ -38,7 +38,7 @@
   uci.packageManager = "opkg"; # or "apk"
   uci.packages = [ "-tcpdump" "htop" ];
   uci.packageSources = {
-    feeds = [ "src/gz custom https://dl.openwrt.org/packages" ];
+    opkgFeeds = [ "src/gz custom https://dl.openwrt.org/packages" ];
     localPackages = [ "./packages/luci-app-custom_1.0_all.ipk" ];
   };
 }

@@ -157,12 +157,19 @@ pub(crate) fn resolve_secrets(
         }
     }
 
-    if let Some(sources) = &mut root.package_sources
-        && let Some(feeds) = &mut sources.feeds
-    {
-        for feed in feeds {
-            let interpolated = interpolate_secrets(feed, secrets)?;
-            *feed = interpolated.into_owned();
+    if let Some(sources) = &mut root.package_sources {
+        for feeds in [
+            sources.opkg_feeds.as_mut(),
+            sources.apk_repositories.as_mut(),
+            sources.feeds.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            for feed in feeds {
+                let interpolated = interpolate_secrets(feed, secrets)?;
+                *feed = interpolated.into_owned();
+            }
         }
     }
 
@@ -436,6 +443,8 @@ mod tests {
     fn resolve_secrets_feeds() {
         let root = Root {
             package_sources: Some(PackageSources {
+                opkg_feeds: None,
+                apk_repositories: None,
                 feeds: Some(vec!["src/gz @repo_name@ https://example.com".into()]),
                 local_packages: None,
             }),
@@ -446,6 +455,24 @@ mod tests {
         let resolved = resolve_secrets(root, &secs).unwrap();
         let feeds = resolved.package_sources.unwrap().feeds.unwrap();
         assert_eq!(feeds[0], "src/gz custom https://example.com");
+    }
+
+    #[test]
+    fn resolve_secrets_apk_repositories() {
+        let root = Root {
+            package_sources: Some(PackageSources {
+                opkg_feeds: None,
+                apk_repositories: Some(vec!["https://@repo_host@/packages".into()]),
+                feeds: None,
+                local_packages: None,
+            }),
+            ..root(IndexMap::new())
+        };
+
+        let secs = secrets(&[("repo_host", "downloads.openwrt.org")]);
+        let resolved = resolve_secrets(root, &secs).unwrap();
+        let repos = resolved.package_sources.unwrap().apk_repositories.unwrap();
+        assert_eq!(repos[0], "https://downloads.openwrt.org/packages");
     }
 
     #[test]

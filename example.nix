@@ -190,7 +190,7 @@ in
     "htop"
   ];
   uci.packageSources = {
-    feeds = [
+    opkgFeeds = [
       "src/gz kiddin9 https://dl.openwrt.ai/packages/aarch64_cortex-a53/kiddin9"
     ];
     localPackages = [

@@ -32,7 +32,7 @@
     "htop"
   ];
   uci.packageSources = {
-    feeds = [
+    opkgFeeds = [
       "src/gz openwrt_base https://downloads.openwrt.org/releases/23.05.5/packages/x86_64/base"
       "src/gz openwrt_packages https://downloads.openwrt.org/releases/23.05.5/packages/x86_64/packages"
     ];

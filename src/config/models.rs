@@ -57,10 +57,21 @@ impl TryFrom<&str> for PkgBackend {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Default)]
 pub struct PackageSources {
+    /// Opkg-style feeds (`src/gz <name> <url>`). Written to
+    /// `/etc/opkg/customfeeds.conf` only when the target uses opkg.
+    #[serde(rename = "opkgFeeds", default)]
+    pub opkg_feeds: Option<Vec<String>>,
+    /// Apk repository URLs. Written to
+    /// `/etc/apk/repositories.d/customfeeds.list` only when the target uses apk.
+    #[serde(rename = "apkRepositories", default)]
+    pub apk_repositories: Option<Vec<String>>,
+    /// Deprecated unified feed list. On opkg it is treated as opkg feeds; on apk it is
+    /// treated as repository URLs. Prefer `opkgFeeds` / `apkRepositories`.
+    #[serde(default)]
     pub feeds: Option<Vec<String>>,
-    #[serde(rename = "localPackages")]
+    #[serde(rename = "localPackages", default)]
     pub local_packages: Option<Vec<String>>,
 }
 

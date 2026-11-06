@@ -23,10 +23,20 @@
       type = lib.types.listOf lib.types.str;
       description = "List of packages to install";
     };
+    packageSources.opkgFeeds = lib.mkOption {
+      default = [ ];
+      type = lib.types.listOf lib.types.str;
+      description = "Opkg-style feeds (src/gz <name> <url>). Written to /etc/opkg/customfeeds.conf only when the target uses opkg.";
+    };
+    packageSources.apkRepositories = lib.mkOption {
+      default = [ ];
+      type = lib.types.listOf lib.types.str;
+      description = "Apk repository URLs. Written to /etc/apk/repositories.d/customfeeds.list only when the target uses apk.";
+    };
     packageSources.feeds = lib.mkOption {
       default = [ ];
       type = lib.types.listOf lib.types.str;
-      description = "List of custom package feeds/repositories";
+      description = "Deprecated unified feed list. Prefer opkgFeeds (opkg) or apkRepositories (apk).";
     };
     packageSources.localPackages = lib.mkOption {
       default = [ ];
