@@ -462,10 +462,17 @@ pub fn run(
     let mut connected = false;
     for _ in 0..30 {
         std::thread::sleep(std::time::Duration::from_secs(2));
+        // Probe connectivity and best-effort cancel the rollback watchdog in a
+        // single call. The previous probe used `kill $(cat /tmp/.uci-watchdog-pid)`
+        // without `|| true`; when the pid file is absent or the watchdog has
+        // already fired, `kill` exits non-zero, so the `.is_ok()` gate reported
+        // "not connected" even on a healthy SSH link — wrongly triggering the
+        // rollback-failure error. `|| true` makes the call's exit status reflect
+        // the SSH connection itself, not the pid file's presence.
         if ssh
             .exec(
                 target,
-                "kill $(cat /tmp/.uci-watchdog-pid) 2>/dev/null",
+                "kill $(cat /tmp/.uci-watchdog-pid) 2>/dev/null || true",
                 None,
                 config,
             )

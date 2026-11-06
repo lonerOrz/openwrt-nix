@@ -22,11 +22,19 @@ impl PkgBackend {
         let quoted: Vec<String> = pkgs.iter().map(|p| shell_quote(p)).collect();
         match self {
             PkgBackend::Opkg => format!(
-                "if [ \"$NEED_INSTALL\" = true ]; then opkg update && opkg install {}; fi",
+                "if [ \"$NEED_INSTALL\" = true ]; then\n\
+                 for __nuci_try in 1 2 3 4 5; do\n\
+                 {{ opkg update && opkg install {}; }} && break\n\
+                 sleep 1\n\
+                 done\nfi",
                 quoted.join(" ")
             ),
             PkgBackend::Apk => format!(
-                "if [ \"$NEED_INSTALL\" = true ]; then apk add {}; fi",
+                "if [ \"$NEED_INSTALL\" = true ]; then\n\
+                 for __nuci_try in 1 2 3 4 5; do\n\
+                 apk add {} && break\n\
+                 sleep 1\n\
+                 done\nfi",
                 quoted.join(" ")
             ),
         }
@@ -36,13 +44,23 @@ impl PkgBackend {
         let quoted: Vec<String> = pkgs.iter().map(|p| shell_quote(p)).collect();
         match self {
             PkgBackend::Opkg => format!(
-                "if [ \"$NEED_REMOVE\" = true ]; then opkg remove {}; \
-                 if [ $? -ne 0 ]; then exit 1; fi; fi",
+                "if [ \"$NEED_REMOVE\" = true ]; then\n\
+                 __nuci_rc=1\n\
+                 for __nuci_try in 1 2 3 4 5; do\n\
+                 opkg remove {} && {{ __nuci_rc=0; break; }}\n\
+                 sleep 1\n\
+                 done\n\
+                 if [ $__nuci_rc -ne 0 ]; then exit 1; fi\nfi",
                 quoted.join(" ")
             ),
             PkgBackend::Apk => format!(
-                "if [ \"$NEED_REMOVE\" = true ]; then apk del {}; \
-                 if [ $? -ne 0 ]; then exit 1; fi; fi",
+                "if [ \"$NEED_REMOVE\" = true ]; then\n\
+                 __nuci_rc=1\n\
+                 for __nuci_try in 1 2 3 4 5; do\n\
+                 apk del {} && {{ __nuci_rc=0; break; }}\n\
+                 sleep 1\n\
+                 done\n\
+                 if [ $__nuci_rc -ne 0 ]; then exit 1; fi\nfi",
                 quoted.join(" ")
             ),
         }
@@ -213,6 +231,35 @@ pub(crate) fn serialize_package_management(
     sources: Option<&PackageSources>,
     packages: Option<&[String]>,
 ) -> Result<(), ConfigError> {
+    // Configure package feeds BEFORE install/remove so the manager can resolve
+    // the configured repositories. Unrecoverable container fact: the apk/opkg
+    // test images clear their default distfeeds, so a configured feed must be
+    // on disk before `apk add`/`opkg install` runs — otherwise the package
+    // fetch fails with no repositories configured.
+    if let Some(src_val) = sources
+        && let Some(feeds) = &src_val.feeds
+        && !feeds.is_empty()
+    {
+        writeln!(writer, "{}", backend.feed_lines(feeds)).unwrap();
+    }
+
+    if let Some(src_val) = sources
+        && let Some(local_pkgs) = &src_val.local_packages
+    {
+        for ipk_path_str in local_pkgs {
+            let ipk_path = Path::new(ipk_path_str);
+            if let Some(file_name) = ipk_path.file_name().and_then(|n| n.to_str()) {
+                let pkg_name = extract_package_name(file_name);
+                writeln!(
+                    writer,
+                    "{}",
+                    backend.local_install_block(pkg_name, file_name)
+                )
+                .unwrap();
+            }
+        }
+    }
+
     if let Some(pkgs) = packages
         && !pkgs.is_empty()
     {
@@ -259,30 +306,6 @@ pub(crate) fn serialize_package_management(
             writeln!(writer, "done").unwrap();
             writeln!(writer, "{}", backend.install_expr(&names)).unwrap();
         }
-    }
-
-    if let Some(src_val) = sources
-        && let Some(local_pkgs) = &src_val.local_packages
-    {
-        for ipk_path_str in local_pkgs {
-            let ipk_path = Path::new(ipk_path_str);
-            if let Some(file_name) = ipk_path.file_name().and_then(|n| n.to_str()) {
-                let pkg_name = extract_package_name(file_name);
-                writeln!(
-                    writer,
-                    "{}",
-                    backend.local_install_block(pkg_name, file_name)
-                )
-                .unwrap();
-            }
-        }
-    }
-
-    if let Some(src_val) = sources
-        && let Some(feeds) = &src_val.feeds
-        && !feeds.is_empty()
-    {
-        writeln!(writer, "{}", backend.feed_lines(feeds)).unwrap();
     }
 
     Ok(())
