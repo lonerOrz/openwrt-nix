@@ -6,6 +6,14 @@ fn is_valid_uci_identifier(s: &str) -> bool {
         && !s.as_bytes()[0].is_ascii_digit()
         && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
+fn is_valid_config_name(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    !bytes.is_empty()
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1..]
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
+}
 
 fn is_valid_uci_type(s: &str) -> bool {
     !s.is_empty()
@@ -44,10 +52,10 @@ fn validate_section_options(
 
 pub(crate) fn validate_root(root: &Root) -> Result<(), super::super::utils::error::ConfigError> {
     for (config_name, sections) in &root.settings {
-        if !is_valid_uci_identifier(config_name) {
+        if !is_valid_config_name(config_name) {
             return Err(super::super::utils::error::ConfigError::Validation(
                 format!(
-                    "Invalid config name '{config_name}': only [a-zA-Z0-9_] allowed (no digits at start)"
+                    "Invalid config name '{config_name}': must start with a letter and contain only [a-zA-Z0-9_-]"
                 ),
             ));
         }
@@ -221,13 +229,6 @@ mod tests {
     fn rejects_invalid_named_identifiers() {
         for (config, section, ty, options, expected) in [
             (
-                "network-config",
-                "lan",
-                "interface",
-                IndexMap::new(),
-                "Invalid config name",
-            ),
-            (
                 "3network",
                 "lan",
                 "interface",
@@ -265,6 +266,18 @@ mod tests {
         ] {
             assert_rejects(&named_cfg(config, section, ty, options), expected);
         }
+    }
+    #[test]
+    fn accepts_hyphenated_config_names() {
+        // Real OpenWrt config/package names (e.g. prometheus-node-exporter-lua)
+        // legitimately contain hyphens and must validate.
+        let root = named_cfg(
+            "prometheus-node-exporter-lua",
+            "main",
+            "prometheus-node-exporter-lua",
+            IndexMap::new(),
+        );
+        assert!(validate_root(&root).is_ok());
     }
 
     #[test]
