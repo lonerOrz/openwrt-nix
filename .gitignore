@@ -20,3 +20,6 @@ __pycache__/
 # Integration test artifacts (dynamically generated)
 tests/secrets.enc.json
 tests/packages/
+
+# `just upgrade` local download artifact
+openwrt.sysupgrade.itb
