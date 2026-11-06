@@ -161,8 +161,14 @@ pub(crate) fn serialize_uci(
                         }
                     }
 
-                    for (idx, list_obj) in arr.iter().enumerate() {
+                    // Anonymous sections are indexed per-type in UCI, so track a
+                    // separate counter for each type rather than the global position.
+                    let mut type_index: std::collections::HashMap<&str, usize> =
+                        std::collections::HashMap::new();
+                    for list_obj in arr.iter() {
                         let ty = list_type_of(list_obj, section_name);
+                        let idx = *type_index.entry(ty).or_insert(0);
+                        type_index.insert(ty, idx + 1);
                         writeln!(uci_cmds, "add {config_name} {ty}").unwrap();
 
                         for (option_name, option) in &list_obj.options {
@@ -432,7 +438,132 @@ mod tests {
         assert!(w.contains("add firewall rule"));
         assert!(w.contains("add firewall redirect"));
         assert!(w.contains("set firewall.@rule[0]"));
+        assert!(w.contains("set firewall.@redirect[0]"));
+    }
+    #[test]
+    fn serialize_heterogeneous_list_indexes_per_type() {
+        let mut configs = IndexMap::new();
+        let mut sections = IndexMap::new();
+        sections.insert(
+            "firewall".into(),
+            Section::List(vec![
+                SectionData {
+                    section_type: "rule".into(),
+                    options: IndexMap::from([("target".into(), Value::String("ACCEPT".into()))]),
+                },
+                SectionData {
+                    section_type: "redirect".into(),
+                    options: IndexMap::from([("dest".into(), Value::String("lan".into()))]),
+                },
+                SectionData {
+                    section_type: "rule".into(),
+                    options: IndexMap::from([("target".into(), Value::String("DROP".into()))]),
+                },
+            ]),
+        );
+        configs.insert("firewall".into(), sections);
+
+        let mut w = String::new();
+        serialize_uci(&mut w, &configs).unwrap();
+
+        assert!(w.contains("set firewall.@rule[0]"));
+        assert!(w.contains("set firewall.@redirect[0]"));
+        assert!(w.contains("set firewall.@rule[1]"));
+        assert!(!w.contains("@rule[2]"));
+    }
+
+    #[test]
+    fn serialize_heterogeneous_list_reversed_order() {
+        let mut configs = IndexMap::new();
+        let mut sections = IndexMap::new();
+        sections.insert(
+            "firewall".into(),
+            Section::List(vec![
+                SectionData {
+                    section_type: "redirect".into(),
+                    options: IndexMap::from([("dest".into(), Value::String("lan".into()))]),
+                },
+                SectionData {
+                    section_type: "rule".into(),
+                    options: IndexMap::from([("target".into(), Value::String("ACCEPT".into()))]),
+                },
+                SectionData {
+                    section_type: "redirect".into(),
+                    options: IndexMap::from([("dest".into(), Value::String("wan".into()))]),
+                },
+            ]),
+        );
+        configs.insert("firewall".into(), sections);
+
+        let mut w = String::new();
+        serialize_uci(&mut w, &configs).unwrap();
+
+        assert!(w.contains("set firewall.@redirect[0]"));
+        assert!(w.contains("set firewall.@rule[0]"));
         assert!(w.contains("set firewall.@redirect[1]"));
+    }
+
+    #[test]
+    fn serialize_homogeneous_list_counts_from_zero() {
+        let mut configs = IndexMap::new();
+        let mut sections = IndexMap::new();
+        sections.insert(
+            "firewall".into(),
+            Section::List(vec![
+                SectionData {
+                    section_type: "rule".into(),
+                    options: IndexMap::from([("target".into(), Value::String("ACCEPT".into()))]),
+                },
+                SectionData {
+                    section_type: "rule".into(),
+                    options: IndexMap::from([("target".into(), Value::String("DROP".into()))]),
+                },
+            ]),
+        );
+        configs.insert("firewall".into(), sections);
+
+        let mut w = String::new();
+        serialize_uci(&mut w, &configs).unwrap();
+
+        assert!(w.contains("set firewall.@rule[0]"));
+        assert!(w.contains("set firewall.@rule[1]"));
+        assert!(!w.contains("@rule[2]"));
+    }
+
+    #[test]
+    fn serialize_heterogeneous_list_is_deterministic() {
+        let build = || {
+            let mut configs = IndexMap::new();
+            let mut sections = IndexMap::new();
+            sections.insert(
+                "firewall".into(),
+                Section::List(vec![
+                    SectionData {
+                        section_type: "rule".into(),
+                        options: IndexMap::from([(
+                            "target".into(),
+                            Value::String("ACCEPT".into()),
+                        )]),
+                    },
+                    SectionData {
+                        section_type: "redirect".into(),
+                        options: IndexMap::from([("dest".into(), Value::String("lan".into()))]),
+                    },
+                    SectionData {
+                        section_type: "rule".into(),
+                        options: IndexMap::from([("target".into(), Value::String("DROP".into()))]),
+                    },
+                ]),
+            );
+            configs.insert("firewall".into(), sections);
+            configs
+        };
+
+        let mut a = String::new();
+        serialize_uci(&mut a, &build()).unwrap();
+        let mut b = String::new();
+        serialize_uci(&mut b, &build()).unwrap();
+        assert_eq!(a, b);
     }
 
     #[test]
