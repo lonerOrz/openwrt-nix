@@ -1,4 +1,4 @@
-{ pkgs, lib, ... }:
+{ pkgs, lib, config, ... }:
 {
   options.uci = {
     packageManager = lib.mkOption {
@@ -7,7 +7,15 @@
         "opkg"
         "apk"
       ];
-      description = "Package manager backend. Use \"apk\" for OpenWrt 25.12+ (default on current stable, apk became the default at 24.10); use \"opkg\" for older releases still on opkg. Runtime discovery verifies the target actually provides the selected backend.";
+      apply =
+        v:
+        if v == "opkg" && config.uci.packageSources.apkRepositories != [ ] then
+          throw "uci.packageSources.apkRepositories may not be set on an opkg target; use uci.packageSources.opkgFeeds"
+        else if v == "apk" && config.uci.packageSources.opkgFeeds != [ ] then
+          throw "uci.packageSources.opkgFeeds may not be set on an apk target; use uci.packageSources.apkRepositories"
+        else
+          v;
+      description = "Package manager backend. Use \"apk\" for OpenWrt 25.12+ (default on current stable, apk became the default at 24.10); use \"opkg\" for older releases still on opkg. Runtime discovery verifies the target actually provides the selected backend. The package source list must match the backend: opkg targets use packageSources.opkgFeeds, apk targets use packageSources.apkRepositories; setting the other one is an error.";
     };
     settings = lib.mkOption {
       default = { };
@@ -26,17 +34,12 @@
     packageSources.opkgFeeds = lib.mkOption {
       default = [ ];
       type = lib.types.listOf lib.types.str;
-      description = "Opkg-style feeds (src/gz <name> <url>). Written to /etc/opkg/customfeeds.conf only when the target uses opkg.";
+      description = "Opkg-style feeds (src/gz <name> <url>). Written to /etc/opkg/customfeeds.conf only when the target uses opkg. Mutually exclusive with apkRepositories on opkg targets.";
     };
     packageSources.apkRepositories = lib.mkOption {
       default = [ ];
       type = lib.types.listOf lib.types.str;
-      description = "Apk repository URLs. Written to /etc/apk/repositories.d/customfeeds.list only when the target uses apk.";
-    };
-    packageSources.feeds = lib.mkOption {
-      default = [ ];
-      type = lib.types.listOf lib.types.str;
-      description = "Deprecated unified feed list. Prefer opkgFeeds (opkg) or apkRepositories (apk).";
+      description = "Apk repository URLs. Written to /etc/apk/repositories.d/customfeeds.list only when the target uses apk. Mutually exclusive with opkgFeeds on apk targets.";
     };
     packageSources.localPackages = lib.mkOption {
       default = [ ];

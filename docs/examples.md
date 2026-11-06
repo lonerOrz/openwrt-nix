@@ -33,12 +33,18 @@
 
 ## Package Management & Feeds
 
+`opkgFeeds` and `apkRepositories` are mutually exclusive: the source list must
+match the selected backend. Setting the other one is an error at `nix eval` time.
+
 ```nix
 {
   uci.packageManager = "opkg"; # or "apk"
   uci.packages = [ "-tcpdump" "htop" ];
   uci.packageSources = {
+    # opkg target:
     opkgFeeds = [ "src/gz custom https://dl.openwrt.org/packages" ];
+    # apk target instead:
+    # apkRepositories = [ "https://dl.openwrt.org/packages" ];
     localPackages = [ "./packages/luci-app-custom_1.0_all.ipk" ];
   };
 }

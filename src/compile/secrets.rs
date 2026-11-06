@@ -161,7 +161,6 @@ pub(crate) fn resolve_secrets(
         for feeds in [
             sources.opkg_feeds.as_mut(),
             sources.apk_repositories.as_mut(),
-            sources.feeds.as_mut(),
         ]
         .into_iter()
         .flatten()
@@ -440,12 +439,11 @@ mod tests {
     }
 
     #[test]
-    fn resolve_secrets_feeds() {
+    fn resolve_secrets_opkg_feeds() {
         let root = Root {
             package_sources: Some(PackageSources {
-                opkg_feeds: None,
+                opkg_feeds: Some(vec!["src/gz @repo_name@ https://example.com".into()]),
                 apk_repositories: None,
-                feeds: Some(vec!["src/gz @repo_name@ https://example.com".into()]),
                 local_packages: None,
             }),
             ..root(IndexMap::new())
@@ -453,7 +451,7 @@ mod tests {
 
         let secs = secrets(&[("repo_name", "custom")]);
         let resolved = resolve_secrets(root, &secs).unwrap();
-        let feeds = resolved.package_sources.unwrap().feeds.unwrap();
+        let feeds = resolved.package_sources.unwrap().opkg_feeds.unwrap();
         assert_eq!(feeds[0], "src/gz custom https://example.com");
     }
 
@@ -463,7 +461,6 @@ mod tests {
             package_sources: Some(PackageSources {
                 opkg_feeds: None,
                 apk_repositories: Some(vec!["https://@repo_host@/packages".into()]),
-                feeds: None,
                 local_packages: None,
             }),
             ..root(IndexMap::new())

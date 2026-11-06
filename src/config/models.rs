@@ -67,10 +67,6 @@ pub struct PackageSources {
     /// `/etc/apk/repositories.d/customfeeds.list` only when the target uses apk.
     #[serde(rename = "apkRepositories", default)]
     pub apk_repositories: Option<Vec<String>>,
-    /// Deprecated unified feed list. On opkg it is treated as opkg feeds; on apk it is
-    /// treated as repository URLs. Prefer `opkgFeeds` / `apkRepositories`.
-    #[serde(default)]
-    pub feeds: Option<Vec<String>>,
     #[serde(rename = "localPackages", default)]
     pub local_packages: Option<Vec<String>>,
 }

@@ -106,51 +106,39 @@ impl PkgBackend {
     }
 }
 
-/// Resolve the effective feed/repository lines for the given backend.
+/// Resolve the package source lines for the given backend.
 ///
-/// `opkgFeeds` wins on opkg, `apkRepositories` wins on apk; otherwise the deprecated
-/// unified `feeds` field is used as a fallback. On apk, an opkg-style `src/...` line in
-/// `feeds` is rejected (never silently written into the apk repository file).
+/// `opkgFeeds` is only valid on an opkg target; `apkRepositories` only on an apk target.
+/// Supplying a field for the wrong backend is a configuration error (the two are
+/// mutually exclusive per target). An empty list means "no custom sources".
 fn resolve_feeds(
     backend: PkgBackend,
     sources: &PackageSources,
 ) -> Result<Option<Vec<String>>, ConfigError> {
     match backend {
         PkgBackend::Opkg => {
-            if let Some(opkg) = &sources.opkg_feeds
-                && !opkg.is_empty()
+            if sources
+                .apk_repositories
+                .as_ref()
+                .is_some_and(|r| !r.is_empty())
             {
-                return Ok(Some(opkg.clone()));
+                return Err(ConfigError::Validation(
+                    "packageSources.apkRepositories is set but the target uses opkg; remove it \
+                     (opkg targets use packageSources.opkgFeeds)"
+                        .into(),
+                ));
             }
-            if let Some(feeds) = &sources.feeds {
-                eprintln!(
-                    "Warning: packageSources.feeds is deprecated on opkg; use packageSources.opkgFeeds"
-                );
-                return Ok(Some(feeds.clone()));
-            }
-            Ok(None)
+            Ok(sources.opkg_feeds.clone())
         }
         PkgBackend::Apk => {
-            if let Some(apk) = &sources.apk_repositories
-                && !apk.is_empty()
-            {
-                return Ok(Some(apk.clone()));
+            if sources.opkg_feeds.as_ref().is_some_and(|f| !f.is_empty()) {
+                return Err(ConfigError::Validation(
+                    "packageSources.opkgFeeds is set but the target uses apk; remove it (apk \
+                     targets use packageSources.apkRepositories)"
+                        .into(),
+                ));
             }
-            if let Some(feeds) = &sources.feeds {
-                if feeds.iter().any(|f| f.trim_start().starts_with("src/")) {
-                    return Err(ConfigError::Validation(
-                        "packageSources.feeds contains opkg-style 'src/...' lines but the target \
-                         uses apk; use packageSources.apkRepositories for repository URLs"
-                            .into(),
-                    ));
-                }
-                eprintln!(
-                    "Warning: packageSources.feeds is deprecated on apk; use \
-                     packageSources.apkRepositories"
-                );
-                return Ok(Some(feeds.clone()));
-            }
-            Ok(None)
+            Ok(sources.apk_repositories.clone())
         }
     }
 }
@@ -740,9 +728,8 @@ mod tests {
     fn test_serialize_opkg_feeds_opkg() {
         let mut w = String::new();
         let sources = PackageSources {
-            opkg_feeds: None,
+            opkg_feeds: Some(vec!["src/gz custom 'test' https://example.com".into()]),
             apk_repositories: None,
-            feeds: Some(vec!["src/gz custom 'test' https://example.com".into()]),
             local_packages: None,
         };
         serialize_package_management(&mut w, PkgBackend::Opkg, Some(&sources), None).unwrap();
@@ -751,40 +738,11 @@ mod tests {
     }
 
     #[test]
-    fn test_serialize_opkg_feeds_apk() {
-        let mut w = String::new();
-        let sources = PackageSources {
-            opkg_feeds: None,
-            apk_repositories: None,
-            feeds: Some(vec!["https://example.com/packages".into()]),
-            local_packages: None,
-        };
-        serialize_package_management(&mut w, PkgBackend::Apk, Some(&sources), None).unwrap();
-        assert!(w.contains("/etc/apk/repositories.d/customfeeds.list"));
-        assert!(w.contains("printf '%s\\n' 'https://example.com/packages'"));
-    }
-
-    #[test]
-    fn test_opkg_feeds_field_preferred_over_feeds() {
-        let mut w = String::new();
-        let sources = PackageSources {
-            opkg_feeds: Some(vec!["src/gz typed https://example.com".into()]),
-            apk_repositories: None,
-            feeds: Some(vec!["src/gz legacy https://legacy.example".into()]),
-            local_packages: None,
-        };
-        serialize_package_management(&mut w, PkgBackend::Opkg, Some(&sources), None).unwrap();
-        assert!(w.contains("src/gz typed https://example.com"));
-        assert!(!w.contains("src/gz legacy https://legacy.example"));
-    }
-
-    #[test]
-    fn test_apk_repositories_field_written() {
+    fn test_apk_repositories_written_on_apk() {
         let mut w = String::new();
         let sources = PackageSources {
             opkg_feeds: None,
             apk_repositories: Some(vec!["https://example.com/packages".into()]),
-            feeds: None,
             local_packages: None,
         };
         serialize_package_management(&mut w, PkgBackend::Apk, Some(&sources), None).unwrap();
@@ -793,17 +751,57 @@ mod tests {
     }
 
     #[test]
-    fn test_apk_rejects_opkg_style_feeds() {
+    fn test_opkg_feeds_ignored_on_apk_target() {
         let mut w = String::new();
         let sources = PackageSources {
-            opkg_feeds: None,
+            opkg_feeds: Some(vec!["src/gz custom https://example.com".into()]),
             apk_repositories: None,
-            feeds: Some(vec!["src/gz custom https://example.com".into()]),
             local_packages: None,
         };
         let err = serialize_package_management(&mut w, PkgBackend::Apk, Some(&sources), None)
             .unwrap_err();
-        assert!(format!("{err}").contains("opkg-style 'src/...' lines"));
+        assert!(format!("{err}").contains("opkgFeeds is set but the target uses apk"));
+    }
+
+    #[test]
+    fn test_apk_repositories_ignored_on_opkg_target() {
+        let mut w = String::new();
+        let sources = PackageSources {
+            opkg_feeds: None,
+            apk_repositories: Some(vec!["https://example.com/packages".into()]),
+            local_packages: None,
+        };
+        let err = serialize_package_management(&mut w, PkgBackend::Opkg, Some(&sources), None)
+            .unwrap_err();
+        assert!(format!("{err}").contains("apkRepositories is set but the target uses opkg"));
+    }
+
+    #[test]
+    fn test_no_feeds_writes_nothing() {
+        let mut w = String::new();
+        let sources = PackageSources {
+            opkg_feeds: None,
+            apk_repositories: None,
+            local_packages: None,
+        };
+        serialize_package_management(&mut w, PkgBackend::Apk, Some(&sources), None).unwrap();
+        assert!(!w.contains("customfeeds"));
+    }
+
+    #[test]
+    fn test_empty_source_lists_are_allowed_on_either_backend() {
+        // The Nix module always emits both lists (empty by default); an empty list
+        // for the other backend must not be treated as a misconfiguration.
+        let sources = PackageSources {
+            opkg_feeds: Some(vec![]),
+            apk_repositories: Some(vec![]),
+            local_packages: None,
+        };
+        for backend in [PkgBackend::Opkg, PkgBackend::Apk] {
+            let mut w = String::new();
+            serialize_package_management(&mut w, backend, Some(&sources), None).unwrap();
+            assert!(!w.contains("customfeeds"));
+        }
     }
 
     #[test]
@@ -872,7 +870,7 @@ mod tests {
         let sources = PackageSources {
             opkg_feeds: None,
             apk_repositories: None,
-            feeds: None,
+
             local_packages: Some(vec!["./packages/test_1.0_all.ipk".into()]),
         };
         serialize_package_management(&mut w, PkgBackend::Opkg, Some(&sources), None).unwrap();
@@ -886,7 +884,7 @@ mod tests {
         let sources = PackageSources {
             opkg_feeds: None,
             apk_repositories: None,
-            feeds: None,
+
             local_packages: Some(vec!["./packages/test_1.0_all.apk".into()]),
         };
         serialize_package_management(&mut w, PkgBackend::Apk, Some(&sources), None).unwrap();
