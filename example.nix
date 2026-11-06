@@ -7,6 +7,7 @@ let
   tsig_key = if isBootstrap then "CHANGE_ME_ON_DEPLOY" else "@tsig_key@";
 in
 {
+  uci.packageManager = "apk";
   uci.settings = {
     # The block below will translate to the following uci settings:
     # root@OpenWrt:~# uci show dropbear
@@ -190,12 +191,8 @@ in
     "htop"
   ];
   uci.packageSources = {
-    opkgFeeds = [
-      "src/gz kiddin9 https://dl.openwrt.ai/packages/aarch64_cortex-a53/kiddin9"
-    ];
-    localPackages = [
-      "./packages/luci-app-nlbwmon_0.3-1_all.ipk"
-      "./packages/luci-i18n-nlbwmon-zh-cn_0.3-1_all.ipk"
+    apkRepositories = [
+      "https://dl.openwrt.ai/packages/aarch64_cortex-a53/kiddin9"
     ];
   };
   uci.sshKeys = [
