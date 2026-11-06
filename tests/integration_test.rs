@@ -441,7 +441,6 @@ async fn test_smart_reload_fallback() {
         }
         target.sh_inner("rm -f /tmp/reload_history");
         target.reset_uci_state_inner();
-        // The reload is now async (delayed 1s background). Wait for it to complete.
         target.wait_ssh(Duration::from_secs(10));
         std::thread::sleep(Duration::from_secs(3));
         let hist = target.sh_inner("cat /tmp/reload_history 2>/dev/null");
@@ -471,7 +470,6 @@ async fn test_smart_reload_primary() {
     target.sh("printf '#!/bin/sh\\ntouch /tmp/.reload_config_primary\\n' > /sbin/reload_config && chmod +x /sbin/reload_config");
     target.sh("rm -f /tmp/.reload_config_primary");
     target.reset_uci_state();
-    // Wait for async reload to fire (1s delay + processing time)
     target.wait_ssh(Duration::from_secs(10));
     std::thread::sleep(Duration::from_secs(3));
     assert!(
@@ -598,10 +596,6 @@ fn test_nested_and_null_values() {
             r#"{"packageManager":"opkg","settings":{"x":{"s":{"_type":"t","k":null}}}"#,
         ),
         (
-            "hyphen config",
-            r#"{"packageManager":"opkg","settings":{"my-config":{}}}"#,
-        ),
-        (
             "hyphen option",
             r#"{"packageManager":"opkg","settings":{"network":{"lan":{"_type":"interface","ip-address":"10.0.0.1"}}}}"#,
         ),
@@ -663,16 +657,14 @@ async fn test_custom_file_text_apk() {
 }
 
 #[test]
-fn test_hyphen_in_config_name_rejected() {
+fn test_hyphen_in_config_name_accepted() {
+    // Real OpenWrt config names (e.g. prometheus-node-exporter-lua) contain hyphens.
     let json = serde_json::json!({"packageManager": "opkg", "settings": {"my-config": {}}});
     let path = write_tmp_json(json.to_string());
     let result = compile_config(&path, None, true, None);
-    assert!(result.is_err(), "expected error for hyphenated config name");
     assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("Invalid config name")
+        result.is_ok(),
+        "hyphenated config name should compile: {result:?}"
     );
 }
 
