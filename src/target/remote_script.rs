@@ -1,10 +1,7 @@
-//! Renders the remote deploy script from a resolved configuration.
+//! Renders the remote deploy script from an already secret-resolved `Root`.
 //!
-//! This module is a pure renderer: given a `Root` (already secret-resolved),
-//! the interpolated secrets, and the UCI command batch, it produces the shell
-//! script string that `target::deploy` will ship over SSH. It performs no IO
-//! and does not execute anything — that separation is what lets the deploy
-//! orchestrator stay a thin coordinator.
+//! Pure renderer: no IO, no execution. That separation keeps the deploy
+//! orchestrator a thin coordinator.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -12,7 +9,6 @@ use std::collections::HashSet;
 
 use crate::config::models::Root;
 
-/// Build the reload / `reload_config` command block for the modified configs.
 fn reload_commands(modified: &[String], service_map: &BTreeMap<String, String>) -> String {
     if modified.is_empty() {
         return "if [ -x /sbin/reload_config ]; then /sbin/reload_config; fi\n".to_string();
@@ -37,8 +33,9 @@ fn reload_commands(modified: &[String], service_map: &BTreeMap<String, String>) 
     out
 }
 
-/// procd init script installed as `S15nuci_rollback` that restores `/etc/config`
-/// on boot if the watchdog triggers or power-loss occurs.
+/// Installs procd init script `S15nuci_rollback`, which restores `/etc/config`
+/// from the backup on next boot if a rollback is still pending (e.g. after a
+/// power loss or failed deploy).
 fn boot_rollback_hook() -> String {
     let mut s = String::from("cp -a /etc/config /etc/.uci-rollback-backup\n");
     s.push_str("mkdir -p /etc/init.d /etc/rc.d\n");
@@ -58,12 +55,11 @@ fn boot_rollback_hook() -> String {
     s
 }
 
-/// Render the authorized-keys block: joins declared SSH keys, appends the active
-/// deployer key to prevent lockout when it isn't already present, and writes
-/// `/etc/dropbear/authorized_keys`. `deployer_key` is `None` when no local agent
-/// key is available — the caller is warned but the block is still emitted for any
-/// configured keys. Pure string assembly — the `eprintln!` warnings are the only
-/// side effect and are preserved from the original inline logic.
+/// Joins the declared SSH keys and appends the active deployer key to prevent
+/// lockout when it isn't already present, then writes
+/// `/etc/dropbear/authorized_keys`. `deployer_key` is `None` when no local
+/// agent key is available — the caller is warned but the block is still emitted
+/// for any configured keys. The `eprintln!` warnings are the only side effect.
 fn render_ssh_keys(keys: &[String], deployer_key: Option<&str>) -> String {
     if keys.is_empty() {
         return String::new();
@@ -92,8 +88,8 @@ fn render_ssh_keys(keys: &[String], deployer_key: Option<&str>) -> String {
     )
 }
 
-/// Render the root password block. Uses `chpasswd` when present, otherwise falls
-/// back to `passwd`. Emits nothing when `root_password` is absent or empty.
+/// Uses `chpasswd` when available, else falls back to `passwd`. Emits nothing
+/// when `root_password` is absent or empty.
 fn render_root_password(root_password: &str) -> String {
     if root_password.is_empty() {
         return String::new();
@@ -107,14 +103,14 @@ fn render_root_password(root_password: &str) -> String {
     )
 }
 
-/// Render the detach-on-disconnect watchdog plus the foreground reload tail.
+/// Detach-on-disconnect watchdog plus a foreground reload tail.
 ///
-/// The watchdog runs `sleep {watchdog_timeout}` in a `trap '' HUP` subshell so it
-/// survives SSH session loss; if a rollback backup still exists when it fires, it
-/// restores `/etc/config` and re-runs the reload commands before clearing state.
-/// The separate `( sleep 1; {reload_cmds} ) &` tail lets `/tmp/deploy.sh` exit 0
-/// first so a foreground network/Dropbear reload doesn't sever the SSH link.
-/// Pure string assembly — no side effects.
+/// The watchdog runs `sleep {watchdog_timeout}` in a `trap '' HUP` subshell so
+/// it survives SSH session loss; if a rollback backup still exists when it
+/// fires, it restores `/etc/config` and re-runs the reload commands before
+/// clearing state. The separate `( sleep 1; {reload_cmds} ) &` tail lets
+/// `/tmp/deploy.sh` exit 0 first so a foreground network/Dropbear reload
+/// doesn't sever the SSH link.
 fn render_watchdog(reload_cmds: &str, watchdog_timeout: u64) -> String {
     format!(
         "( trap '' HUP; sleep {watchdog_timeout}; \
@@ -129,14 +125,9 @@ fn render_watchdog(reload_cmds: &str, watchdog_timeout: u64) -> String {
     )
 }
 
-/// Render the full remote script: ssh keys, root password, files, the boot
-/// rollback hook, the UCI command batch, and the detached watchdog that reverts
-/// on timeout. Pure string assembly — no side effects. When `verbose` is set,
-/// the script enables `set -x` tracing and emits a `[nuci] stage:` banner before
-/// each logical stage so `--verbose` surfaces an ordered, per-stage view.
 /// All inputs needed to render the remote deploy script. Bundling them in one
-/// struct keeps `build_remote_script` a single-argument pure function and avoids
-/// an over-long parameter list.
+/// struct keeps `build_remote_script` a single-argument pure function and
+/// avoids an over-long parameter list.
 pub struct RenderInput<'a> {
     pub root: &'a Root,
     pub secrets: &'a HashMap<String, String>,
@@ -148,11 +139,13 @@ pub struct RenderInput<'a> {
     pub verbose: bool,
 }
 
-/// Render the full remote script: ssh keys, root password, files, the boot
-/// rollback hook, the UCI command batch, and the detached watchdog that reverts
-/// on timeout. Pure string assembly — no side effects. When `verbose` is set,
-/// the script enables `set -x` tracing and emits a `[nuci] stage:` banner before
-/// each logical stage so `--verbose` surfaces an ordered, per-stage view.
+/// Renders the full remote script: SSH keys, root password, files, the boot
+/// rollback hook, the UCI command batch, and the detached watchdog that
+/// reverts on timeout.
+///
+/// When `verbose` is set, the script enables `set -x` tracing and emits a
+/// `[nuci] stage:` banner before each logical stage so `--verbose` surfaces an
+/// ordered, per-stage view.
 pub fn build_remote_script(input: &RenderInput) -> String {
     let RenderInput {
         root,
@@ -167,9 +160,6 @@ pub fn build_remote_script(input: &RenderInput) -> String {
     let mut script = String::with_capacity(4096);
 
     if *verbose {
-        // Trace every command (with its stdout/stderr) to stderr, and emit a
-        // machine-scannable banner before each logical stage so `--verbose`
-        // surfaces an ordered, per-stage view of the deploy instead of silent stdout.
         script.push_str("set -x\n");
     }
     let stage = |script: &mut String, name: &str| {

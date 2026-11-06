@@ -545,9 +545,7 @@ mod tests {
 
     #[test]
     fn resolve_secrets_file_base64_not_interpolated() {
-        // Base64 content must NOT be interpolated: substitution would corrupt the
-        // encoded bytes (an @placeholder@ inside base64 rarely occurs, but the rule
-        // is structural — base64 is never a secret-interpolation target).
+        // Base64 must not be interpolated — substitution would corrupt the encoded bytes.
         let root = Root {
             files: Some(vec![crate::config::models::File {
                 path: "/usr/bin/blob".into(),
@@ -777,7 +775,6 @@ mod tests {
     fn decrypt_sops_mem_conflict_errors() {
         use std::process::Command;
 
-        // Skip gracefully when sops/age tooling is unavailable.
         if Command::new("sops").arg("--version").output().is_err()
             || Command::new("age-keygen").arg("--help").output().is_err()
         {
@@ -785,7 +782,6 @@ mod tests {
             return;
         }
 
-        // Generate an age key pair.
         let key_home = TempDir::new().unwrap();
         let key_file = key_home.path().join("keys.txt");
         let keygen = Command::new("age-keygen")

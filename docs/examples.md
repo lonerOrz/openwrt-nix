@@ -18,9 +18,8 @@
 
 ## Wireless & SOPS Secrets
 
-Secrets are referenced with the `@name@` placeholder syntax (project-local; note
-this is **not** sops-nix's `{{name}}` template syntax). At `nuci compile` time the
-placeholder is resolved in-memory from the decrypted SOPS values.
+Secrets use the `@name@` placeholder syntax (project-local; **not** sops-nix's
+`{{name}}`) resolved in-memory from decrypted SOPS values at `nuci compile` time.
 
 Interpolation applies to an explicit whitelist of fields:
 

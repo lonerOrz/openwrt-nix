@@ -28,8 +28,7 @@ impl Target {
     pub async fn new(role: &str) -> Option<Self> {
         let engine = std::env::var("CONTAINER_ENGINE").unwrap_or_else(|_| "podman".to_string());
 
-        // Resolution priority: explicit DOCKER_HOST > rootless default > rootful fallback.
-        // An explicitly provided DOCKER_HOST is always respected and never overwritten.
+        // Resolution priority: explicit DOCKER_HOST > rootless > rootful fallback.
         let docker_host = if std::env::var("DOCKER_HOST").is_ok() {
             std::env::var("DOCKER_HOST").unwrap()
         } else if engine == "podman" {

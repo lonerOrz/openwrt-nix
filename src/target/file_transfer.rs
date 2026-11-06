@@ -1,11 +1,10 @@
 //! Local-package transfer and file-deploy rendering.
 //!
 //! Two responsibilities live here:
-//! - `render_file_block`: pure rendering of the remote file-write section of the
-//!   deploy script (moved out of `remote_script::build_remote_script`).
-//! - `transfer_packages`: bundles declared local packages into a tar stream and
-//!   ships it to the target through the injected `SshExec` transport, so it no
-//!   longer bypasses the trait by calling the free `ssh_exec` function.
+//! - `render_file_block`: renders the remote file-write section of the deploy
+//!   script (per-file `mkdir`, guarded write, mode bits).
+//! - `transfer_packages`: bundles declared local packages into a tar and ships
+//!   them through the injected `SshExec` transport.
 
 use std::path::Path;
 
@@ -33,9 +32,8 @@ pub fn render_file_block(files: &[File]) -> String {
         let indent = if file.checksum.is_some() { "    " } else { "" };
         script.push_str(&guard_open);
 
-        // Unrecoverable OpenWrt Busybox limitation: base64 may not be available in
-        // minimal rootfs images. Text files use POSIX cat heredoc for zero-dependency.
-        // Only explicit base64 payloads use decode to avoid re-encoding.
+        // Busybox on minimal rootfs images may lack base64; text uses a POSIX
+        // heredoc, and only explicit base64 payloads are decoded (never re-encoded).
         match &file.content {
             FileContent::Text(text) => {
                 script.push_str(&format!("{indent}cat > '{dest}' <<'NUCI_FILE_{i}_EOF'\n"));

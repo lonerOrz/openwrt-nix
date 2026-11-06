@@ -1,19 +1,10 @@
 #!/usr/bin/env bash
-# verbose-smoke.sh — stage/smoke test for `nuci deploy --verbose`.
-#
-# Shows the difference between a normal deploy (remote stdout discarded) and a
-# `--verbose` deploy (per-stage banners + `set -x` command tracing).
-#
-# Usage:
-#   ./examples/verbose-smoke.sh                 # auto: spin a throwaway apk container
-#   ./examples/verbose-smoke.sh TARGET KEY     # real box, e.g. root@192.168.1.1 ~/.ssh/id_ed25519
-#
+# Stage/smoke test for `nuci deploy --verbose`.
+# Auto mode spins a throwaway apk container; pass TARGET KEY to use a real box.
 # In auto mode an ephemeral ed25519 key is generated and its public half injected
-# into the container's authorized_keys, so no external SSH key is required. If you
-# pass TARGET KEY, your own key is used and the demo's sshKeys entry is ignored.
-#
-# The demo config lives at examples/demo.json. Its sshKeys placeholder only
-# matters when deploying to a real box without passing a key.
+# into the container's authorized_keys, so no external SSH key is required.
+# The demo config examples/demo.json: its sshKeys placeholder only matters when
+# deploying to a real box without passing a key.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

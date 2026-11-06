@@ -142,7 +142,7 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), super::super::utils::erro
                     format!("files[{i}].path must not contain '..': {path}"),
                 ));
             }
-            // Empty content allowed — writes a zero-byte file (touch-style flags).
+            // Empty content allowed: writes a zero-byte file.
         }
     }
 
@@ -167,7 +167,6 @@ mod tests {
             files: None,
         }
     }
-
     fn named_cfg(
         config: &str,
         section: &str,
@@ -269,8 +268,7 @@ mod tests {
     }
     #[test]
     fn accepts_hyphenated_config_names() {
-        // Real OpenWrt config/package names (e.g. prometheus-node-exporter-lua)
-        // legitimately contain hyphens and must validate.
+        // Real OpenWrt config names (e.g. prometheus-node-exporter-lua) may contain hyphens.
         let root = named_cfg(
             "prometheus-node-exporter-lua",
             "main",

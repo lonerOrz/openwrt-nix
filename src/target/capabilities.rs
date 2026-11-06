@@ -10,14 +10,11 @@ use crate::config::models::PkgBackend;
 use crate::target::deploy::{DeployConfig, SshExec};
 use crate::utils::error::ConfigError;
 
-/// Shell snippet that prints `apk`, `opkg`, or `none` depending on which package
-/// manager binary is present on the target.
 pub(crate) const PKG_MGR_PROBE: &str = "\
 if command -v apk >/dev/null 2>&1; then echo apk; \
 elif command -v opkg >/dev/null 2>&1; then echo opkg; \
 else echo none; fi";
 
-/// Probe the target over SSH and return the package manager it actually provides.
 pub fn discover_package_manager(
     ssh: &dyn SshExec,
     target: &str,
@@ -33,11 +30,8 @@ pub fn discover_package_manager(
     }
 }
 
-/// Reconcile the JSON-declared backend with the probed backend.
-///
-/// The probe is authoritative. A mismatch is surfaced via `mismatch` so callers can
-/// warn, but the returned backend is always the detected one — we never emit commands
-/// for a package manager the target does not have.
+/// Reconcile the declared backend with the probed one: the probed backend is
+/// always returned; a mismatch is reported as an error naming both values.
 pub fn resolve_backend(declared: &str, discovered: PkgBackend) -> Result<PkgBackend, ConfigError> {
     // Validate the declared value first: a typo like "apt" must still be rejected.
     let declared = PkgBackend::try_from(declared)?;

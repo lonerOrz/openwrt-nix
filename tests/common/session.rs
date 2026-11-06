@@ -4,8 +4,7 @@ use std::process::Command;
 use std::sync::OnceLock;
 use tokio::sync::OnceCell;
 
-// Performance Decision: Sandbox creates dynamic test artifacts in /tmp/nuci_test_sandbox_*
-// to prevent Git working tree pollution and ensure parallel isolation across test sessions.
+// Use a /tmp sandbox to avoid Git working tree pollution and isolate parallel test sessions.
 pub struct SessionArtifacts {
     #[allow(dead_code)]
     pub session_dir: PathBuf,
@@ -54,7 +53,7 @@ pub fn get_session_artifacts() -> &'static SessionArtifacts {
             &encrypted_secrets,
         );
 
-        // Performance Decision: nix build uses --impure --expr to evaluate dynamic sandbox nix configs without creating git flakes.
+        // nix build uses --impure --expr to evaluate the sandbox configs without creating git flakes.
         let opkg_json = eval_nix_json(&manifest_dir, &temp_opkg_nix);
         let apk_json = eval_nix_json(&manifest_dir, &temp_apk_nix);
 

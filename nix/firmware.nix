@@ -21,8 +21,6 @@
       release ? null,
     }:
     let
-      # 1. Evaluate Nix module — override secrets to empty so isBootstrap = true
-      #    (plain passwords instead of @placeholder@)
       res = lib.evalModules {
         modules = [
           {
@@ -31,7 +29,8 @@
             };
           }
           ./module-options.nix
-          # ponytail: force secrets empty — firmware has no SOPS keys in sandbox
+          # Secrets forced empty: firmware builds have no SOPS keys, so
+          # isBootstrap = true and plain passwords are used instead of @placeholder@.
           {
             uci.secrets.sops.files = lib.mkForce [ ];
           }
@@ -40,8 +39,7 @@
       };
       cfg = res.config.uci;
 
-      # 2. Generate JSON — secrets field omitted so nuci sees no SOPS metadata
-      #    Any @placeholder@ in settings will cause compile to error (good — catches misconfig early)
+      # Omitting the secrets field means any @placeholder@ in settings fails to compile — catches misconfig early.
       filesJson = map (
         f:
         {
@@ -74,7 +72,7 @@
         files = filesJson;
       };
 
-      # 3. uci-defaults bootstrap script — single derivation, no IFD
+      # single derivation, no IFD
       extraFiles =
         pkgs.runCommand "openwrt-extra-files"
           {
@@ -99,18 +97,17 @@
             chmod +x $out/etc/uci-defaults/99-nuci-bootstrap
           '';
 
-      # 5. Resolve release
+      # resolve release
       resolvedRelease =
         if release != null then
           release
         else
           lib.trim (builtins.readFile "${openwrt-imagebuilder}/cache/LATEST_RELEASE");
 
-      # 6. Identify hardware profile → target/variant
+      # identify hardware profile → target/variant
       profiles = openwrt-imagebuilder.lib.profiles { inherit pkgs; };
       profileConfig = profiles.identifyProfile profile;
 
-      # 7. Build firmware
       build = openwrt-imagebuilder.lib.build;
     in
     build (

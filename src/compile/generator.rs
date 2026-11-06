@@ -72,7 +72,7 @@ impl PkgBackend {
             PkgBackend::Opkg => {
                 format!("\nif ! {probe}; then\n    opkg install /tmp/{file_name}\nfi")
             }
-            // ponytail: if extract_package_name fails, probe stays false and apk reinstalls
+            // If extract_package_name fails, probe stays false and apk reinstalls
             // every deploy — safe, just not idempotent.
             PkgBackend::Apk => {
                 format!("\nif ! {probe}; then\n    apk add --allow-untrusted /tmp/{file_name}\nfi")
@@ -204,7 +204,6 @@ pub(crate) fn serialize_uci(
         for (section_name, section) in sections {
             match section {
                 Section::List(arr) => {
-                    // Heterogeneous lists: wipe every distinct type that appears
                     let mut wiped_types = std::collections::HashSet::new();
                     for list_obj in arr {
                         let list_ty = list_type_of(list_obj, section_name);

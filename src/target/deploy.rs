@@ -18,10 +18,9 @@ pub struct DeployConfig {
     pub identity_file: Option<String>,
     pub force: bool,
     pub no_sops: bool,
-    pub watchdog_timeout: u64,
-    /// When true, the captured remote stdout/stderr of deploy/diff operations is
-    /// echoed to the local terminal instead of being discarded.
+    /// Echo captured remote stdout/stderr of deploy/diff to the local terminal instead of discarding it.
     pub verbose: bool,
+    pub watchdog_timeout: u64,
 }
 
 fn build_ssh_args(config: &DeployConfig) -> Vec<String> {
@@ -116,8 +115,8 @@ pub fn ssh_exec(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stderr = stderr.trim();
-        // Surface the remote diagnostic (e.g. `uci: ... at line N`) so a failed
-        // UCI batch reports exactly which command broke, not just a non-zero exit.
+        // Surface the remote diagnostic so a failed UCI batch reports which
+        // command broke, not just a non-zero exit.
         return Err(ConfigError::Deploy(format!(
             "SSH command failed on {target} (exit {}): {}{}",
             output.status.code().unwrap_or(-1),
@@ -129,9 +128,9 @@ pub fn ssh_exec(
             }
         )));
     }
-    // Stderr is captured (not inherited) so failures can embed the remote
-    // diagnostic in ConfigError. On success, mirror it to local stderr to keep
-    // the prior live visibility of warnings (e.g. opkg "Collected errors: ...").
+    // Stderr is captured (not inherited) so failures embed the remote diagnostic
+    // in ConfigError; on success it is mirrored to local stderr to keep warning
+    // visibility (e.g. opkg "Collected errors: ...").
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stderr = stderr.trim();
     if !stderr.is_empty() {
@@ -191,10 +190,8 @@ pub fn run(
     secrets_dir: Option<&Path>,
     ssh: &dyn SshExec,
 ) -> Result<(), ConfigError> {
-    // Runtime capability discovery: the package manager actually on the target wins.
-    // Only probe when the config actually emits package-manager commands; pure UCI/file
-    // deployments need no extra SSH round-trip. A missing/stale `packageManager` no longer
-    // sends the wrong commands to the box when packages are involved.
+    // The package manager actually on the target wins; probe only when the config
+    // emits package-manager commands. Pure UCI/file deployments need no SSH probe.
     let hint = crate::compile::pipeline::read_package_manager_hint(json_path)?;
     let backend = if hint.needs_pm {
         let discovered = discover_package_manager(ssh, target, config)?;
@@ -232,9 +229,9 @@ pub fn run(
     let orphan_cmds = orphan_delete_commands(&remote_map, &compiled.resolved_root.settings);
     let has_orphans = !orphan_cmds.is_empty();
 
-    // Conservative skip: remote_map/desired_map only cover UCI settings, so once any
-    // non-settings resource (files, packages, rawUci, sshKeys, secrets) is declared we
-    // always deploy. ponytail: no remote state tracking for those — safe, just not skip-optimized.
+    // remote_map/desired_map only cover UCI settings, so any non-settings resource
+    // (files, packages, rawUci, sshKeys, secrets) forces a deploy — no remote
+    // state tracking exists for those.
     let has_non_setting_changes = {
         let root = &compiled.resolved_root;
         root.files.as_ref().is_some_and(|f| !f.is_empty())
@@ -280,8 +277,7 @@ pub fn run(
         config,
     )?;
     if config.verbose {
-        // Echo the captured remote stdout (uci set/add/opkg progress) that would
-        // otherwise be discarded by the deploy flow.
+        // Echo captured stdout that the deploy flow would otherwise discard.
         print!("{deploy_out}");
     }
 
@@ -289,13 +285,10 @@ pub fn run(
     let mut connected = false;
     for _ in 0..30 {
         std::thread::sleep(std::time::Duration::from_secs(2));
-        // Probe connectivity and best-effort cancel the rollback watchdog in a
-        // single call. The previous probe used `kill $(cat /tmp/.uci-watchdog-pid)`
-        // without `|| true`; when the pid file is absent or the watchdog has
-        // already fired, `kill` exits non-zero, so the `.is_ok()` gate reported
-        // "not connected" even on a healthy SSH link — wrongly triggering the
-        // rollback-failure error. `|| true` makes the call's exit status reflect
-        // the SSH connection itself, not the pid file's presence.
+        // Probe connectivity and best-effort cancel the rollback watchdog in one call.
+        // `|| true` keeps the call's exit status reflecting the SSH link itself, not
+        // the pid file's presence (a missing/absent pid previously failed a healthy
+        // connection and wrongly triggered rollback-failure).
         if ssh
             .exec(
                 target,
@@ -479,7 +472,6 @@ mod tests {
         let script = String::from_utf8_lossy(calls[0].1.as_ref().unwrap());
 
         assert!(script.contains("mkdir -p '/etc/custom'"));
-        // Text content uses POSIX heredoc (zero-dependency, Busybox-safe)
         assert!(script.contains("cat > '/etc/rc.local'"));
         assert!(script.contains("#!/bin/sh"));
         assert!(script.contains("echo hello"));
@@ -780,7 +772,6 @@ mod tests {
 
         run(f.path(), "root@127.0.0.1", &config, None, &ssh).unwrap();
 
-        // Verify text files use heredoc (Busybox-safe, no base64 dependency)
         // calls[0] = deploy script, calls[1] = watchdog check, calls[2] = cleanup
         // (discovery call skipped when no settings to manage)
         {
@@ -789,7 +780,6 @@ mod tests {
             assert!(script.contains("cat > '/tmp/test.txt'"));
             assert!(script.contains("hello world"));
         }
-        // Base64 content still uses decode
         let json_text2 = r##"{
             "packageManager": "opkg",
             "settings": {},

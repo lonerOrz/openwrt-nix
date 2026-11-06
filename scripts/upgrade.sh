@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Upgrade OpenWrt firmware via sysupgrade.
-# Usage: upgrade.sh <host> <port> [ssh_opts]
 set -euo pipefail
 
 HOST="$1"
@@ -14,6 +12,6 @@ echo "Downloading OpenWrt ${version}..."
 wget "${sysupgrade_url}" -O openwrt.sysupgrade.itb
 
 ssh -p "${PORT}" ${SSH_OPTS} "root@${HOST}" "cat > /tmp/openwrt.sysupgrade.itb" <openwrt.sysupgrade.itb
-ssh -p "${PORT}" ${SSH_OPTS} "root@${HOST}" "sysupgrade -v /tmp/openwrt.sysupgrade.itb" || true
+ssh -p "${PORT}" ${SSH_OPTS} "root@${HOST}" "sysupgrade -v /tmp/openwrt.sysupgrade.itb" || true # device reboots and drops SSH, so the command exits nonzero on success
 
 while ! ping -c1 -W1 8.8.8.8; do sleep 2; done
