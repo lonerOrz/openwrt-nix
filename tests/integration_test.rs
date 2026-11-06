@@ -423,37 +423,43 @@ async fn test_diff_accuracy() {
 #[tokio::test]
 async fn test_smart_reload_fallback() {
     let target = get_opkg_target().await;
-    target.sh("rm -f /sbin/reload_config");
-    target.sh("mkdir -p /etc/init.d");
-    for svc in &["dropbear", "network", "firewall", "dnsmasq", "system"] {
-        target.sh(&format!(
-            "printf '#!/bin/sh\\necho \"{svc} called\" >> /tmp/reload_history\\n' > /etc/init.d/{svc} && chmod +x /etc/init.d/{svc}",
-            svc = svc
-        ));
-    }
-    target.sh("rm -f /tmp/reload_history");
-    target.reset_uci_state();
-    // The reload is now async (delayed 1s background). Wait for it to complete.
-    target.wait_ssh(Duration::from_secs(10));
-    std::thread::sleep(Duration::from_secs(3));
-    let hist = target.sh("cat /tmp/reload_history 2>/dev/null");
-    assert!(
-        hist.contains("network called"),
-        "network not reloaded: {hist}"
-    );
-    assert!(
-        hist.contains("system called"),
-        "system not reloaded: {hist}"
-    );
-    assert!(
-        !hist.contains("firewall called"),
-        "firewall should not be reloaded: {hist}"
-    );
-    let _ = target.sh("rm -f /sbin/reload_config");
-    for svc in &["dropbear", "network", "firewall", "dnsmasq", "system"] {
-        let _ = target.sh(&format!("rm -f /etc/init.d/{svc}"));
-    }
-    let _ = target.sh("rm -f /tmp/reload_history");
+    // Hold the container lock for the whole test. The deploy path detaches the
+    // reload as an async `( sleep 1; reload ) &`, so a neighboring test's
+    // deferred reload could otherwise fire after this test's deploy returns and
+    // contaminate /tmp/reload_history. Serializing setup+reload-wait avoids it.
+    target.guarded(|| {
+        target.sh_inner("rm -f /sbin/reload_config");
+        target.sh_inner("mkdir -p /etc/init.d");
+        for svc in &["dropbear", "network", "firewall", "dnsmasq", "system"] {
+            target.sh_inner(&format!(
+                "printf '#!/bin/sh\\necho \"{svc} called\" >> /tmp/reload_history\\n' > /etc/init.d/{svc} && chmod +x /etc/init.d/{svc}",
+                svc = svc
+            ));
+        }
+        target.sh_inner("rm -f /tmp/reload_history");
+        target.reset_uci_state_inner();
+        // The reload is now async (delayed 1s background). Wait for it to complete.
+        target.wait_ssh(Duration::from_secs(10));
+        std::thread::sleep(Duration::from_secs(3));
+        let hist = target.sh_inner("cat /tmp/reload_history 2>/dev/null");
+        assert!(
+            hist.contains("network called"),
+            "network not reloaded: {hist}"
+        );
+        assert!(
+            hist.contains("system called"),
+            "system not reloaded: {hist}"
+        );
+        assert!(
+            !hist.contains("firewall called"),
+            "firewall should not be reloaded: {hist}"
+        );
+        let _ = target.sh_inner("rm -f /sbin/reload_config");
+        for svc in &["dropbear", "network", "firewall", "dnsmasq", "system"] {
+            let _ = target.sh_inner(&format!("rm -f /etc/init.d/{svc}"));
+        }
+        let _ = target.sh_inner("rm -f /tmp/reload_history");
+    });
 }
 
 #[tokio::test]

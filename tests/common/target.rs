@@ -17,6 +17,11 @@ pub struct Target {
     pub port: u16,
     pub name: String,
     pub _container: Option<testcontainers::ContainerAsync<testcontainers::GenericImage>>,
+    /// Serializes all mutating access (deploys, resets, shell execs) to this
+    /// shared container so the concurrently-scheduled integration tests can't
+    /// truncate each other's /tmp/deploy.sh, clobber the rollback backup/boot
+    /// hook, or overwrite /sbin/reload_config mid-deploy.
+    pub lock: std::sync::Mutex<()>,
 }
 
 impl Target {
@@ -87,10 +92,21 @@ impl Target {
             port,
             name,
             _container: Some(container),
+            lock: std::sync::Mutex::new(()),
         })
     }
 
-    pub fn sh(&self, cmd: &str) -> String {
+    /// Serialize a closure against this container's shared-state lock. The
+    /// integration harness reuses a single opkg + single apk container across
+    /// concurrently-scheduled tests; the deploy path relies on singleton paths
+    /// (`/tmp/deploy.sh`, `/etc/.uci-rollback-backup`, `/sbin/reload_config`, …)
+    /// that are corrupted when deploys run concurrently against the same box.
+    pub(crate) fn guarded<T>(&self, f: impl FnOnce() -> T) -> T {
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        f()
+    }
+
+    pub fn sh_inner(&self, cmd: &str) -> String {
         let engine = detect_engine();
         let output = Command::new(engine)
             .args(["exec", &self.name, "sh", "-c", cmd])
@@ -99,13 +115,21 @@ impl Target {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
-    pub fn sh_ok(&self, cmd: &str) -> bool {
+    pub fn sh_ok_inner(&self, cmd: &str) -> bool {
         let engine = detect_engine();
         Command::new(engine)
             .args(["exec", &self.name, "sh", "-c", cmd])
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
+    }
+
+    pub fn sh(&self, cmd: &str) -> String {
+        self.guarded(|| self.sh_inner(cmd))
+    }
+
+    pub fn sh_ok(&self, cmd: &str) -> bool {
+        self.guarded(|| self.sh_ok_inner(cmd))
     }
 
     pub fn uci_get(&self, path: &str) -> Option<String> {
@@ -180,6 +204,10 @@ impl Target {
     }
 
     pub fn nuci_deploy(&self, json_path: &Path) {
+        self.guarded(|| self.nuci_deploy_inner(json_path))
+    }
+
+    fn nuci_deploy_inner(&self, json_path: &Path) {
         let artifacts = get_session_artifacts();
         let config = DeployConfig {
             port: self.port,
@@ -198,14 +226,22 @@ impl Target {
             .expect("nuci deploy failed during integration test");
     }
 
-    pub fn reset_uci_state(&self) {
+    /// Lock-free deploy+restore primitive. `reset_uci_state` wraps this in the
+    /// container mutex; tests that must also hold the lock across setup and the
+    /// (detached, async) reload wait call `guarded(|| self.reset_uci_state_inner())`
+    /// so a neighbouring test's deferred reload cannot contaminate shared state.
+    pub(crate) fn reset_uci_state_inner(&self) {
         let json = if self.role == "opkg" {
             opkg_json_path()
         } else {
             apk_json_path()
         };
-        self.nuci_deploy(&json);
+        self.nuci_deploy_inner(&json);
         restore_reload_config(self);
+    }
+
+    pub fn reset_uci_state(&self) {
+        self.guarded(|| self.reset_uci_state_inner());
     }
 }
 
@@ -240,7 +276,9 @@ const RELOAD_CONFIG_ORIGINAL: &str = "#!/bin/sh\n\
      exit 0\n";
 
 fn restore_reload_config(target: &Target) {
-    target.sh(&format!(
+    // Called from inside `Target::guarded` (reset_uci_state), so use the
+    // lock-free inner exec to avoid re-acquiring the non-reentrant mutex.
+    target.sh_inner(&format!(
         "cat > /sbin/reload_config <<'EOF'\n{}\nEOF\nchmod +x /sbin/reload_config",
         RELOAD_CONFIG_ORIGINAL
     ));
