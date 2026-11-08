@@ -11,15 +11,17 @@ use std::path::Path;
 
 impl PkgBackend {
     pub(crate) fn is_installed_cmd(&self, pkg: &str) -> String {
+        let quoted = shell_quote(pkg);
         match self {
             PkgBackend::Opkg => {
-                format!("opkg status {pkg} 2>/dev/null | grep -q 'Status:.*installed'")
+                format!("opkg status {quoted} 2>/dev/null | grep -q 'Status:.*installed'")
             }
-            PkgBackend::Apk => format!("apk info -e {pkg} >/dev/null 2>&1"),
+            PkgBackend::Apk => format!("apk info -e {quoted} >/dev/null 2>&1"),
         }
     }
 
     pub(crate) fn install_expr(&self, pkgs: &[String]) -> String {
+        debug_assert!(!pkgs.is_empty());
         let quoted: Vec<String> = pkgs.iter().map(|p| shell_quote(p)).collect();
         match self {
             PkgBackend::Opkg => format!(
@@ -33,7 +35,7 @@ impl PkgBackend {
             PkgBackend::Apk => format!(
                 "if [ \"$NEED_INSTALL\" = true ]; then\n\
                  for __nuci_try in 1 2 3 4 5; do\n\
-                 apk add {} && break\n\
+                 apk update && apk add {} && break\n\
                  sleep 1\n\
                  done\nfi",
                 quoted.join(" ")
@@ -42,6 +44,7 @@ impl PkgBackend {
     }
 
     pub(crate) fn remove_expr(&self, pkgs: &[String]) -> String {
+        debug_assert!(!pkgs.is_empty());
         let quoted: Vec<String> = pkgs.iter().map(|p| shell_quote(p)).collect();
         match self {
             PkgBackend::Opkg => format!(
@@ -162,7 +165,7 @@ fn serialize_option_val(writer: &mut String, key: &str, val: &Value) -> Result<(
                 let s = match item {
                     Value::String(s) => Cow::Borrowed(s.as_str()),
                     Value::Number(n) => Cow::Owned(n.to_string()),
-                    Value::Bool(b) => Cow::Owned(b.to_string()),
+                    Value::Bool(b) => Cow::Borrowed(if *b { "1" } else { "0" }),
                     _ => {
                         return Err(ConfigError::Validation(format!(
                             "{:?} is not a supported list value type",
@@ -245,6 +248,9 @@ pub(crate) fn serialize_uci(
             }
         }
 
+        // Invariant: shell_cmds (anonymous-section wipe loops) is only emitted
+        // alongside uci_cmds, never on its own.
+        debug_assert!(shell_cmds.is_empty() || !uci_cmds.is_empty());
         write!(writer, "{shell_cmds}").unwrap();
 
         if !uci_cmds.is_empty() {
@@ -272,11 +278,27 @@ pub(crate) fn serialize_package_management(
     // the configured repositories. The apk/opkg test images clear their default
     // distfeeds, so a configured feed must be on disk before `apk add`/`opkg
     // install` runs — otherwise the fetch fails with no repositories configured.
+    let mut wrote_feeds = false;
     if let Some(src_val) = sources
         && let Some(feeds) = resolve_feeds(backend, src_val)?
         && !feeds.is_empty()
     {
         writeln!(writer, "{}", backend.feed_lines(&feeds)).unwrap();
+        wrote_feeds = true;
+    }
+
+    if wrote_feeds {
+        // Refresh the index after custom feeds/repos are written, so local
+        // packages depending on feed-provided packages resolve. Idempotent.
+        writeln!(
+            writer,
+            "{}",
+            match backend {
+                PkgBackend::Opkg => "opkg update",
+                PkgBackend::Apk => "apk update",
+            }
+        )
+        .unwrap();
     }
 
     if let Some(src_val) = sources
@@ -504,6 +526,7 @@ mod tests {
         assert!(w.contains("set firewall.@rule[0]"));
         assert!(w.contains("set firewall.@redirect[0]"));
     }
+
     #[test]
     fn serialize_heterogeneous_list_indexes_per_type() {
         let mut configs = IndexMap::new();
@@ -754,7 +777,7 @@ mod tests {
     }
 
     #[test]
-    fn test_opkg_feeds_ignored_on_apk_target() {
+    fn test_opkg_feeds_rejected_on_apk_target() {
         let mut w = String::new();
         let sources = PackageSources {
             opkg_feeds: Some(vec!["src/gz custom https://example.com".into()]),
@@ -767,7 +790,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apk_repositories_ignored_on_opkg_target() {
+    fn test_apk_repositories_rejected_on_opkg_target() {
         let mut w = String::new();
         let sources = PackageSources {
             opkg_feeds: None,
@@ -825,6 +848,7 @@ mod tests {
         assert!(w.contains("NEED_INSTALL=false"));
         assert!(w.contains("apk info -e"));
         assert!(w.contains("apk add 'luci' 'tcpdump'"));
+        assert!(w.contains("apk update && apk add 'luci' 'tcpdump'"));
     }
 
     #[test]
@@ -877,7 +901,7 @@ mod tests {
             local_packages: Some(vec!["./packages/test_1.0_all.ipk".into()]),
         };
         serialize_package_management(&mut w, PkgBackend::Opkg, Some(&sources), None).unwrap();
-        assert!(w.contains("opkg status test"));
+        assert!(w.contains("opkg status 'test'"));
         assert!(w.contains("opkg install '/tmp/test_1.0_all.ipk'"));
     }
 
@@ -891,7 +915,7 @@ mod tests {
             local_packages: Some(vec!["./packages/test_1.0_all.apk".into()]),
         };
         serialize_package_management(&mut w, PkgBackend::Apk, Some(&sources), None).unwrap();
-        assert!(w.contains("if ! apk info -e test >/dev/null 2>&1; then"));
+        assert!(w.contains("if ! apk info -e 'test' >/dev/null 2>&1; then"));
         assert!(w.contains("apk add --allow-untrusted '/tmp/test_1.0_all.apk'"));
     }
 
@@ -942,5 +966,23 @@ mod tests {
         assert!(malicious.contains("'a;b'"));
         // The payload is wrapped in single quotes, so it cannot be executed by the shell.
         assert!(!malicious.contains("; touch"));
+    }
+
+    #[test]
+    fn serialize_array_bool_val() {
+        let mut w = String::new();
+        let arr = Value::Array(vec![Value::Bool(true), Value::Bool(false)]);
+        serialize_option_val(&mut w, "net.flag", &arr).unwrap();
+        assert!(w.contains("add_list net.flag='1'"));
+        assert!(w.contains("add_list net.flag='0'"));
+    }
+
+    #[test]
+    fn is_installed_cmd_quotes_package_name() {
+        let opkg = PkgBackend::Opkg.is_installed_cmd("$(touch x)");
+        assert!(opkg.contains("opkg status '$(touch x)'"));
+        let apk = PkgBackend::Apk.is_installed_cmd("a;b");
+        assert!(apk.contains("apk info -e 'a;b'"));
+        assert!(!opkg.contains("; touch"));
     }
 }
