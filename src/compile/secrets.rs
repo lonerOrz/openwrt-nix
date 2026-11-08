@@ -251,6 +251,33 @@ pub(crate) fn load_secrets_dir(dir_path: &str) -> Result<HashMap<String, String>
     Ok(secrets)
 }
 
+/// Merge `incoming` into `existing`, treating identical values as an idempotent
+/// merge and conflicting (same key, different value) entries as a hard error.
+///
+/// `existing` is normally the SOPS-decrypted map; `incoming` the secrets
+/// directory. A bare `HashMap::extend` would silently overwrite the SOPS value
+/// with the directory value, hiding a misconfiguration — this rejects it
+/// instead. The error reports the conflicting key id, never the plaintext value.
+pub(crate) fn merge_secrets(
+    existing: &mut HashMap<String, String>,
+    incoming: HashMap<String, String>,
+) -> Result<(), ConfigError> {
+    for (k, v) in incoming {
+        if let Some(prev) = existing.get(&k) {
+            if prev != &v {
+                return Err(ConfigError::Validation(format!(
+                    "Secret key '{k}' conflicts with a different value loaded from another \
+                     secret source; secret values must be consistent across SOPS and the \
+                     secrets directory"
+                )));
+            }
+        } else {
+            existing.insert(k, v);
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn decrypt_sops_mem(root: &Root) -> Result<HashMap<String, String>, ConfigError> {
     let mut secrets = HashMap::new();
     let sops_files = match root.secrets.as_ref().and_then(|s| s.sops.as_ref()) {
@@ -915,5 +942,38 @@ mod tests {
 
         let err = interpolate_secrets("has@in@middle@here", &HashMap::new()).unwrap_err();
         assert!(format!("{err}").contains("in"));
+    }
+
+    #[test]
+    fn merge_secrets_same_value_is_idempotent() {
+        let mut existing = HashMap::from([("wifi_pass".to_string(), "s3cr3t".to_string())]);
+        let incoming = HashMap::from([("wifi_pass".to_string(), "s3cr3t".to_string())]);
+        merge_secrets(&mut existing, incoming).unwrap();
+        assert_eq!(existing["wifi_pass"], "s3cr3t");
+    }
+
+    #[test]
+    fn merge_secrets_new_key_added() {
+        let mut existing = HashMap::from([("a".to_string(), "1".to_string())]);
+        let incoming = HashMap::from([("b".to_string(), "2".to_string())]);
+        merge_secrets(&mut existing, incoming).unwrap();
+        assert_eq!(existing["a"], "1");
+        assert_eq!(existing["b"], "2");
+    }
+
+    #[test]
+    fn merge_secrets_conflicting_value_errors() {
+        let mut existing = HashMap::from([("wifi_pass".to_string(), "s3cr3t".to_string())]);
+        let incoming = HashMap::from([("wifi_pass".to_string(), "other".to_string())]);
+        let err = merge_secrets(&mut existing, incoming).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("conflicts"),
+            "expected conflict error, got: {msg}"
+        );
+        assert!(msg.contains("wifi_pass"), "expected key name, got: {msg}");
+        // Plaintext values must never leak into the error message.
+        assert!(!msg.contains("'s3cr3t'"), "plaintext leaked: {msg}");
+        assert!(!msg.contains("'other'"), "plaintext leaked: {msg}");
     }
 }

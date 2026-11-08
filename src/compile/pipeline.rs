@@ -1,5 +1,5 @@
 use crate::compile::generator::{serialize_package_management, serialize_uci};
-use crate::compile::secrets::{decrypt_sops_mem, load_secrets_dir, resolve_secrets};
+use crate::compile::secrets::{decrypt_sops_mem, load_secrets_dir, merge_secrets, resolve_secrets};
 use crate::config::models::PkgBackend;
 use crate::config::validation::validate_root;
 use crate::utils::error::ConfigError;
@@ -55,9 +55,11 @@ pub fn compile_config(
     };
 
     if let Some(dir) = secrets_dir {
-        secrets.extend(load_secrets_dir(dir.to_str().ok_or_else(|| {
-            ConfigError::Validation("Invalid secrets directory path".into())
-        })?)?);
+        let dir_secrets =
+            load_secrets_dir(dir.to_str().ok_or_else(|| {
+                ConfigError::Validation("Invalid secrets directory path".into())
+            })?)?;
+        merge_secrets(&mut secrets, dir_secrets)?;
     }
 
     let resolved_root = resolve_secrets(root, &secrets)?;
@@ -235,5 +237,43 @@ mod tests {
             crate::config::models::FileContent::Text(s) => assert_eq!(s, "token=s3cr3t"),
             other => panic!("expected Text, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn secrets_dir_cross_file_conflict_errors() {
+        // Two files in the secrets dir claim the same key with different values.
+        // The merge into the (skipped) SOPS map must reject, not silently keep
+        // one value. No sops binary needed (skip_sops = true).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.json"), r#"{"wifi_pass": "alpha"}"#).unwrap();
+        std::fs::write(dir.path().join("b.json"), r#"{"wifi_pass": "beta"}"#).unwrap();
+
+        let json = write_json(r#"{ "packageManager": "opkg", "settings": {} }"#);
+        let err = compile_config(json.path(), Some(dir.path()), true, None).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("conflicts"), "expected conflict, got: {msg}");
+        assert!(msg.contains("wifi_pass"), "expected key name, got: {msg}");
+        // Plaintext must never leak into the error message.
+        assert!(!msg.contains("alpha"), "plaintext leaked: {msg}");
+        assert!(!msg.contains("beta"), "plaintext leaked: {msg}");
+    }
+
+    #[test]
+    fn secrets_dir_same_value_idempotent_merge_ok() {
+        // Same key with identical value across two files -> no conflict.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.json"), r#"{"wifi_pass": "alpha"}"#).unwrap();
+        std::fs::write(dir.path().join("b.json"), r#"{"wifi_pass": "alpha"}"#).unwrap();
+
+        let json = write_json(
+            r#"{
+                "packageManager": "opkg",
+                "settings": {
+                    "wireless": { "radio0": { "_type": "wifi-iface", "key": "@wifi_pass@" } }
+                }
+            }"#,
+        );
+        let out = compile_config(json.path(), Some(dir.path()), true, None).unwrap();
+        assert!(out.uci_batch.contains("set wireless.radio0.key='alpha'"));
     }
 }
