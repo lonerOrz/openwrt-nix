@@ -3,7 +3,7 @@ use indexmap::IndexMap;
 use serde::Deserialize;
 use serde_json::Value;
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
 pub struct Root {
     #[serde(default = "default_package_manager", rename = "packageManager")]
     pub package_manager: String,
@@ -19,6 +19,112 @@ pub struct Root {
     pub raw_uci: Option<Vec<String>>,
     #[serde(default, rename = "files")]
     pub files: Option<Vec<File>>,
+}
+
+/// Debug view of `Root.settings`: lists config / section / option *names* but
+/// never option *values*. Option values are the place where interpolated
+/// secret plaintext ends up, so names-only keeps the shape visible for
+/// debugging without leaking credentials.
+struct SettingsDebug<'a>(&'a IndexMap<String, IndexMap<String, Section>>);
+
+fn write_option_names<'a, I>(f: &mut std::fmt::Formatter<'_>, opts: I) -> std::fmt::Result
+where
+    I: Iterator<Item = &'a str>,
+{
+    let mut first = true;
+    for opt in opts {
+        if !first {
+            f.write_str(", ")?;
+        }
+        first = false;
+        f.write_str(opt)?;
+    }
+    Ok(())
+}
+
+impl std::fmt::Debug for SettingsDebug<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut first_config = true;
+        for (config_name, sections) in self.0 {
+            if !first_config {
+                f.write_str(", ")?;
+            }
+            first_config = false;
+            f.write_str(config_name)?;
+            f.write_str(" { ")?;
+            let mut first_section = true;
+            for (section_name, section) in sections {
+                if !first_section {
+                    f.write_str(", ")?;
+                }
+                first_section = false;
+                f.write_str(section_name)?;
+                f.write_str(" { ")?;
+                match section {
+                    Section::Named(data) => {
+                        write_option_names(f, data.options.keys().map(|k| k.as_str()))?;
+                    }
+                    Section::List(items) => {
+                        write_option_names(
+                            f,
+                            items
+                                .iter()
+                                .flat_map(|item| item.options.keys().map(|k| k.as_str())),
+                        )?;
+                    }
+                }
+                f.write_str(" }")?;
+            }
+            f.write_str(" }")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for Root {
+    /// Redacting Debug: `Root` holds secret-bearing data — SSH public keys,
+    /// rawUci commands, package-source URLs (which may embed credentials) and
+    /// arbitrary file contents. After secret interpolation the `settings`
+    /// values also contain plaintext credentials. Deriving `Debug` would leak
+    /// all of this through `dbg!(root)` / `{:?}` in logs, so we surface
+    /// structure only and never the sensitive payloads.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Root")
+            .field("package_manager", &self.package_manager)
+            .field("settings", &SettingsDebug(&self.settings))
+            .field("packages", &self.packages)
+            .field(
+                "package_sources",
+                &self.package_sources.as_ref().map(|s| {
+                    format!(
+                        "<{} opkg feeds, {} apk repos, {} local packages>",
+                        s.opkg_feeds.as_ref().map_or(0, |v| v.len()),
+                        s.apk_repositories.as_ref().map_or(0, |v| v.len()),
+                        s.local_packages.as_ref().map_or(0, |v| v.len()),
+                    )
+                }),
+            )
+            .field(
+                "ssh_keys",
+                &format_args!("<{} redacted>", self.ssh_keys.len()),
+            )
+            .field("secrets", &self.secrets.is_some())
+            .field(
+                "raw_uci",
+                &self
+                    .raw_uci
+                    .as_ref()
+                    .map(|r| format!("<{} redacted>", r.len())),
+            )
+            .field(
+                "files",
+                &self
+                    .files
+                    .as_ref()
+                    .map(|fl| format!("<{} redacted>", fl.len())),
+            )
+            .finish()
+    }
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -165,5 +271,65 @@ mod tests {
     fn pkg_backend_try_from_rejects_empty() {
         let err = PkgBackend::try_from("").unwrap_err();
         assert!(format!("{err}").contains("Unsupported package manager"));
+    }
+
+    #[test]
+    fn root_debug_redacts_secrets() {
+        // Audit E.5/4.6: Root Debug must never leak secret-bearing payloads
+        // (ssh keys, rawUci commands, file contents, or interpolated values).
+        let mut settings = IndexMap::new();
+        let mut sec = IndexMap::new();
+        sec.insert(
+            "lan".to_string(),
+            Section::Named(SectionData {
+                section_type: "interface".into(),
+                options: IndexMap::from([(
+                    "password".into(),
+                    Value::String("SUPER_SECRET_PASSWORD".into()),
+                )]),
+            }),
+        );
+        settings.insert("network".into(), sec);
+        let root = Root {
+            package_manager: "opkg".into(),
+            settings,
+            packages: None,
+            package_sources: None,
+            ssh_keys: vec!["ssh-ed25519 AAAASECRETPUBLICKEY user@host".into()],
+            secrets: None,
+            raw_uci: Some(vec!["uci set network.lan.key='ANOTHER_SECRET'".into()]),
+            files: Some(vec![File {
+                path: "/etc/secret.conf".into(),
+                content: FileContent::Text("LEAKED_FILE_BODY".into()),
+                executable: false,
+                checksum: None,
+            }]),
+        };
+
+        let dbg = format!("{root:?}");
+        // Structure is visible: config, section and option names.
+        assert!(dbg.contains("package_manager: \"opkg\""), "got: {dbg}");
+        assert!(dbg.contains("network { lan { password } }"), "got: {dbg}");
+        // Payload carriers are redacted.
+        assert!(dbg.contains("ssh_keys: <1 redacted>"), "got: {dbg}");
+        assert!(
+            dbg.contains("raw_uci: Some(\"<1 redacted>\")"),
+            "got: {dbg}"
+        );
+        assert!(dbg.contains("files: Some(\"<1 redacted>\")"), "got: {dbg}");
+        // Payloads are NOT.
+        assert!(
+            !dbg.contains("SUPER_SECRET_PASSWORD"),
+            "settings value leaked: {dbg}"
+        );
+        assert!(
+            !dbg.contains("AAAASECRETPUBLICKEY"),
+            "ssh key leaked: {dbg}"
+        );
+        assert!(!dbg.contains("ANOTHER_SECRET"), "rawUci leaked: {dbg}");
+        assert!(
+            !dbg.contains("LEAKED_FILE_BODY"),
+            "file content leaked: {dbg}"
+        );
     }
 }

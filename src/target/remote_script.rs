@@ -4,9 +4,9 @@
 //! orchestrator a thin coordinator.
 
 use std::collections::BTreeMap;
-use std::collections::HashMap;
 use std::collections::HashSet;
 
+use crate::compile::secrets::SecretMap;
 use crate::config::models::Root;
 
 fn reload_commands(modified: &[String], service_map: &BTreeMap<String, String>) -> String {
@@ -136,7 +136,7 @@ fn render_success_reload(reload_cmds: &str) -> String {
 /// avoids an over-long parameter list.
 pub struct RenderInput<'a> {
     pub root: &'a Root,
-    pub secrets: &'a HashMap<String, String>,
+    pub secrets: &'a SecretMap,
     pub uci_commands: String,
     /// Package-manager operations, rendered AFTER the UCI "apply done" sentinel
     /// so the rollback watchdog (armed before UCI) can't fire during a long
@@ -340,7 +340,7 @@ mod tests {
             "files": [{ "path": "/etc/nuci-managed.txt", "content": "ok" }]
         }"#;
         let root: crate::config::models::Root = serde_json::from_str(json).expect("valid root");
-        let secrets = std::collections::HashMap::new();
+        let secrets = SecretMap::default();
 
         let quiet = build_remote_script(&RenderInput {
             root: &root,

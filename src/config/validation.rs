@@ -1,5 +1,6 @@
 use crate::config::models::{Root, Section};
 use crate::config::package::{PackageAction, RemotePath};
+use crate::utils::error::ConfigError;
 use serde_json::Value;
 use std::path::Path;
 
@@ -21,6 +22,53 @@ fn is_valid_uci_type(s: &str) -> bool {
     !s.is_empty()
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Reject option values that UCI cannot represent, or that our transport
+/// would silently corrupt.
+///
+/// Verified against real UCI (`uci` 23.05.5 on OpenWrt 23.05 and
+/// `uci` 25.12.02 on OpenWrt 25.12) — both behave identically:
+///
+/// - **NUL (0x00)** — the shell transport deletes NUL bytes from the script,
+///   so a value with an embedded NUL lands truncated: a *silent* wrong value
+///   with exit 0. `set -e` cannot catch it, so it must be rejected before it
+///   is emitted.
+/// - **0x01-0x08, 0x0B, 0x0C, 0x0E-0x1F** - UCI rejects these outright with
+///   "uci: Parse error" (exit 1).
+/// - **newline (0x0A)** - UCI accepts it via argv, but our generator emits
+///   each option as one line of a command buffer that is later split on
+///   newlines, so an embedded newline splits one command into two and the
+///   second half lands as a corrupted value while the deploy still reports
+///   success.
+///
+/// Everything else UCI accepts and round-trips correctly: space, tab, CR, DEL,
+/// UTF-8, and the shell-significant characters backslash, double quote, single
+/// quote, dollar, semicolon, hash and equals.
+fn validate_uci_value_chars(value: &str, where_: &str) -> Result<(), ConfigError> {
+    let bad = value.chars().find(|c| {
+        let c = *c as u32;
+        // NUL (0x00) plus the C0 control range, minus tab (0x09) which UCI
+        // stores and round-trips correctly.
+        //
+        // Newline (0x0A) is included even though UCI itself accepts it: we
+        // emit each option as one line of a command buffer that is later split
+        // on newlines, so an embedded newline splits one command into two and
+        // the second half lands as a corrupted value (`a\nb` -> `a\nuci b`)
+        // while the deploy still reports success.
+        (c < 0x20 && c != 0x09) || c == 0x00
+    });
+    if let Some(bad) = bad {
+        return Err(super::super::utils::error::ConfigError::Validation(
+            format!(
+                "{where_} contains a character that cannot be stored reliably (U+{:04X}); \
+             NUL bytes are silently dropped by the shell, other control characters \
+             are rejected by uci, and a newline would split the command",
+                bad as u32
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_section_options(
@@ -48,21 +96,75 @@ fn validate_section_options(
                 ),
             ));
         }
-        if let Value::String(s) = opt_val
-            && s.is_empty()
-        {
-            eprintln!(
-                "Warning: {config_name}.{section_path}.{opt_name} is empty string — UCI treats '' as unset. Consider omitting it."
-            );
+        if let Value::String(s) = opt_val {
+            if s.is_empty() {
+                eprintln!(
+                    "Warning: {config_name}.{section_path}.{opt_name} is empty string — UCI treats '' as unset. Consider omitting it."
+                );
+            }
+            validate_uci_value_chars(s, &format!("{config_name}.{section_path}.{opt_name}"))?;
         }
-        if let Value::Array(items) = opt_val
-            && items.iter().any(|v| matches!(v, Value::Object(_)))
-        {
-            return Err(super::super::utils::error::ConfigError::Validation(
-                format!(
-                    "{config_name}.{section_path}.{opt_name} contains a nested object; UCI list values must be scalars"
-                ),
-            ));
+        if let Value::Array(items) = opt_val {
+            if items.iter().any(|v| matches!(v, Value::Object(_))) {
+                return Err(super::super::utils::error::ConfigError::Validation(
+                    format!(
+                        "{config_name}.{section_path}.{opt_name} contains a nested object; UCI list values must be scalars"
+                    ),
+                ));
+            }
+            if items.iter().any(|v| matches!(v, Value::Null)) {
+                return Err(super::super::utils::error::ConfigError::Validation(
+                    format!(
+                        "{config_name}.{section_path}.{opt_name} contains a null element; UCI list values must be scalars"
+                    ),
+                ));
+            }
+            for (i, item) in items.iter().enumerate() {
+                if let Value::String(s) = item {
+                    validate_uci_value_chars(
+                        s,
+                        &format!("{config_name}.{section_path}.{opt_name}[{i}]"),
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate the `rawUci` escape hatch.
+///
+/// rawUci lines are emitted **verbatim** into the deploy script, so a line
+/// containing shell metacharacters can chain, substitute or redirect commands.
+/// This must therefore be enforced on the *final* text of every line.
+///
+/// It is called twice on purpose: once on the raw config, and once again after
+/// secret interpolation. Interpolating a secret into a rawUci line can inject
+/// metacharacters that were not present in the original text — e.g.
+/// `uci set network.lan.proto='@proto@'` with a secret value of
+/// `static'; touch /tmp/pwned; echo '`. Validating only the pre-interpolation
+/// text would let that through to the shell.
+pub(crate) fn validate_raw_uci(raw: Option<&[String]>) -> Result<(), ConfigError> {
+    let Some(raw) = raw else {
+        return Ok(());
+    };
+    for (i, line) in raw.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return Err(ConfigError::Validation(format!("rawUci[{i}] is empty")));
+        }
+        if !trimmed.starts_with("uci ") {
+            return Err(ConfigError::Validation(format!(
+                "rawUci[{i}] must be a 'uci' command, got: {trimmed}"
+            )));
+        }
+        // Reject any Shell metacharacter so a single "command" cannot chain,
+        // substitute, or redirect (newline/`;`, `$()`, backtick, `&`, `|`,
+        // `<`, `>`). This closes the injection gap noted in audit TODO 1.3.
+        if has_shell_metacharacter(trimmed) {
+            return Err(ConfigError::Validation(format!(
+                "rawUci[{i}] contains a shell metacharacter: {trimmed}"
+            )));
         }
     }
     Ok(())
@@ -131,30 +233,7 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), super::super::utils::erro
         }
     }
 
-    if let Some(raw) = &root.raw_uci {
-        for (i, line) in raw.iter().enumerate() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                return Err(super::super::utils::error::ConfigError::Validation(
-                    format!("rawUci[{i}] is empty"),
-                ));
-            }
-            if !trimmed.starts_with("uci ") {
-                return Err(super::super::utils::error::ConfigError::Validation(
-                    format!("rawUci[{i}] must be a 'uci' command, got: {trimmed}"),
-                ));
-            }
-            // rawUci lines are emitted verbatim into the deploy script. Reject
-            // any Shell metacharacter so a single "command" cannot chain,
-            // substitute, or redirect (newline/`;`, `$()`, backtick, `&`, `|`,
-            // `<`, `>`). This closes the injection gap noted in audit TODO 1.3.
-            if has_shell_metacharacter(trimmed) {
-                return Err(super::super::utils::error::ConfigError::Validation(
-                    format!("rawUci[{i}] contains a shell metacharacter: {trimmed}"),
-                ));
-            }
-        }
-    }
+    validate_raw_uci(root.raw_uci.as_deref())?;
 
     if let Some(files) = &root.files {
         for (i, file) in files.iter().enumerate() {

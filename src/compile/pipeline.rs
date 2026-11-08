@@ -1,4 +1,5 @@
 use crate::compile::generator::{serialize_package_management, serialize_uci};
+use crate::compile::secrets::SecretMap;
 use crate::compile::secrets::{decrypt_sops_mem, load_secrets_dir, merge_secrets, resolve_secrets};
 use crate::config::models::PkgBackend;
 use crate::config::validation::validate_root;
@@ -13,7 +14,9 @@ pub struct CompiledConfig {
     /// UCI "apply done" sentinel so the rollback watchdog can't fire mid-install.
     pub package_commands: String,
     pub resolved_root: crate::config::models::Root,
-    pub secrets: HashMap<String, String>,
+    /// Decrypted secret values. The plaintext map is private inside
+    /// [`SecretMap`]; read a single value via `secrets.get(name)`.
+    pub secrets: SecretMap,
 }
 
 impl std::fmt::Debug for CompiledConfig {
@@ -73,6 +76,13 @@ pub fn compile_config(
     }
 
     let resolved_root = resolve_secrets(root, &secrets)?;
+
+    // Re-validate the escape hatch AFTER secret interpolation: a secret value
+    // substituted into a rawUci line can introduce shell metacharacters that
+    // were absent from the original config text. rawUci lines are emitted
+    // verbatim into the deploy script, so this must be checked on the final
+    // text or an injected secret becomes a shell injection.
+    crate::config::validation::validate_raw_uci(resolved_root.raw_uci.as_deref())?;
 
     let mut uci_batch = String::with_capacity(4096);
     serialize_uci(&mut uci_batch, &resolved_root.settings)?;
@@ -135,7 +145,7 @@ pub fn compile_config(
         uci_batch,
         package_commands,
         resolved_root,
-        secrets,
+        secrets: SecretMap::new(secrets),
     })
 }
 
@@ -186,6 +196,131 @@ mod tests {
         assert!(
             !out.uci_batch
                 .contains("touch /etc/config/dropbear dropbear")
+        );
+    }
+
+    /// Audit TODO 1.3 follow-up: rawUci lines are emitted verbatim into the
+    /// deploy script. The shell-metacharacter guard used to run only on the
+    /// pre-interpolation text, so a secret substituted into a rawUci line
+    /// could smuggle in `;` / `$(...)` and execute on the target.
+    #[test]
+    fn raw_uci_secret_cannot_inject_shell_metacharacters() {
+        let secrets_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            secrets_dir.path().join("evil.json"),
+            r#"{"proto": "static'; touch /tmp/pwned; echo '"}"#,
+        )
+        .unwrap();
+        let json = write_json(
+            r#"{
+                "packageManager": "opkg",
+                "settings": {},
+                "rawUci": [ "uci set network.lan.proto='@proto@'" ]
+            }"#,
+        );
+        let err = compile_config(json.path(), Some(secrets_dir.path()), true, None).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("shell metacharacter"),
+            "expected the metacharacter guard to fire, got: {msg}"
+        );
+    }
+
+    /// A benign secret must still interpolate into rawUci normally.
+    #[test]
+    fn raw_uci_secret_without_metacharacters_still_interpolates() {
+        let secrets_dir = tempfile::tempdir().unwrap();
+        std::fs::write(secrets_dir.path().join("ok.json"), r#"{"proto": "static"}"#).unwrap();
+        let json = write_json(
+            r#"{
+                "packageManager": "opkg",
+                "settings": {},
+                "rawUci": [ "uci set network.lan.proto='@proto@'" ]
+            }"#,
+        );
+        let out = compile_config(json.path(), Some(secrets_dir.path()), true, None).unwrap();
+        assert!(
+            out.uci_batch.contains("uci set network.lan.proto='static'"),
+            "got: {}",
+            out.uci_batch
+        );
+    }
+
+    /// A NUL byte in a value is silently deleted by the shell transport, so the
+    /// config would land with a *different* value and the deploy would still
+    /// report success. It must be rejected at compile time.
+    #[test]
+    fn option_value_with_nul_byte_is_rejected() {
+        let json = write_json(
+            "{\n\
+                \"packageManager\": \"opkg\",\n\
+                \"settings\": { \"network\": { \"lan\": { \"_type\": \"interface\", \"proto\": \"a\\u0000b\" } } }\n\
+            }",
+        );
+        let err = compile_config(json.path(), None, true, None).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("cannot be stored reliably"),
+            "expected the charset guard to fire, got: {msg}"
+        );
+    }
+
+    /// A newline in a value is split by the generator's per-line emission,
+    /// corrupting the value (`a\nb` becomes `a\nuci b`) while the deploy still
+    /// succeeds. It must be rejected at compile time.
+    #[test]
+    fn option_value_with_newline_is_rejected() {
+        let json = write_json(
+            "{\n\
+                \"packageManager\": \"opkg\",\n\
+                \"settings\": { \"network\": { \"lan\": { \"_type\": \"interface\", \"proto\": \"a\\nb\" } } }\n\
+            }",
+        );
+        let err = compile_config(json.path(), None, true, None).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("cannot be stored reliably"),
+            "expected the charset guard to fire, got: {msg}"
+        );
+    }
+
+    /// Values UCI genuinely accepts must keep working: spaces, UTF-8 and
+    /// shell-significant characters are all valid UCI content.
+    #[test]
+    fn option_value_with_uci_valid_specials_is_accepted() {
+        let json = write_json(
+            "{\n\
+                \"packageManager\": \"opkg\",\n\
+                \"settings\": { \"wireless\": { \"radio0\": { \"_type\": \"wifi-iface\",\n\
+                    \"ssid\": \"My Net\\u00e9\",\n\
+                    \"note\": \"a\\\\b $c 'd' \\\"e\\\"; f # g = h\",\n\
+                    \"key\": \"pass word\\twith tab\" } } }\n\
+            }",
+        );
+        let out = compile_config(json.path(), None, true, None).unwrap();
+        assert!(
+            out.uci_batch
+                .contains("set wireless.radio0.ssid='My Net\u{e9}'"),
+            "got: {}",
+            out.uci_batch
+        );
+    }
+
+    /// A list element with a NUL byte must be rejected too, not just scalars.
+    #[test]
+    fn list_value_with_nul_byte_is_rejected() {
+        let json = write_json(
+            "{\n\
+                \"packageManager\": \"opkg\",\n\
+                \"settings\": { \"system\": { \"ntp\": { \"_type\": \"ntp\",\n\
+                    \"server\": [\"ok\", \"bad\\u0000value\"] } } }\n\
+            }",
+        );
+        let err = compile_config(json.path(), None, true, None).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("cannot be stored reliably"),
+            "expected the charset guard to fire, got: {msg}"
         );
     }
 

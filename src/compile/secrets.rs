@@ -8,6 +8,60 @@ use std::io::BufReader;
 use std::path::Path;
 use std::process::Command;
 
+/// A map of decrypted secret values keyed by their JSON path (e.g. `wifi_pass`).
+///
+/// Audit E.5/4.6: plaintext secret material must not be reachable through
+/// `Debug`. The inner map is private, `Debug` prints only a count, and the
+/// only way to read a plaintext value is an explicit [`SecretMap::get`] call —
+/// so a stray `dbg!(config)` cannot dump credentials.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct SecretMap {
+    inner: HashMap<String, String>,
+}
+
+impl SecretMap {
+    pub fn new(inner: HashMap<String, String>) -> Self {
+        Self { inner }
+    }
+
+    /// Read one plaintext secret value. This is the deliberate boundary where
+    /// secret material is handed to the caller.
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.inner.get(key).map(|s| s.as_str())
+    }
+
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.inner.contains_key(key)
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Secret identifiers (not values) — safe to log.
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.inner.keys().map(|k| k.as_str())
+    }
+}
+
+impl std::fmt::Debug for SecretMap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretMap")
+            .field("count", &self.inner.len())
+            .field("keys", &self.inner.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+impl From<HashMap<String, String>> for SecretMap {
+    fn from(inner: HashMap<String, String>) -> Self {
+        Self::new(inner)
+    }
+}
 fn insert_secrets(
     secrets: &mut HashMap<String, String>,
     id_path: &mut Vec<String>,
@@ -341,6 +395,28 @@ mod tests {
     use indexmap::IndexMap;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn secret_map_debug_redacts_values() {
+        // Audit E.5/4.6: plaintext secret material must never reach a log.
+        let mut m = std::collections::HashMap::new();
+        m.insert("root_password".to_string(), "PLAINTEXT_PW".to_string());
+        m.insert("wifi_pass".to_string(), "PLAINTEXT_WIFI".to_string());
+        let sm = SecretMap::new(m);
+
+        let dbg = format!("{sm:?}");
+        assert!(!dbg.contains("PLAINTEXT_PW"), "secret leaked: {dbg}");
+        assert!(!dbg.contains("PLAINTEXT_WIFI"), "secret leaked: {dbg}");
+        // Identifiers are safe and useful for debugging.
+        assert!(dbg.contains("root_password"), "got: {dbg}");
+        assert!(dbg.contains("count: 2"), "got: {dbg}");
+        // The only way to read a value is an explicit get().
+        assert_eq!(sm.get("root_password"), Some("PLAINTEXT_PW"));
+        assert_eq!(sm.get("missing"), None);
+        assert!(sm.contains_key("wifi_pass"));
+        assert!(!sm.is_empty());
+        assert_eq!(sm.len(), 2);
+    }
 
     fn secrets(map: &[(&str, &str)]) -> HashMap<String, String> {
         map.iter()
