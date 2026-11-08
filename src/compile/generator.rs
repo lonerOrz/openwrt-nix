@@ -274,7 +274,7 @@ pub(crate) fn serialize_uci(
             // through verbatim; all other lines get the `uci ` prefix. This lets
             // a named-section delete be guarded on existence (`if uci -q get …;
             // then uci -q delete …; fi`) so a missing section is a no-op under
-            // `set -e` — without swallowing any *real* failure with `|| true`.
+            // `set -e` — without swallowing any *real* failure.
             writeln!(writer, "touch /etc/config/{config_name}").unwrap();
             for line in uci_cmds.lines() {
                 if line.starts_with("if ")

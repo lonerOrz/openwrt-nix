@@ -287,20 +287,12 @@ pub fn run(
     let mut connected = false;
     for _ in 0..30 {
         std::thread::sleep(std::time::Duration::from_secs(2));
-        // Probe connectivity and best-effort cancel the rollback watchdog in one call.
-        // `|| true` keeps the call's exit status reflecting the SSH link itself, not
-        // the pid file's presence (a missing/absent pid previously failed a healthy
-        // connection and wrongly triggered rollback-failure).
-        if ssh
-            .exec(
-                target,
-                "kill $(cat /tmp/.uci-watchdog-pid) 2>/dev/null || true",
-                None,
-                config,
-            )
-            .is_ok()
-        {
-            eprintln!("Connectivity verified, rollback watchdog cancelled.");
+        // Connectivity = the SSH link itself is up (probe `true` succeeds iff the
+        // exec runs). This must NOT depend on the watchdog pid file: after a prior
+        // successful deploy the pid is cleaned up, and a subsequent deploy would
+        // otherwise be misreported as "not back".
+        if ssh.exec(target, "true", None, config).is_ok() {
+            eprintln!("Connectivity verified.");
             connected = true;
             break;
         }
@@ -311,6 +303,17 @@ pub fn run(
             "Failed to reconnect within 60s. Target may have rolled back.".into(),
         ));
     }
+
+    // Best-effort cancel the rollback watchdog. Guard on the pid file so a missing
+    // file (already cleaned up, or this was a non-disconnect deploy) is a no-op
+    // rather than an error — but a real kill failure is still reported by `set -e`
+    // on the device. Its exec result is not required for deploy success.
+    let _ = ssh.exec(
+        target,
+        "test -f /tmp/.uci-watchdog-pid && kill $(cat /tmp/.uci-watchdog-pid)",
+        None,
+        config,
+    );
 
     let _ = ssh.exec(
         target,
@@ -425,13 +428,13 @@ mod tests {
         run(f.path(), "root@127.0.0.1", &config, None, &ssh).unwrap();
 
         let calls = ssh.calls.borrow();
-        assert_eq!(calls.len(), 4);
+        assert_eq!(calls.len(), 5);
         let (deploy_cmd, deploy_stdin) = &calls[1];
         assert_eq!(deploy_cmd, "cat > /tmp/deploy.sh && sh /tmp/deploy.sh");
         let script = String::from_utf8_lossy(deploy_stdin.as_ref().unwrap());
         assert!(script.contains("set network.lan.proto='static'"));
-        assert!(calls[2].0.contains("kill $(cat /tmp/.uci-watchdog-pid)"));
-        assert!(calls[3].0.contains("rm -rf /etc/.uci-rollback-backup"));
+        assert!(calls[3].0.contains("kill $(cat /tmp/.uci-watchdog-pid)"));
+        assert!(calls[4].0.contains("rm -rf /etc/.uci-rollback-backup"));
     }
 
     #[test]
@@ -588,7 +591,7 @@ mod tests {
 
         run(f.path(), "root@127.0.0.1", &config, None, &ssh).unwrap();
         let calls = ssh.calls.borrow();
-        assert_eq!(calls.len(), 3, "files declared must bypass the no-op skip");
+        assert_eq!(calls.len(), 4, "files declared must bypass the no-op skip");
         let script = String::from_utf8_lossy(calls[0].1.as_ref().unwrap());
         assert!(script.contains("cat > '/etc/flag'"));
     }
@@ -622,7 +625,7 @@ mod tests {
 
         run(f.path(), "root@127.0.0.1", &config, None, &ssh).unwrap();
         let calls = ssh.calls.borrow();
-        assert_eq!(calls.len(), 3, "rawUci declared must bypass the no-op skip");
+        assert_eq!(calls.len(), 4, "rawUci declared must bypass the no-op skip");
         let script = String::from_utf8_lossy(calls[0].1.as_ref().unwrap());
         assert!(script.contains("uci set network.lan.proto='static'"));
     }
@@ -658,8 +661,8 @@ mod tests {
         let calls = ssh.calls.borrow();
         assert_eq!(
             calls.len(),
-            4,
-            "capability probe + deploy + watchdog + rollback"
+            5,
+            "capability probe + deploy + connectivity probe + watchdog + rollback"
         );
         let script = String::from_utf8_lossy(calls[1].1.as_ref().unwrap());
         assert!(script.contains("opkg install 'htop'"));
@@ -696,7 +699,7 @@ mod tests {
         let calls = ssh.calls.borrow();
         assert_eq!(
             calls.len(),
-            3,
+            4,
             "sshKeys declared must bypass the no-op skip"
         );
         let script = String::from_utf8_lossy(calls[0].1.as_ref().unwrap());
@@ -740,7 +743,7 @@ mod tests {
         )
         .unwrap();
         let calls = ssh.calls.borrow();
-        assert_eq!(calls.len(), 3, "loaded secrets must bypass the no-op skip");
+        assert_eq!(calls.len(), 4, "loaded secrets must bypass the no-op skip");
     }
 
     #[test]
@@ -774,8 +777,10 @@ mod tests {
 
         run(f.path(), "root@127.0.0.1", &config, None, &ssh).unwrap();
 
-        // calls[0] = deploy script, calls[1] = watchdog check, calls[2] = cleanup
-        // (discovery call skipped when no settings to manage)
+        // First run: calls[0]=deploy script, calls[1]=connectivity probe,
+        // calls[2]=watchdog check, calls[3]=cleanup (discovery skipped when no
+        // settings to manage). Second run appends its own 4 calls, so the second
+        // deploy script is at calls[4].
         {
             let calls = ssh.calls.borrow();
             let script = String::from_utf8_lossy(calls[0].1.as_ref().unwrap());
@@ -797,8 +802,8 @@ mod tests {
         run(f2.path(), "root@127.0.0.1", &config, None, &ssh).unwrap();
         {
             let calls = ssh.calls.borrow();
-            // calls[3] is the second deploy script (first 3 are from the first run)
-            let script2 = String::from_utf8_lossy(calls[3].1.as_ref().unwrap());
+            // calls[4] is the second deploy script (first 4 are from the first run)
+            let script2 = String::from_utf8_lossy(calls[4].1.as_ref().unwrap());
             assert!(script2.contains("base64 -d > '/tmp/bin'"));
         }
     }

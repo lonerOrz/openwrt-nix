@@ -49,9 +49,7 @@ fn boot_rollback_hook() -> String {
     s.push_str("    rm -f /etc/init.d/nuci_rollback /etc/rc.d/S15nuci_rollback\n");
     s.push_str("fi\n");
     s.push_str("BOOT_EOF\n");
-    s.push_str("chmod +x /etc/init.d/nuci_rollback\n");
     s.push_str("ln -sf /etc/init.d/nuci_rollback /etc/rc.d/S15nuci_rollback\n");
-    s.push_str("timeout 5 sync 2>/dev/null || true\n");
     s
 }
 

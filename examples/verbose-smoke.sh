@@ -52,8 +52,8 @@ KEYEOF
 }
 
 cleanup() {
-  [[ -n $CLEANUP_CONTAINER ]] && "$ENGINE" stop "$CLEANUP_CONTAINER" >/dev/null 2>&1 || true
-  [[ -n $TMPKEY ]] && rm -rf "$(dirname "$TMPKEY")" >/dev/null 2>&1 || true
+  [[ -n $CLEANUP_CONTAINER ]] && "$ENGINE" stop "$CLEANUP_CONTAINER" >/dev/null 2>&1
+  [[ -n $TMPKEY ]] && rm -rf "$(dirname "$TMPKEY")" >/dev/null 2>&1
 }
 trap cleanup EXIT
 

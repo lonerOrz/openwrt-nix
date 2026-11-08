@@ -8,8 +8,8 @@ RUN mkdir -p /etc/apk/repositories.d && touch /etc/opkg/customfeeds.conf
 
 # Ensure apk is present (latest rootfs has it); install if missing.
 RUN if ! command -v apk >/dev/null 2>&1; then \
-      opkg update >/dev/null 2>&1 || true; \
-      opkg install apk-tools >/dev/null 2>&1 || true; \
+      opkg update >/dev/null 2>&1; \
+      opkg install apk-tools >/dev/null 2>&1; \
     fi
 
 # Pre-install tcpdump (for -tcpdump removal tests) and ca-certificates (for HTTPS feeds).

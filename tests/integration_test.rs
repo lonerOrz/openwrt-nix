@@ -359,7 +359,7 @@ async fn test_watchdog_rollback() {
 
     target.sh("cp -a /etc/config /tmp/.uci-rollback-backup");
     target.sh("uci set system.@system[0].hostname='CORRUPTED'; uci commit");
-    target.sh(&format!("pkill -f '/usr/sbin/{daemon}' || true"));
+    target.sh(&format!("pkill -f '/usr/sbin/{daemon}'"));
 
     target.sh("sleep 2");
     target.sh("cp -a /tmp/.uci-rollback-backup/* /etc/config/");
