@@ -24,6 +24,21 @@ pub struct Target {
     pub lock: std::sync::Mutex<()>,
 }
 
+impl Drop for Target {
+    fn drop(&mut self) {
+        // Best-effort stop of the backing container. `Target` is normally held in
+        // process-lifetime `OnceCell` statics (so this won't fire for them at exit),
+        // but a `Target` constructed anywhere else (or if the statics ever change)
+        // must not leak a running container. `ContainerAsync`'s own drop also stops
+        // it, but we stop by name here too for determinism across testcontainers
+        // versions and to make teardown explicit.
+        let engine = std::env::var("CONTAINER_ENGINE").unwrap_or_else(|_| "podman".to_string());
+        let _ = std::process::Command::new(&engine)
+            .args(["stop", "--time", "2", &self.name])
+            .status();
+    }
+}
+
 impl Target {
     pub async fn new(role: &str) -> Option<Self> {
         let engine = std::env::var("CONTAINER_ENGINE").unwrap_or_else(|_| "podman".to_string());

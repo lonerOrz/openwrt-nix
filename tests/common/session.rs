@@ -22,12 +22,19 @@ static APK_TARGET: OnceCell<Target> = OnceCell::const_new();
 
 pub fn get_session_artifacts() -> &'static SessionArtifacts {
     ARTIFACTS.get_or_init(|| {
+        // Best-effort teardown of residue from prior CI runs. `Target`s are held
+        // in process-lifetime `OnceCell` statics and are never dropped, so their
+        // backing containers survive a crashed/aborted test process. Leftover
+        // `nuci-*` containers (and their exposed SSH ports) are the most likely
+        // cause of the intermittent serial-test flakes we see in CI. We also prune
+        // stale `/tmp/nuci_test_sandbox_*` dirs to avoid inode/disk buildup.
+        cleanup_test_residue();
+
         let session_id = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
         let session_dir = PathBuf::from(format!("/tmp/nuci_test_sandbox_{session_id}"));
         std::fs::create_dir_all(&session_dir).expect("Failed to create test sandbox dir");
 
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-
         let src_tests = manifest_dir.join("tests");
         copy_tests_to_sandbox(&src_tests, &session_dir);
 
@@ -313,4 +320,60 @@ pub fn count_uci_sections(uci_show: &str) -> usize {
             }
         })
         .count()
+}
+
+/// Best-effort cleanup of residue left by crashed/aborted test runs. Targets
+/// live in process-lifetime `OnceCell` statics and are never dropped, so their
+/// backing containers survive a test process that panics or is killed mid-run.
+/// Those leaked `nuci-*` containers (and the SSH ports they hold) are the most
+/// likely root cause of the intermittent *serial* test flake seen in CI — one
+/// bad run starves the next. We also prune old `/tmp/nuci_test_sandbox_*` dirs.
+///
+/// All failures are swallowed: this is a test-hygiene convenience, never a
+/// precondition for the suite to run.
+fn cleanup_test_residue() {
+    let engine = std::env::var("CONTAINER_ENGINE").unwrap_or_else(|_| "podman".to_string());
+
+    // Force-remove (not just stop) leaked `nuci-*` containers. `Target`s live in
+    // process-lifetime `OnceCell` statics and are never dropped, so their backing
+    // containers survive a test process that panics or is killed mid-run. Stopped
+    // containers still pollute podman's state and consume resources, so we remove
+    // them outright. A fresh run starts its own containers keyed by unique uuid,
+    // so removing every `nuci-*` here cannot collide with a live one.
+    if let Ok(out) = Command::new(&engine)
+        .args([
+            "ps",
+            "-a",
+            "--filter",
+            "name=nuci-",
+            "--format",
+            "{{.Names}}",
+        ])
+        .output()
+        && out.status.success()
+    {
+        for name in String::from_utf8_lossy(&out.stdout).lines() {
+            let name = name.trim();
+            if !name.is_empty() {
+                let _ = Command::new(&engine).args(["rm", "-f", name]).status();
+            }
+        }
+    }
+
+    // Prune stale sandbox dirs older than ~1 hour (mtime-based, portable enough
+    // for CI runners whose /tmp isn't ephemeral between jobs).
+    if let Ok(entries) = std::fs::read_dir("/tmp") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("nuci_test_sandbox_")
+                && let Ok(meta) = entry.metadata()
+                && let Ok(modified) = meta.modified()
+                && let Ok(elapsed) = std::time::SystemTime::now().duration_since(modified)
+                && elapsed > std::time::Duration::from_secs(3600)
+            {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
 }

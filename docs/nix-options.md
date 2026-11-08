@@ -39,6 +39,7 @@
 | :--- | :--- | :--- | :--- |
 | `uci.files` | `listOf (submodule)` | `[]` | Custom files; see submodule below. |
 | `uci.sshKeys` | `listOf str` | `[]` | Keys deployed to `/etc/dropbear/authorized_keys` (`0600`). |
+- `sshKeys` entries may carry an OpenSSH `command="..."` restriction, but the value **must not contain shell metacharacters** (`;`, `&`, `|`, `` ` ``, `$()`, `$(`, etc.). `is_valid_authorized_key` rejects such keys as a conservative hardening measure — a `command=` that embeds shell syntax is treated as a potential injection vector, not a literal. If you need restricted keys, keep the command a single quoted program path plus arguments with no shell operators.
 
 ### `uci.files.*`
 

@@ -22,6 +22,8 @@ enum Command {
         secrets_dir: Option<PathBuf>,
         #[arg(long)]
         no_sops: bool,
+        #[arg(long)]
+        with_packages: bool,
     },
 
     Deploy {
@@ -69,8 +71,9 @@ fn main() {
             json,
             secrets_dir,
             no_sops,
+            with_packages,
         }) => {
-            run_compile(&json, secrets_dir.as_deref(), no_sops);
+            run_compile(&json, secrets_dir.as_deref(), no_sops, with_packages);
         }
         Some(Command::Deploy {
             json,
@@ -139,15 +142,16 @@ fn main() {
     }
 }
 
-fn run_compile(json_path: &Path, secrets_dir: Option<&Path>, skip_sops: bool) {
+fn run_compile(json_path: &Path, secrets_dir: Option<&Path>, skip_sops: bool, with_packages: bool) {
     match compile_config(json_path, secrets_dir, skip_sops, None) {
         Ok(compiled) => {
-            // UCI commands run first (per-command set -e, per-config commit).
+            // Default: emit only the UCI batch. `nuci compile` output is consumed
+            // verbatim as a shell script by `99-nuci-bootstrap` (firmware builds),
+            // which must not contain package-manager commands — those are baked
+            // into the image by the imagebuilder and would fail at first boot.
+            // `--with-packages` adds the package operations for human/CI audit.
             print!("{}", compiled.uci_batch);
-            // Package-manager commands run after the UCI "apply done" sentinel on
-            // the target, so they must be visible here too — a `compile` that only
-            // printed UCI would hide every feed/install/remove operation.
-            if !compiled.package_commands.is_empty() {
+            if with_packages && !compiled.package_commands.is_empty() {
                 println!(
                     "\n# Package-manager operations (run after UCI apply-done sentinel)\n{}",
                     compiled.package_commands
