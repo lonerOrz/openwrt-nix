@@ -20,19 +20,11 @@ use indexmap::IndexMap;
 use serde_json::Value;
 use std::fmt::Write as FmtWrite;
 
-/// A reference to a UCI section: either a named section (`config.name`) or an
-/// anonymous section addressed by its type and per-type index (`config.@type[i]`).
+/// A reference to a named UCI section (`config.name`). Used by `DeleteNamed`
+/// to address the section root for an existence-guarded delete.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UciSectionRef {
-    Named {
-        config: String,
-        name: String,
-    },
-    Anonymous {
-        config: String,
-        section_type: String,
-        index: usize,
-    },
+    Named { config: String, name: String },
 }
 
 impl UciSectionRef {
@@ -41,13 +33,6 @@ impl UciSectionRef {
     fn key(&self) -> String {
         match self {
             UciSectionRef::Named { config, name } => format!("{config}.{name}"),
-            UciSectionRef::Anonymous {
-                config,
-                section_type,
-                index,
-            } => {
-                format!("{config}.@{section_type}[{index}]")
-            }
         }
     }
 }

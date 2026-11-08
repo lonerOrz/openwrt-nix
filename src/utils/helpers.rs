@@ -1,15 +1,3 @@
-use std::borrow::Cow;
-
-// Used by tests to assert the zero-copy path; production uses push_escaped_single_quotes.
-#[allow(dead_code)]
-pub(crate) fn escape_single_quotes(s: &str) -> Cow<'_, str> {
-    if s.contains('\'') {
-        Cow::Owned(s.replace('\'', "'\\''"))
-    } else {
-        Cow::Borrowed(s)
-    }
-}
-
 pub(crate) fn push_escaped_single_quotes(out: &mut String, s: &str) {
     if !s.contains('\'') {
         out.push_str(s);
@@ -60,15 +48,6 @@ pub(crate) fn extract_package_name(file_name: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn escape_single_quotes_zero_copy() {
-        let plain = "hello";
-        assert!(matches!(escape_single_quotes(plain), Cow::Borrowed(_)));
-
-        let escaped = "it's";
-        assert_eq!(escape_single_quotes(escaped).as_ref(), "it'\\''s");
-    }
 
     #[test]
     fn push_escaped_single_quotes_no_alloc() {

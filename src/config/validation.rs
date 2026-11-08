@@ -42,9 +42,10 @@ fn is_valid_uci_type(s: &str) -> bool {
 ///   second half lands as a corrupted value while the deploy still reports
 ///   success.
 ///
-/// Everything else UCI accepts and round-trips correctly: space, tab, CR, DEL,
+/// Everything else UCI accepts and round-trips correctly: space, tab (0x09), DEL,
 /// UTF-8, and the shell-significant characters backslash, double quote, single
-/// quote, dollar, semicolon, hash and equals.
+/// quote, dollar, semicolon, hash and equals. (CR and other C0 controls are
+/// rejected above — see the filter at line 59.)
 fn validate_uci_value_chars(value: &str, where_: &str) -> Result<(), ConfigError> {
     let bad = value.chars().find(|c| {
         let c = *c as u32;

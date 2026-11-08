@@ -28,11 +28,17 @@ pub fn render_file_block(files: &[File]) -> String {
         // out of the argument and inject shell syntax.
         script.push_str(&format!("mkdir -p {}\n", shell_quote(&dir_str)));
 
+        let dest_quoted = shell_quote(dest);
+        let tmp_quoted = shell_quote(&format!("{dest}.tmp"));
+        // Idempotency guard: skip the rewrite if the existing file already
+        // matches the declared checksum. Inside, we write to `dest.tmp`, verify
+        // the written bytes (so a corrupted transfer cannot land), then atomically
+        // rename — a dropped connection or `set -e` abort mid-write leaves the
+        // production path untouched.
         let guard_open = match &file.checksum {
             Some(sum) => format!(
                 "if [ \"$(sha256sum {} 2>/dev/null | cut -d' ' -f1)\" != '{}' ]; then\n",
-                shell_quote(dest),
-                sum
+                dest_quoted, sum
             ),
             None => String::new(),
         };
@@ -45,7 +51,7 @@ pub fn render_file_block(files: &[File]) -> String {
             FileContent::Text(text) => {
                 script.push_str(&format!(
                     "{indent}cat > {} <<'NUCI_FILE_{i}_EOF'\n",
-                    shell_quote(dest)
+                    tmp_quoted
                 ));
                 script.push_str(indent);
                 script.push_str(text);
@@ -57,17 +63,24 @@ pub fn render_file_block(files: &[File]) -> String {
             FileContent::Base64(b64) => {
                 script.push_str(&format!(
                     "{indent}echo '{}' | base64 -d > {}\n",
-                    b64,
-                    shell_quote(dest)
+                    b64, tmp_quoted
                 ));
             }
         }
 
-        if file.executable {
-            script.push_str(&format!("{indent}chmod 755 {}\n", shell_quote(dest)));
-        } else {
-            script.push_str(&format!("{indent}chmod 644 {}\n", shell_quote(dest)));
+        if let Some(sum) = &file.checksum {
+            script.push_str(&format!(
+                "{indent}if [ \"$(sha256sum {} | cut -d' ' -f1)\" != '{}' ]; then echo 'checksum mismatch after write: {}' >&2; exit 1; fi\n",
+                tmp_quoted, sum, dest
+            ));
         }
+
+        if file.executable {
+            script.push_str(&format!("{indent}chmod 755 {}\n", tmp_quoted));
+        } else {
+            script.push_str(&format!("{indent}chmod 644 {}\n", tmp_quoted));
+        }
+        script.push_str(&format!("{indent}mv -f {} {}\n", tmp_quoted, dest_quoted));
 
         if file.checksum.is_some() {
             script.push_str("fi\n");
@@ -163,8 +176,13 @@ mod tests {
             script.contains("mkdir -p '/etc/foo'\\''bar'"),
             "got: {script}"
         );
+        // Writes to a .tmp staging path, then atomically renames into place.
         assert!(
-            script.contains("cat > '/etc/foo'\\''bar/baz' <<'NUCI_FILE_0_EOF'"),
+            script.contains("cat > '/etc/foo'\\''bar/baz.tmp' <<'NUCI_FILE_0_EOF'"),
+            "got: {script}"
+        );
+        assert!(
+            script.contains("mv -f '/etc/foo'\\''bar/baz.tmp' '/etc/foo'\\''bar/baz'"),
             "got: {script}"
         );
         // Must NOT contain a bare unescaped quote that splits the argument.
@@ -178,16 +196,28 @@ mod tests {
         let script = render_file_block(&[file("/etc/my dir/rc.local", "x")]);
         assert!(script.contains("mkdir -p '/etc/my dir'"), "got: {script}");
         assert!(
-            script.contains("cat > '/etc/my dir/rc.local'"),
+            script.contains("cat > '/etc/my dir/rc.local.tmp'"),
+            "got: {script}"
+        );
+        assert!(
+            script.contains("mv -f '/etc/my dir/rc.local.tmp' '/etc/my dir/rc.local'"),
             "got: {script}"
         );
     }
 
     #[test]
     fn plain_path_renders_unchanged() {
-        // No special chars -> output identical to the old (safe) rendering.
+        // No special chars -> output still writes through a .tmp staging file
+        // and renames into place (byte-identical result, safer update).
         let script = render_file_block(&[file("/etc/rc.local", "#!/bin/sh")]);
         assert!(script.contains("mkdir -p '/etc'"), "got: {script}");
-        assert!(script.contains("cat > '/etc/rc.local'"), "got: {script}");
+        assert!(
+            script.contains("cat > '/etc/rc.local.tmp'"),
+            "got: {script}"
+        );
+        assert!(
+            script.contains("mv -f '/etc/rc.local.tmp' '/etc/rc.local'"),
+            "got: {script}"
+        );
     }
 }
