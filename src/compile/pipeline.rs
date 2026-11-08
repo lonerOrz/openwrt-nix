@@ -7,7 +7,11 @@ use std::collections::HashMap;
 use std::path::Path;
 
 pub struct CompiledConfig {
+    /// UCI operations (typed sections, rawUci) only — no package-manager commands.
     pub uci_batch: String,
+    /// Package-manager operations (feeds, install, remove) — rendered after the
+    /// UCI "apply done" sentinel so the rollback watchdog can't fire mid-install.
+    pub package_commands: String,
     pub resolved_root: crate::config::models::Root,
     pub secrets: HashMap<String, String>,
 }
@@ -16,6 +20,7 @@ impl std::fmt::Debug for CompiledConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CompiledConfig")
             .field("uci_batch_len", &self.uci_batch.len())
+            .field("package_commands_len", &self.package_commands.len())
             .finish()
     }
 }
@@ -103,8 +108,9 @@ pub fn compile_config(
         Some(b) => b,
         None => PkgBackend::try_from(resolved_root.package_manager.as_str())?,
     };
+    let mut package_commands = String::with_capacity(1024);
     serialize_package_management(
-        &mut uci_batch,
+        &mut package_commands,
         backend,
         resolved_root.package_sources.as_ref(),
         resolved_root.packages.as_deref(),
@@ -112,6 +118,7 @@ pub fn compile_config(
 
     Ok(CompiledConfig {
         uci_batch,
+        package_commands,
         resolved_root,
         secrets,
     })

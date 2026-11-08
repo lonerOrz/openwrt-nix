@@ -132,11 +132,15 @@ fn test_command_generation_opkg() {
             "missing wifi key"
         );
         assert!(
-            out.contains("opkg remove"),
+            !out.contains("opkg remove"),
+            "package commands must not be in uci_batch"
+        );
+        assert!(
+            compiled.package_commands.contains("opkg remove"),
             "missing opkg remove for -tcpdump"
         );
         assert!(
-            !out.contains("-tcpdump"),
+            !compiled.package_commands.contains("-tcpdump"),
             "negative pkg prefix should be stripped from command"
         );
     });
@@ -155,7 +159,14 @@ fn test_command_generation_apk() {
             out.contains("set system.@system[0].hostname='rauter-apk'"),
             "missing apk hostname"
         );
-        assert!(out.contains("apk del"), "missing apk del for -tcpdump");
+        assert!(
+            !out.contains("apk del"),
+            "package commands must not be in uci_batch"
+        );
+        assert!(
+            compiled.package_commands.contains("apk del"),
+            "missing apk del for -tcpdump"
+        );
     });
 }
 
@@ -819,10 +830,18 @@ async fn test_deploy_invalid_uci_fails_loudly() {
     // A rawUci command that `uci` rejects (setting a non-existent section). Under
     // `set -e` the deploy script must abort at this command and report failure
     // via a non-zero exit, so `run()` returns Err — not a false success.
+    // A rawUci command that `uci` rejects unconditionally (malformed
+    // multi-level option path — fails even after the `touch /etc/config/<cfg>`
+    // the generator emits for rawUci). Under `set -e` the deploy script must
+    // abort at this command and report failure via a non-zero exit, so `run()`
+    // returns Err — not a false success. The `system` section mirrors the base
+    // config so no named-section orphan-delete corrupts the target first.
     let json = serde_json::json!({
         "packageManager": "opkg",
-        "settings": {},
-        "rawUci": ["uci set nonexistent.cfg01=bad"]
+        "settings": {
+            "system": { "system": [ { "_type": "system", "hostname": "rauter" } ] }
+        },
+        "rawUci": ["uci set system.@system[0].hostname.extra=x"]
     });
     let path = write_tmp_json(json.to_string());
 
@@ -849,15 +868,15 @@ async fn test_deploy_invalid_uci_fails_loudly() {
     );
 
     // Reconnect and confirm the failed op did NOT commit (acceptance: no
-    // subsequent commit, target stays at its pre-deploy state).
+    // subsequent commit, the rejected option is absent, target config intact).
     target.wait_ssh(Duration::from_secs(10));
+    assert!(
+        !target.uci_exists("system.@system[0].hostname.extra"),
+        "the rejected option must not have been committed"
+    );
     assert_eq!(
         target.uci_get("system.@system[0].hostname").as_deref(),
         Some("rauter"),
         "failed deploy must not corrupt the existing config"
-    );
-    assert!(
-        !target.uci_exists("nonexistent.cfg01"),
-        "the rejected section must not have been committed"
     );
 }

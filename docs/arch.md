@@ -16,7 +16,7 @@ Nix config ──► uci.json ──► nuci CLI ──► SSH ──► OpenWrt
 - **CLI layer**: `compile` generates UCI commands, `diff` performs a read-only comparison, `deploy` compiles and deploys.
 - **Target layer**: applies configuration idempotently, handling backup, rollback, and service reloads.
 
-Deployment lifecycle: backup `/etc/config` → arm rollback watchdog → apply (per-command `set -e`, per-config atomic commit) → on success, async reload → SSH handshake confirmation → automatic rollback on failure.
+Deployment lifecycle: backup `/etc/config` → arm rollback watchdog (guarded by an "apply done" sentinel) → apply UCI (per-command `set -e`, per-config atomic commit) → mark apply done → apply packages → on success, async reload → SSH handshake confirmation → automatic rollback on failure (watchdog fires only if the sentinel is absent).
 
 ## Project Features and Advantages
 
@@ -30,7 +30,7 @@ Deployment lifecycle: backup `/etc/config` → arm rollback watchdog → apply (
 **Advantages**
 
 - **Idempotent**: repeated deploys leave no duplicate or stale configuration.
-- **Anti-brick**: `set -e` makes a single failed UCI command abort the script and report failure (never a false success); the rollback watchdog — armed before apply — restores `/etc/config` on timeout, session loss, or power loss.
+- **Anti-brick**: `set -e` makes a single failed UCI command abort the script and report failure (never a false success); the rollback watchdog — armed before apply — restores `/etc/config` on timeout, session loss, or power loss, but only when the UCI "apply done" sentinel is absent, so a completed (or in-flight package) apply is never wrongly rolled back.
 - **SSH-friendly**: the success reload detaches after `set -e` reaches it, so reloading network services never causes false failures from connection resets, and a failed apply never reloads a broken config.
 - **Previewable**: `nuci diff` shows changes read-only without touching the target.
 

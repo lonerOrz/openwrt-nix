@@ -177,7 +177,9 @@ fn orphan_delete_commands(
             continue;
         }
         if !desired_named.contains(key) {
-            out.push_str(&format!("uci -q delete {key}\n"));
+            out.push_str(&format!(
+                "if uci -q get {key} >/dev/null 2>&1; then uci -q delete {key}; fi\n"
+            ));
         }
     }
     out
@@ -262,6 +264,7 @@ pub fn run(
             root: &compiled.resolved_root,
             secrets: &compiled.secrets,
             uci_commands,
+            package_commands: compiled.package_commands.clone(),
             deployer_key,
             managed_configs,
             service_map,
@@ -269,7 +272,6 @@ pub fn run(
             verbose: config.verbose,
         },
     );
-    eprintln!("Deploying to {target}...");
     let deploy_out = ssh.exec(
         target,
         "cat > /tmp/deploy.sh && sh /tmp/deploy.sh",
@@ -312,7 +314,7 @@ pub fn run(
 
     let _ = ssh.exec(
         target,
-        "rm -rf /etc/.uci-rollback-backup /etc/init.d/nuci_rollback /etc/rc.d/S15nuci_rollback /tmp/.uci-watchdog-pid /tmp/deploy.sh",
+        "rm -rf /etc/.uci-rollback-backup /etc/init.d/nuci_rollback /etc/rc.d/S15nuci_rollback /tmp/.uci-watchdog-pid /tmp/.nuci-deploy-ok /tmp/deploy.sh",
         None,
         config,
     );

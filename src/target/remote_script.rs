@@ -106,20 +106,21 @@ fn render_root_password(root_password: &str) -> String {
 /// Arms the detach-on-disconnect watchdog WITHOUT running a reload.
 ///
 /// The watchdog runs `sleep {watchdog_timeout}` in a `trap '' HUP` subshell so
-/// it survives SSH session loss; if a rollback backup still exists when it
-/// fires, it restores `/etc/config` and re-runs the reload commands before
-/// clearing state. This MUST be armed *before* the UCI apply stage, so that if
-/// the script aborts under `set -e` (a failing UCI op, or an SSH drop) the
-/// in-window rollback path is already live. The separate success-reload tail
-/// (see [`render_success_reload`]) runs only after a successful apply.
+/// it survives SSH session loss. On fire it reverts `/etc/config` from the
+/// rollback backup ONLY if the UCI "apply done" sentinel
+/// (`/tmp/.nuci-deploy-ok`) is absent — i.e. the apply did not complete
+/// cleanly (a `set -e` abort, or an SSH drop mid-apply). If the sentinel is
+/// present the apply succeeded and the watchdog just cleans up state. This MUST
+/// be armed *before* the UCI apply stage so mid-apply failures/drops land
+/// inside the protected window.
 fn arm_watchdog(reload_cmds: &str, watchdog_timeout: u64) -> String {
     format!(
         "( trap '' HUP; sleep {watchdog_timeout}; \
-          if [ -d /etc/.uci-rollback-backup ]; then \
+          if [ -d /etc/.uci-rollback-backup ] && [ ! -f /tmp/.nuci-deploy-ok ]; then \
               cp -a /etc/.uci-rollback-backup/* /etc/config/; \
               {reload_cmds} \
           fi; \
-          rm -rf /etc/.uci-rollback-backup /etc/init.d/nuci_rollback /etc/rc.d/S15nuci_rollback /tmp/.uci-watchdog-pid \
+          rm -rf /etc/.uci-rollback-backup /etc/init.d/nuci_rollback /etc/rc.d/S15nuci_rollback /tmp/.uci-watchdog-pid /tmp/.nuci-deploy-ok \
         ) >/dev/null 2>&1 </dev/null & \
           echo $! > /tmp/.uci-watchdog-pid\n"
     )
@@ -139,6 +140,10 @@ pub struct RenderInput<'a> {
     pub root: &'a Root,
     pub secrets: &'a HashMap<String, String>,
     pub uci_commands: String,
+    /// Package-manager operations, rendered AFTER the UCI "apply done" sentinel
+    /// so the rollback watchdog (armed before UCI) can't fire during a long
+    /// package install and wrongly revert an already-committed config.
+    pub package_commands: String,
     pub deployer_key: Option<String>,
     pub managed_configs: Vec<String>,
     pub service_map: BTreeMap<String, String>,
@@ -147,8 +152,9 @@ pub struct RenderInput<'a> {
 }
 
 /// Renders the full remote script: SSH keys, root password, files, the boot
-/// rollback hook, the UCI command batch, and the detached watchdog that
-/// reverts on timeout.
+/// rollback hook, the UCI apply stage (with the rollback watchdog armed before
+/// it), the "apply done" sentinel, the package-manager stage, and the detached
+/// success reload.
 ///
 /// When `verbose` is set, the script enables `set -x` tracing and emits a
 /// `[nuci] stage:` banner before each logical stage so `--verbose` surfaces an
@@ -158,6 +164,7 @@ pub fn build_remote_script(input: &RenderInput) -> String {
         root,
         secrets,
         uci_commands,
+        package_commands,
         deployer_key,
         managed_configs,
         service_map,
@@ -195,17 +202,28 @@ pub fn build_remote_script(input: &RenderInput) -> String {
     stage(&mut script, "uci");
     // Backup + boot hook first, so a rollback target exists before we mutate.
     script.push_str(&boot_rollback_hook());
-    // Arm the timeout-rollback watchdog before applying, so `set -e` aborts and
-    // SSH drops both land inside the protected window.
+    // Arm the timeout-rollback watchdog before applying: it reverts only if the
+    // UCI "apply done" sentinel is absent when it fires, so a `set -e` abort or
+    // an SSH drop mid-apply triggers rollback, but a completed apply does not.
     let reload_cmds = reload_commands(managed_configs, service_map);
     script.push_str(&arm_watchdog(&reload_cmds, *watchdog_timeout));
     script.push_str(uci_commands);
     script.push('\n');
+    // UCI apply completed (set -e would have aborted otherwise). Mark it so the
+    // watchdog won't revert a good config; package installs run after this and
+    // are NOT watchdog-protected (they don't corrupt UCI config, and a package
+    // failure is caught by set -e -> run() returns Err).
+    script.push_str("touch /tmp/.nuci-deploy-ok\n");
+
+    if !package_commands.is_empty() {
+        stage(&mut script, "packages");
+        script.push_str(package_commands);
+        script.push('\n');
+    }
 
     stage(&mut script, "reload");
-    // Success reload runs only after the apply stage completed (set -e otherwise
-    // exited first). It detaches so /tmp/deploy.sh can exit 0 and the foreground
-    // network/Dropbear reload doesn't sever the SSH link.
+    // Success reload runs only after every prior stage completed (set -e would
+    // have exited first), so a failed apply never reloads a broken config.
     script.push_str(&render_success_reload(&reload_cmds));
 
     script
@@ -330,6 +348,7 @@ mod tests {
             root: &root,
             secrets: &secrets,
             uci_commands: "set system.cfg01=system\n".to_string(),
+            package_commands: String::new(),
             deployer_key: None,
             managed_configs: vec![],
             service_map: std::collections::BTreeMap::new(),
@@ -350,6 +369,7 @@ mod tests {
             root: &root,
             secrets: &secrets,
             uci_commands: "set system.cfg01=system\n".to_string(),
+            package_commands: String::new(),
             deployer_key: None,
             managed_configs: vec![],
             service_map: std::collections::BTreeMap::new(),

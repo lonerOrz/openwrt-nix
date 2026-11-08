@@ -240,7 +240,7 @@ pub(crate) fn serialize_uci(
                     // `-q` keeps delete idempotent: a missing named section must
                     // not abort the script under `set -e` (the target may not
                     // yet have the section). Anonymous wipes above already use -q.
-                    writeln!(uci_cmds, "delete -q {config_name}.{section_name}").unwrap();
+                    writeln!(uci_cmds, "-q delete {config_name}.{section_name} || true").unwrap();
                     writeln!(uci_cmds, "set {config_name}.{section_name}={ty}").unwrap();
 
                     for (option_name, option) in &section.options {
@@ -470,7 +470,7 @@ mod tests {
         let mut w = String::new();
         serialize_uci(&mut w, &configs).unwrap();
 
-        assert!(w.contains("uci delete -q network.lan"));
+        assert!(w.contains("uci -q delete network.lan || true"));
         assert!(w.contains("set network.lan=interface"));
         assert!(w.contains("set network.lan.proto='static'"));
         assert!(w.contains("uci set network.lan=interface"));
@@ -562,7 +562,7 @@ mod tests {
 
         let mut w = String::new();
         serialize_uci(&mut w, &configs).unwrap();
-        assert!(w.contains("uci delete -q network.lan"));
+        assert!(w.contains("uci -q delete network.lan || true"));
     }
 
     #[test]
