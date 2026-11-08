@@ -163,7 +163,10 @@ impl TryFrom<&str> for PkgBackend {
     }
 }
 
-#[derive(Deserialize, Debug, Default)]
+/// Redacting Debug: feed/repo URLs can embed HTTP basic credentials
+/// (`https://user:pass@host/...`), so a derived `Debug` would leak them. Print
+/// only counts, never the URLs.
+#[derive(Deserialize)]
 pub struct PackageSources {
     /// Opkg-style feeds (`src/gz <name> <url>`). Written to
     /// `/etc/opkg/customfeeds.conf` only when the target uses opkg.
@@ -177,6 +180,34 @@ pub struct PackageSources {
     pub local_packages: Option<Vec<String>>,
 }
 
+impl std::fmt::Debug for PackageSources {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PackageSources")
+            .field(
+                "opkg_feeds",
+                &self
+                    .opkg_feeds
+                    .as_ref()
+                    .map_or(0, |v| v.len()),
+            )
+            .field(
+                "apk_repositories",
+                &self
+                    .apk_repositories
+                    .as_ref()
+                    .map_or(0, |v| v.len()),
+            )
+            .field(
+                "local_packages",
+                &self
+                    .local_packages
+                    .as_ref()
+                    .map_or(0, |v| v.len()),
+            )
+            .finish()
+    }
+}
+
 impl PackageSources {
     /// True only when every source list is absent or empty. Used by
     /// `read_package_manager_hint` so an empty `packageSources = { … = []; }`
@@ -188,7 +219,11 @@ impl PackageSources {
             && self.local_packages.as_ref().is_none_or(|v| v.is_empty())
     }
 }
-#[derive(Deserialize, Debug, Clone)]
+/// Holds UCI option values. After secret interpolation the `options` map carries
+/// plaintext credentials, so a derived `Debug` would leak them via any
+/// `dbg!(section)`. Custom Debug prints only the section `_type` and the option
+/// *names* — never the values.
+#[derive(Deserialize)]
 pub struct SectionData {
     #[serde(rename = "_type")]
     pub section_type: String,
@@ -196,14 +231,41 @@ pub struct SectionData {
     pub options: IndexMap<String, Value>,
 }
 
-#[derive(Deserialize, Debug)]
+impl std::fmt::Debug for SectionData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SectionData")
+            .field("_type", &self.section_type)
+            .field("options", &self.options.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+/// Redacting Debug: same rationale as [`SectionData`] — the inner options hold
+/// interpolated secret plaintext. Print only structure (the `_type`s present),
+/// never values.
+#[derive(Deserialize)]
 #[serde(untagged)]
 pub enum Section {
     List(Vec<SectionData>),
     Named(SectionData),
 }
 
-#[derive(Deserialize, Debug, Default)]
+impl std::fmt::Debug for Section {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Section::List(items) => {
+                let types: Vec<&str> = items.iter().map(|i| i.section_type.as_str()).collect();
+                f.debug_tuple("List").field(&types).finish()
+            }
+            Section::Named(data) => f.debug_tuple("Named").field(data).finish(),
+        }
+    }
+}
+
+/// Redacting Debug: a `File`'s `content` is the full file body (which may be a
+/// secret like a private key or an authorized_keys blob). Derived `Debug` would
+/// dump it through any `dbg!(file)`. Print only the path and content length.
+#[derive(Deserialize)]
 pub struct File {
     pub path: String,
     #[serde(default, deserialize_with = "deserialize_file_content")]
@@ -214,10 +276,39 @@ pub struct File {
     pub checksum: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl std::fmt::Debug for File {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("File")
+            .field("path", &self.path)
+            .field("content", &self.content)
+            .field("executable", &self.executable)
+            .field("checksum", &self.checksum)
+            .finish()
+    }
+}
+
+/// Redacting Debug: print only the variant and byte length, never the payload
+/// (which can be interpolated secret plaintext or an entire key file).
+#[derive(Clone, PartialEq, Eq)]
 pub enum FileContent {
     Text(String),
     Base64(String),
+}
+impl std::fmt::Debug for FileContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FileContent::Text(s) => {
+                f.debug_tuple("Text")
+                    .field(&format_args!("<{} bytes redacted>", s.len()))
+                    .finish()
+            }
+            FileContent::Base64(s) => {
+                f.debug_tuple("Base64")
+                    .field(&format_args!("<{} bytes redacted>", s.len()))
+                    .finish()
+            }
+        }
+    }
 }
 
 impl Default for FileContent {
@@ -330,6 +421,63 @@ mod tests {
         assert!(
             !dbg.contains("LEAKED_FILE_BODY"),
             "file content leaked: {dbg}"
+        );
+    }
+
+    #[test]
+    fn inner_type_debug_redacts_secret_payloads() {
+        // Audit 4.6: the secret-bearing inner types must redact their own Debug,
+        // because `Root`/`CompiledConfig` redaction only protects the top level —
+        // a stray `dbg!(section)` / `dbg!(file)` must not dump plaintext either.
+        let section = Section::Named(SectionData {
+            section_type: "interface".into(),
+            options: IndexMap::from([
+                ("password".into(), Value::String("PLAINTEXT_PW".into())),
+                ("_type".into(), Value::String("interface".into())),
+            ]),
+        });
+        let section_dbg = format!("{section:?}");
+        assert!(section_dbg.contains("interface"), "type must stay visible: {section_dbg}");
+        assert!(
+            !section_dbg.contains("PLAINTEXT_PW"),
+            "section option value leaked: {section_dbg}"
+        );
+
+        let file = File {
+            path: "/etc/secret.conf".into(),
+            content: FileContent::Text("LEAKED_BODY".into()),
+            executable: true,
+            checksum: Some("abc123".into()),
+        };
+        let file_dbg = format!("{file:?}");
+        assert!(file_dbg.contains("/etc/secret.conf"), "path must stay visible: {file_dbg}");
+        assert!(file_dbg.contains("<11 bytes redacted>"), "got: {file_dbg}");
+        assert!(
+            !file_dbg.contains("LEAKED_BODY"),
+            "file content leaked: {file_dbg}"
+        );
+
+        // Base64 variant redacts the encoded bytes too.
+        let b64_payload = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=";
+        let b64_dbg = format!("{:?}", FileContent::Base64(b64_payload.into()));
+        assert!(b64_dbg.contains(&format!("<{} bytes redacted>", b64_payload.len())), "got: {b64_dbg}");
+        assert!(
+            !b64_dbg.contains("QUJD"),
+            "base64 payload leaked: {b64_dbg}"
+        );
+
+        // PackageSources redacts feed/repo URLs (which may embed credentials).
+        let sources = PackageSources {
+            opkg_feeds: Some(vec!["src/gz custom https://user:pass@host/feed".into()]),
+            apk_repositories: Some(vec!["https://user:pw@repo.example/".into()]),
+            local_packages: None,
+        };
+        let sources_dbg = format!("{sources:?}");
+        assert!(sources_dbg.contains("opkg_feeds: 1"), "got: {sources_dbg}");
+        assert!(sources_dbg.contains("apk_repositories: 1"), "got: {sources_dbg}");
+        assert!(
+            !sources_dbg.contains("user:pass"),
+            "feed URL credentials leaked: {sources_dbg}"
         );
     }
 }
