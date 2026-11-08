@@ -6,8 +6,10 @@ use tokio::sync::OnceCell;
 
 // Use a /tmp sandbox to avoid Git working tree pollution and isolate parallel test sessions.
 pub struct SessionArtifacts {
+    // Kept alive for the session lifetime; never read directly.
     #[allow(dead_code)]
     pub session_dir: PathBuf,
+
     pub ssh_key: PathBuf,
     pub sops_key_dir: PathBuf,
     pub opkg_json: PathBuf,

@@ -1,4 +1,9 @@
-{ pkgs, lib, config, ... }:
+{
+  pkgs,
+  lib,
+  config,
+  ...
+}:
 {
   options.uci = {
     packageManager = lib.mkOption {
@@ -15,7 +20,7 @@
           throw "uci.packageSources.opkgFeeds may not be set on an apk target; use uci.packageSources.apkRepositories"
         else
           v;
-      description = "Package manager backend. Use \"apk\" for OpenWrt 25.12+ (default on current stable, apk became the default at 24.10); use \"opkg\" for older releases still on opkg. Runtime discovery verifies the target actually provides the selected backend. The package source list must match the backend: opkg targets use packageSources.opkgFeeds, apk targets use packageSources.apkRepositories; setting the other one is an error.";
+      description = "Package manager backend. The JSON default is \"opkg\" for backward compatibility with older releases; use \"apk\" for OpenWrt 25.12+ (apk is the default package manager there). Runtime discovery verifies the target actually provides the selected backend. The package source list must match the backend: opkg targets use packageSources.opkgFeeds, apk targets use packageSources.apkRepositories; setting the other one is an error.";
     };
     settings = lib.mkOption {
       default = { };

@@ -1,6 +1,6 @@
 # Configuration Examples
 
-## Basic Network & Firewall
+## Network and Firewall
 
 ```nix
 {
@@ -16,22 +16,9 @@
 }
 ```
 
-## Wireless & SOPS Secrets
+## Wireless
 
-Secrets use the `@name@` placeholder syntax (project-local; **not** sops-nix's
-`{{name}}`) resolved in-memory from decrypted SOPS values at `nuci compile` time.
-
-Interpolation applies to an explicit whitelist of fields:
-
-- `settings[*].options[*]` — UCI option values (scalars and list elements).
-- `packageSources.opkgFeeds` / `packageSources.apkRepositories` — feed/repo URLs.
-- `rawUci[*]` — custom UCI command lines.
-- `files[*].content` — only the **text** variant (never `base64`).
-- `sshKeys[*]` — authorized-key lines.
-
-`packages`, `packageSources.localPackages`, and `files[*].content` `base64` are never
-interpolated. Unknown-but-valid placeholder names error; sequences that are not valid
-identifiers are left verbatim.
+> Secrets use `@name@` placeholders (this project's syntax, not sops-nix's `{{name}}`), resolved from decrypted SOPS values in memory at compile time.
 
 ```nix
 {
@@ -46,19 +33,16 @@ identifiers are left verbatim.
 }
 ```
 
-## Package Management & Feeds
+## Packages
 
-`opkgFeeds` and `apkRepositories` are mutually exclusive: the source list must
-match the selected backend. Setting the other one is an error at `nix eval` time.
+> `opkgFeeds` and `apkRepositories` are mutually exclusive and must match `packageManager`.
 
 ```nix
 {
   uci.packageManager = "opkg"; # or "apk"
   uci.packages = [ "-tcpdump" "htop" ];
   uci.packageSources = {
-    # opkg target:
     opkgFeeds = [ "src/gz custom https://dl.openwrt.org/packages" ];
-    # apk target instead:
     # apkRepositories = [ "https://dl.openwrt.org/packages" ];
     localPackages = [ "./packages/luci-app-custom_1.0_all.ipk" ];
   };
@@ -70,9 +54,7 @@ match the selected backend. Setting the other one is an error at `nix eval` time
 ```nix
 {
   uci.files = [
-    # Text File (POSIX cat heredoc)
     { path = "/etc/config.txt"; content = "key=value\n"; }
-    # Binary File (Base64 + SHA256 checksum guard)
     {
       path = "/usr/bin/blob";
       base64 = "aGVsbG8=";
@@ -83,7 +65,7 @@ match the selected backend. Setting the other one is an error at `nix eval` time
 }
 ```
 
-## Escape Hatch (rawUci)
+## Raw UCI Commands
 
 ```nix
 {
@@ -94,7 +76,7 @@ match the selected backend. Setting the other one is an error at `nix eval` time
 }
 ```
 
-## Day-1 Firmware Build
+## Firmware Build
 
 ```nix
 exampleFirmware = uci.buildFirmware {

@@ -108,11 +108,9 @@ impl PkgBackend {
     }
 }
 
-/// Resolve the package source lines for the given backend.
-///
-/// `opkgFeeds` is only valid on an opkg target; `apkRepositories` only on an apk target.
-/// Supplying a field for the wrong backend is a configuration error (the two are
-/// mutually exclusive per target). An empty list means "no custom sources".
+/// `opkgFeeds` is only valid on an opkg target; `apkRepositories` only on an apk
+/// target. Supplying a field for the wrong backend is a configuration error (the
+/// two are mutually exclusive per target). An empty list means "no custom sources".
 fn resolve_feeds(
     backend: PkgBackend,
     sources: &PackageSources,
@@ -250,10 +248,9 @@ pub(crate) fn serialize_uci(
         write!(writer, "{shell_cmds}").unwrap();
 
         if !uci_cmds.is_empty() {
-            // Run the typed UCI ops through `uci batch`. Drop `-q` so a failing
-            // command's diagnostic (`uci: ... at line N`) reaches stderr and the
-            // non-zero exit propagates to run(), which reports it instead of a
-            // false success. Batch still commits atomically on success.
+            // No `-q`: a failing command's diagnostic (`uci: ... at line N`) must
+            // reach stderr, and the non-zero exit must propagate to run() instead
+            // of a false success. Batch still commits atomically on success.
             writeln!(writer, "touch /etc/config/{config_name}").unwrap();
             writeln!(writer, "uci batch <<'UCI_EOF'").unwrap();
             write!(writer, "{uci_cmds}").unwrap();
@@ -272,10 +269,9 @@ pub(crate) fn serialize_package_management(
     packages: Option<&[String]>,
 ) -> Result<(), ConfigError> {
     // Configure package feeds BEFORE install/remove so the manager can resolve
-    // the configured repositories. Unrecoverable container fact: the apk/opkg
-    // test images clear their default distfeeds, so a configured feed must be
-    // on disk before `apk add`/`opkg install` runs — otherwise the package
-    // fetch fails with no repositories configured.
+    // the configured repositories. The apk/opkg test images clear their default
+    // distfeeds, so a configured feed must be on disk before `apk add`/`opkg
+    // install` runs — otherwise the fetch fails with no repositories configured.
     if let Some(src_val) = sources
         && let Some(feeds) = resolve_feeds(backend, src_val)?
         && !feeds.is_empty()

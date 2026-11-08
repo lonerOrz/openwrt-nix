@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 
+// Used by tests to assert the zero-copy path; production uses push_escaped_single_quotes.
 #[allow(dead_code)]
 pub(crate) fn escape_single_quotes(s: &str) -> Cow<'_, str> {
     if s.contains('\'') {
