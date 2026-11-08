@@ -13,6 +13,13 @@ pub struct SessionArtifacts {
     pub sops_key_dir: PathBuf,
     pub opkg_json: PathBuf,
     pub apk_json: PathBuf,
+    /// UCI-only reset configs: the full deploy config with `packages` and
+    /// `packageSources` stripped so `reset_uci_state` never touches the package
+    /// manager (and thus never needs network to `opkg update`/`apk update`).
+    /// This keeps resets fast and offline-safe, removing the network flake that
+    /// otherwise fails every reset-using test when feeds are unreachable.
+    pub opkg_reset_json: PathBuf,
+    pub apk_reset_json: PathBuf,
 }
 
 static ARTIFACTS: OnceLock<SessionArtifacts> = OnceLock::new();
@@ -55,14 +62,40 @@ pub fn get_session_artifacts() -> &'static SessionArtifacts {
         let opkg_json = eval_nix_json(&manifest_dir, &temp_opkg_nix);
         let apk_json = eval_nix_json(&manifest_dir, &temp_apk_nix);
 
+        // Build UCI-only reset configs (no packages/feeds) so `reset_uci_state`
+        // is offline-safe and never runs `opkg update`/`apk update`.
+        let opkg_reset_json = strip_package_management(&session_dir, "opkg_reset.json", &opkg_json);
+        let apk_reset_json = strip_package_management(&session_dir, "apk_reset.json", &apk_json);
+
         SessionArtifacts {
             session_dir,
             ssh_key,
             sops_key_dir,
             opkg_json,
             apk_json,
+            opkg_reset_json,
+            apk_reset_json,
         }
     })
+}
+
+/// Reads a compiled nuci config JSON, drops `packages` and `packageSources`
+/// (the package-manager parts that require network to apply), and writes the
+/// result to `session_dir/<name>`. Returns the new path. Used to build the
+/// offline reset config so `reset_uci_state` never depends on feed reachability.
+fn strip_package_management(session_dir: &Path, name: &str, full_json: &Path) -> PathBuf {
+    let text = std::fs::read_to_string(full_json)
+        .unwrap_or_else(|e| panic!("read reset source {full_json:?}: {e}"));
+    let mut root: serde_json::Value = serde_json::from_str(&text)
+        .unwrap_or_else(|e| panic!("parse reset source {full_json:?}: {e}"));
+    if let Some(obj) = root.as_object_mut() {
+        obj.remove("packages");
+        obj.remove("packageSources");
+    }
+    let out_path = session_dir.join(name);
+    std::fs::write(&out_path, serde_json::to_string_pretty(&root).unwrap())
+        .unwrap_or_else(|e| panic!("write reset config {out_path:?}: {e}"));
+    out_path
 }
 
 fn generate_ssh_keypair(ssh_key: &Path) {
@@ -284,6 +317,17 @@ pub async fn get_apk_target() -> Target {
 
 pub fn opkg_json_path() -> PathBuf {
     get_session_artifacts().opkg_json.clone()
+}
+
+/// UCI-only reset config (no `packages`/`packageSources`) so resets run
+/// offline and never invoke `opkg update`/`apk update`.
+pub fn opkg_reset_json_path() -> PathBuf {
+    get_session_artifacts().opkg_reset_json.clone()
+}
+
+/// UCI-only reset config for the apk target.
+pub fn apk_reset_json_path() -> PathBuf {
+    get_session_artifacts().apk_reset_json.clone()
 }
 
 pub fn apk_json_path() -> PathBuf {

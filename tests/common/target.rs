@@ -1,5 +1,5 @@
 use super::session::{
-    apk_json_path, get_session_artifacts, opkg_json_path, sops_key_file, ssh_key_path,
+    apk_reset_json_path, get_session_artifacts, opkg_reset_json_path, sops_key_file, ssh_key_path,
 };
 use nuci::target::deploy::{self, DeployConfig, RealSsh};
 use std::fs;
@@ -232,9 +232,9 @@ impl Target {
     /// so a neighbouring test's deferred reload cannot contaminate shared state.
     pub(crate) fn reset_uci_state_inner(&self) {
         let json = if self.role == "opkg" {
-            opkg_json_path()
+            opkg_reset_json_path()
         } else {
-            apk_json_path()
+            apk_reset_json_path()
         };
         self.nuci_deploy_inner(&json);
         restore_reload_config(self);
