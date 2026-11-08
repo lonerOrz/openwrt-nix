@@ -30,8 +30,7 @@ Deployment lifecycle: backup `/etc/config` → arm rollback watchdog (guarded by
 **Advantages**
 
 - **Idempotent**: repeated deploys leave no duplicate or stale configuration.
-- **Anti-brick**: `set -e` makes a single failed UCI command abort the script and report failure (never a false success); the rollback watchdog — armed before apply — restores `/etc/config` on timeout, session loss, or power loss, but only when the UCI "apply done" sentinel is absent, so a completed (or in-flight package) apply is never wrongly rolled back.
-- **SSH-friendly**: the success reload detaches after `set -e` reaches it, so reloading network services never causes false failures from connection resets, and a failed apply never reloads a broken config.
+- **Watchdog cancellation**: after the apply completes, the deployer confirms the SSH handshake; on success it explicitly cancels the rollback watchdog (`test -f /tmp/.uci-watchdog-pid && kill …`). The "apply done" sentinel and the handshake cancellation are two halves of the same guard: the sentinel prevents the watchdog from firing on a *completed* apply, and the handshake cancellation prevents it from firing on a *successful reconnect* after the apply window. If the SSH session is lost before either happens, the watchdog reverts the config on timeout.
 - **Previewable**: `nuci diff` shows changes read-only without touching the target.
 
 ## Components Overview

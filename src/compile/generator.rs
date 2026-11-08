@@ -26,18 +26,22 @@ impl PkgBackend {
         match self {
             PkgBackend::Opkg => format!(
                 "if [ \"$NEED_INSTALL\" = true ]; then\n\
+                 __nuci_rc=1\n\
                  for __nuci_try in 1 2 3 4 5; do\n\
-                 {{ opkg update && opkg install {}; }} && break\n\
+                 {{ opkg update && opkg install {}; }} && {{ __nuci_rc=0; break; }}\n\
                  sleep 1\n\
-                 done\nfi",
+                 done\n\
+                 if [ $__nuci_rc -ne 0 ]; then exit 1; fi\nfi",
                 quoted.join(" ")
             ),
             PkgBackend::Apk => format!(
                 "if [ \"$NEED_INSTALL\" = true ]; then\n\
+                 __nuci_rc=1\n\
                  for __nuci_try in 1 2 3 4 5; do\n\
-                 apk update && apk add {} && break\n\
+                 apk update && apk add {} && {{ __nuci_rc=0; break; }}\n\
                  sleep 1\n\
-                 done\nfi",
+                 done\n\
+                 if [ $__nuci_rc -ne 0 ]; then exit 1; fi\nfi",
                 quoted.join(" ")
             ),
         }
@@ -1056,6 +1060,24 @@ mod tests {
         assert!(!malicious.contains("; touch"));
     }
 
+    #[test]
+    fn install_expr_exits_on_failure_after_retries() {
+        // Both backends must detect a failed install (all retries exhausted) and
+        // `exit 1` so `set -e` aborts the deploy script and reports failure —
+        // not a false success. Previously only `remove_expr` had this guard.
+        for backend in [PkgBackend::Opkg, PkgBackend::Apk] {
+            let expr = backend.install_expr(&["luci".into()]);
+            assert!(expr.contains("__nuci_rc=1"), "{backend:?} seeds __nuci_rc");
+            assert!(
+                expr.contains("if [ $__nuci_rc -ne 0 ]; then exit 1; fi"),
+                "{backend:?} exits 1 when all retries fail"
+            );
+            assert!(
+                expr.contains("__nuci_rc=0; break"),
+                "{backend:?} clears __nuci_rc on success"
+            );
+        }
+    }
     #[test]
     fn serialize_array_bool_val() {
         let mut w = String::new();

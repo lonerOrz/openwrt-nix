@@ -10,8 +10,20 @@ sysupgrade_url="https://downloads.openwrt.org/releases/${version}/targets/mediat
 
 echo "Downloading OpenWrt ${version}..."
 wget "${sysupgrade_url}" -O openwrt.sysupgrade.itb
-
 ssh -p "${PORT}" ${SSH_OPTS} "root@${HOST}" "cat > /tmp/openwrt.sysupgrade.itb" <openwrt.sysupgrade.itb
-ssh -p "${PORT}" ${SSH_OPTS} "root@${HOST}" "sysupgrade -v /tmp/openwrt.sysupgrade.itb" || true # device reboots and drops SSH, so the command exits nonzero on success
+ssh -p "${PORT}" ${SSH_OPTS} "root@${HOST}" "sysupgrade -v /tmp/openwrt.sysupgrade.itb"
+# sysupgrade reboots the device, so the SSH command above is *expected* to exit
+# non-zero (the connection drops mid-reboot). That is the success signal, not a
+# failure — do not let set -e treat it as one. We keep going to wait for the box
+# to come back, and the wait loop below enforces reachability before returning.
 
-while ! ping -c1 -W1 8.8.8.8; do sleep 2; done
+MAX_TRIES=60
+try=0
+while ! ping -c1 -W1 "${HOST}" >/dev/null 2>&1; do
+  try=$((try + 1))
+  if [ "${try}" -ge "${MAX_TRIES}" ]; then
+    echo "ERROR: ${HOST} did not come back after ${MAX_TRIES} pings" >&2
+    exit 1
+  fi
+  sleep 2
+done

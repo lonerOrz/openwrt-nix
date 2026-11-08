@@ -36,7 +36,12 @@ pub struct PackageHint {
 pub fn read_package_manager_hint(json_path: &Path) -> Result<PackageHint, ConfigError> {
     let file = std::fs::File::open(json_path)?;
     let root: crate::config::models::Root = serde_json::from_reader(std::io::BufReader::new(file))?;
-    let needs_pm = root.packages.is_some() || root.package_sources.is_some();
+    // `is_some()` alone is wrong: Nix modules emit `packages = []` and
+    // `packageSources = { opkgFeeds = []; apkRepositories = []; localPackages = []; }`,
+    // which `is_some()` treats as "needs package manager" and triggers an
+    // unnecessary runtime capability probe. Require at least one declared entry.
+    let needs_pm = root.packages.as_ref().is_some_and(|p| !p.is_empty())
+        || root.package_sources.as_ref().is_some_and(|s| !s.is_empty());
     Ok(PackageHint {
         declared: root.package_manager,
         needs_pm,
@@ -80,11 +85,21 @@ pub fn compile_config(
             let trimmed = line.trim();
             if let Some(rest) = trimmed.strip_prefix("uci set ") {
                 if let Some(cfg) = rest.split('.').next().filter(|c| !c.is_empty()) {
+                    if !crate::config::validation::is_valid_config_name(cfg) {
+                        return Err(ConfigError::Validation(format!(
+                            "rawUci references an invalid UCI config name '{cfg}'"
+                        )));
+                    }
                     needed.insert(cfg);
                 }
             } else if let Some(rest) = trimmed.strip_prefix("uci add ") {
                 // `uci add <config> <type>` — config is the first whitespace token
                 if let Some(cfg) = rest.split_whitespace().next().filter(|c| !c.is_empty()) {
+                    if !crate::config::validation::is_valid_config_name(cfg) {
+                        return Err(ConfigError::Validation(format!(
+                            "rawUci references an invalid UCI config name '{cfg}'"
+                        )));
+                    }
                     needed.insert(cfg);
                 }
             }
@@ -174,6 +189,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn raw_uci_invalid_config_name_errors() {
+        // `uci set a b.c=1` yields config token "a b" which is not a valid UCI
+        // config name; it must be rejected rather than producing `touch /etc/config/a b`.
+        let json = write_json(
+            r#"{
+                "packageManager": "opkg",
+                "settings": {},
+                "rawUci": [ "uci set a b.c=1" ]
+            }"#,
+        );
+        let err = compile_config(json.path(), None, true, None).unwrap_err();
+        assert!(
+            format!("{err}").contains("invalid UCI config name"),
+            "expected config-name error, got: {err}"
+        );
+        assert!(
+            !format!("{err}").contains(" b.c=1"),
+            "error must not echo the secret-bearing raw line contents"
+        );
+    }
     #[test]
     fn raw_uci_absent_when_not_declared() {
         let json = write_json(r#"{ "packageManager": "opkg", "settings": {} }"#);

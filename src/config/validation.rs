@@ -8,7 +8,7 @@ fn is_valid_uci_identifier(s: &str) -> bool {
         && !s.as_bytes()[0].is_ascii_digit()
         && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
-fn is_valid_config_name(s: &str) -> bool {
+pub(crate) fn is_valid_config_name(s: &str) -> bool {
     let bytes = s.as_bytes();
     !bytes.is_empty()
         && bytes[0].is_ascii_alphabetic()
@@ -41,12 +41,28 @@ fn validate_section_options(
                 format!("{config_name}.{section_path}.{opt_name} has null value"),
             ));
         }
+        if matches!(opt_val, Value::Object(_)) {
+            return Err(super::super::utils::error::ConfigError::Validation(
+                format!(
+                    "{config_name}.{section_path}.{opt_name} is an object; UCI option values must be a scalar or a list of scalars"
+                ),
+            ));
+        }
         if let Value::String(s) = opt_val
             && s.is_empty()
         {
             eprintln!(
                 "Warning: {config_name}.{section_path}.{opt_name} is empty string — UCI treats '' as unset. Consider omitting it."
             );
+        }
+        if let Value::Array(items) = opt_val
+            && items.iter().any(|v| matches!(v, Value::Object(_)))
+        {
+            return Err(super::super::utils::error::ConfigError::Validation(
+                format!(
+                    "{config_name}.{section_path}.{opt_name} contains a nested object; UCI list values must be scalars"
+                ),
+            ));
         }
     }
     Ok(())
@@ -139,7 +155,10 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), super::super::utils::erro
                     format!("files[{i}].path must be absolute, got: {path}"),
                 ));
             }
-            if path.contains("..") {
+            if std::path::Path::new(path)
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+            {
                 return Err(super::super::utils::error::ConfigError::Validation(
                     format!("files[{i}].path must not contain '..': {path}"),
                 ));

@@ -140,8 +140,20 @@ fn main() {
 }
 
 fn run_compile(json_path: &Path, secrets_dir: Option<&Path>, skip_sops: bool) {
-    match compile_config(json_path, secrets_dir, skip_sops, None).map(|c| c.uci_batch) {
-        Ok(output) => print!("{output}"),
+    match compile_config(json_path, secrets_dir, skip_sops, None) {
+        Ok(compiled) => {
+            // UCI commands run first (per-command set -e, per-config commit).
+            print!("{}", compiled.uci_batch);
+            // Package-manager commands run after the UCI "apply done" sentinel on
+            // the target, so they must be visible here too — a `compile` that only
+            // printed UCI would hide every feed/install/remove operation.
+            if !compiled.package_commands.is_empty() {
+                println!(
+                    "\n# Package-manager operations (run after UCI apply-done sentinel)\n{}",
+                    compiled.package_commands
+                );
+            }
+        }
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(1);

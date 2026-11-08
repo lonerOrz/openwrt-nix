@@ -229,21 +229,23 @@ pub(crate) fn load_secrets_dir(dir_path: &str) -> Result<HashMap<String, String>
             let sec_file = File::open(&path)?;
             let parsed: Value = serde_json::from_reader(BufReader::new(sec_file))?;
 
-            if let Value::Object(obj) = parsed {
-                let mut id_path = Vec::new();
+            let Value::Object(obj) = parsed else {
+                return Err(ConfigError::Validation(format!(
+                    "Secret file '{}' must contain a JSON object at the top level",
+                    path.display()
+                )));
+            };
 
-                for (k, v) in obj {
-                    if k == "sops" {
-                        continue;
-                    }
-
-                    if let Err(conflict) = insert_secrets(&mut secrets, &mut id_path, k, v) {
-                        return Err(ConfigError::Validation(format!(
-                            "Secret key '{}' conflicts with different values across files. File causing conflict: '{}'",
-                            conflict,
-                            path.display()
-                        )));
-                    }
+            for (k, v) in obj {
+                if k == "sops" {
+                    continue;
+                }
+                if let Err(conflict) = insert_secrets(&mut secrets, &mut Vec::new(), k, v) {
+                    return Err(ConfigError::Validation(format!(
+                        "Secret key '{}' conflicts with different values across files. File causing conflict: '{}'",
+                        conflict,
+                        path.display()
+                    )));
                 }
             }
         }
@@ -298,27 +300,34 @@ pub(crate) fn decrypt_sops_mem(root: &Root) -> Result<HashMap<String, String>, C
             .map_err(|e| ConfigError::Sops(format!("Failed to run sops: {e}")))?;
 
         if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             return Err(ConfigError::Sops(format!(
-                "Failed to decrypt sops file: {file}"
+                "Failed to decrypt sops file: {file}{}",
+                if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {stderr}")
+                }
             )));
         }
 
         let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
             .map_err(|e| ConfigError::Sops(format!("Failed to parse decrypted JSON: {e}")))?;
 
-        if let Value::Object(obj) = parsed {
-            let mut id_path = Vec::new();
+        let Value::Object(obj) = parsed else {
+            return Err(ConfigError::Sops(format!(
+                "SOPS file '{file}' must contain a JSON object at the top level"
+            )));
+        };
 
-            for (k, v) in obj {
-                if k == "sops" {
-                    continue;
-                }
-
-                if let Err(conflict) = insert_secrets(&mut secrets, &mut id_path, k, v) {
-                    return Err(ConfigError::Sops(format!(
-                        "Secret key '{conflict}' conflicts with different values across SOPS files. File causing conflict: '{file}'"
-                    )));
-                }
+        for (k, v) in obj {
+            if k == "sops" {
+                continue;
+            }
+            if let Err(conflict) = insert_secrets(&mut secrets, &mut Vec::new(), k, v) {
+                return Err(ConfigError::Sops(format!(
+                    "Secret key '{conflict}' conflicts with different values across SOPS files. File causing conflict: '{file}'"
+                )));
             }
         }
     }
@@ -941,7 +950,13 @@ mod tests {
         assert_eq!(s.as_ref(), "my@unclosed");
 
         let err = interpolate_secrets("has@in@middle@here", &HashMap::new()).unwrap_err();
-        assert!(format!("{err}").contains("in"));
+        let msg = format!("{err}");
+        // The error must name the referenced secret and explain it is missing —
+        // not a vague substring match that could pass on any message containing "in".
+        assert!(
+            msg.contains("Tried to use secret in, but no secret with this name specified."),
+            "expected missing-secret error, got: {msg}"
+        );
     }
 
     #[test]

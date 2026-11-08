@@ -97,6 +97,7 @@
             buildInputs = with pkgs; [
               just
               sops
+              age
               openssh
               mdbook
               cargo
@@ -105,7 +106,6 @@
               rustfmt
               config.treefmt.build.wrapper
             ];
-          };
         };
     };
 }

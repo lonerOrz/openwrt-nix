@@ -71,6 +71,17 @@ pub struct PackageSources {
     pub local_packages: Option<Vec<String>>,
 }
 
+impl PackageSources {
+    /// True only when every source list is absent or empty. Used by
+    /// `read_package_manager_hint` so an empty `packageSources = { … = []; }`
+    /// (as emitted by Nix modules) does not trigger an unnecessary runtime
+    /// capability probe.
+    pub fn is_empty(&self) -> bool {
+        self.opkg_feeds.as_ref().is_none_or(|v| v.is_empty())
+            && self.apk_repositories.as_ref().is_none_or(|v| v.is_empty())
+            && self.local_packages.as_ref().is_none_or(|v| v.is_empty())
+    }
+}
 #[derive(Deserialize, Debug, Clone)]
 pub struct SectionData {
     #[serde(rename = "_type")]
