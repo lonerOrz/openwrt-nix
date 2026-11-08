@@ -24,7 +24,7 @@
     secrets.sops.files = lib.mkOption {
       default = [ ];
       type = lib.types.listOf lib.types.path;
-      description = "List of sops files to parse and load. All keys in the provided files are merged into one attrset. Key collisions are ignored.";
+      description = "List of sops files to parse and load. All keys in the provided files are merged into one attrset. Key collisions (same key, different value) across files or between the secrets directory and SOPS are a hard error; values must be consistent across sources.";
     };
     packages = lib.mkOption {
       default = [ ];

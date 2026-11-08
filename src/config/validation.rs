@@ -172,7 +172,57 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), super::super::utils::erro
         }
     }
 
+    for key in &root.ssh_keys {
+        if !is_valid_authorized_key(key) {
+            return Err(super::super::utils::error::ConfigError::Validation(
+                format!(
+                    "sshKeys entry is not a valid authorized_keys line (must be a single line, no shell metacharacters): {key}"
+                ),
+            ));
+        }
+    }
+
+    if let Some(files) = &root.files {
+        for (i, file) in files.iter().enumerate() {
+            if let Some(sum) = &file.checksum
+                && !is_valid_sha256(sum)
+            {
+                return Err(super::super::utils::error::ConfigError::Validation(
+                    format!(
+                        "files[{i}].checksum must be a 64-character hex SHA-256 digest, got: {sum}"
+                    ),
+                ));
+            }
+        }
+    }
     Ok(())
+}
+
+/// A valid `authorized_keys` line is a single line (no newline/CR) containing at
+/// least two space-separated tokens (keytype + base64 body) and no shell
+/// metacharacters. We deliberately do NOT whitelist key types: the set evolves
+/// across OpenSSH/Dropbear versions and Dropbear also allows an options prefix
+/// (`restrict`, `command="..."`, ...). Rejecting on metacharacters-only blocks
+/// injection (newlines, `;`, `&`, `|`, backticks, `$()`) without constraining
+/// legitimate keys.
+fn is_valid_authorized_key(line: &str) -> bool {
+    if line.is_empty() || line.contains(['\n', '\r']) {
+        return false;
+    }
+    if line
+        .chars()
+        .any(|c| matches!(c, ';' | '&' | '|' | '`' | '$' | '(' | ')' | '<' | '>'))
+    {
+        return false;
+    }
+    line.split_whitespace().count() >= 2
+}
+
+/// SHA-256 digest: exactly 64 hexadecimal digits (case-insensitive), per
+/// NIST FIPS 180-4. The target-side `sha256sum` guard already expects this
+/// shape; this rejects malformed values at the config boundary.
+fn is_valid_sha256(sum: &str) -> bool {
+    sum.len() == 64 && sum.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 #[cfg(test)]
@@ -437,6 +487,77 @@ mod tests {
             assert!(
                 validate_root(&with_local_packages(empty_root(), vec![ok.to_string()])).is_ok(),
                 "'{ok}' should be accepted"
+            );
+        }
+    }
+
+    fn with_ssh_keys(mut root: Root, keys: Vec<String>) -> Root {
+        root.ssh_keys = keys;
+        root
+    }
+
+    fn with_checksum_file(mut root: Root, path: &str, checksum: Option<&str>) -> Root {
+        root.files = Some(vec![crate::config::models::File {
+            path: path.into(),
+            content: crate::config::models::FileContent::Text(String::new()),
+            executable: false,
+            checksum: checksum.map(|s| s.to_string()),
+        }]);
+        root
+    }
+
+    #[test]
+    fn accepts_valid_ssh_keys() {
+        for ok in [
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample user@host",
+            "ssh-rsa AAAAB3NzaC1yc2E... user@host",
+            "restrict,command=\"true\" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample",
+            "ecdsa-sha2-nistp256 AAAA...",
+        ] {
+            assert!(
+                validate_root(&with_ssh_keys(empty_root(), vec![ok.to_string()])).is_ok(),
+                "'{ok}' should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_ssh_keys() {
+        for bad in [
+            "",
+            "ssh-ed25519",
+            "ssh-ed25519 AAAA; rm -rf /",
+            "ssh-ed25519 AAAA$(id)",
+            "ssh-ed25519 AAAA`id`",
+            "ssh-ed25519 AAAA\nsecond",
+        ] {
+            let root = with_ssh_keys(empty_root(), vec![bad.to_string()]);
+            let err = validate_root(&root).unwrap_err();
+            assert!(
+                format!("{err}").contains("authorized_keys"),
+                "'{bad}' must be rejected: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_valid_checksum() {
+        let sum = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        assert!(validate_root(&with_checksum_file(empty_root(), "/etc/x", Some(sum))).is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_checksum() {
+        for bad in [
+            "abc",
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824Z",
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b98240",
+        ] {
+            let root = with_checksum_file(empty_root(), "/etc/x", Some(bad));
+            let err = validate_root(&root).unwrap_err();
+            assert!(
+                format!("{err}").contains("checksum"),
+                "'{bad}' must be rejected: {err}"
             );
         }
     }
