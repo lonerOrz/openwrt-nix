@@ -639,6 +639,90 @@ async fn test_unified_lifecycle() {
     );
 }
 
+/// TODO 2.4: real-UCI round-trip for the escaping-critical value set.
+///
+/// `compile_config` renders `uci set path='value'` lines using single-quote
+/// escaping. A pure string snapshot (and even `compile_config` unit tests) cannot
+/// prove the shell-quoted payload is parsed back by `uci` into the *exact* original
+/// value. This test applies the rendered batch on a real OpenWrt target and reads
+/// each value back via `uci get`, asserting lossless round-trip for the characters
+/// that actually stress the escaping: spaces, a single quote, a backslash, a
+/// leading `#`, a `;`, a `$` (shell-unsafe but UCI-safe), Unicode, and list
+/// elements with the same characters. Newline/tab/C0 are excluded because
+/// `validate_uci_value_chars` rejects them at compile time (E.2). The empty string
+/// is excluded too: `uci get` of an empty value returns empty output,
+/// indistinguishable from a missing option at the shell level — its `'')` rendering
+/// is already fixed and covered by the renderer unit test.
+#[tokio::test]
+async fn test_uci_value_roundtrip_on_real_target() {
+    let target = get_opkg_target().await;
+    target.reset_uci_state();
+
+    // One named section carrying every tricky scalar, plus a list option whose
+    // elements exercise the same characters at the `add_list` layer.
+    let json = serde_json::json!({
+        "packageManager": "opkg",
+        "settings": {
+            "nuci_rt": {
+                "vals": {
+                    "_type": "test",
+                    "plain": "plain",
+                    "spaces": "with spaces",
+                    "quote": "it's",
+                    "backslash": "back\\slash",
+                    "dollar": "$HOME",
+                    "hash": "# comment",
+                    "semicolon": "semicolon;",
+                    "unicode": "café—日本語",
+                    "list": ["a b", "it's", "x\\y", "$Z", "café"]
+                }
+            }
+        }
+    });
+    let path = write_tmp_json(json.to_string());
+    let compiled = compile_config(&path, None, true, None).expect("config must compile");
+
+    // Apply exactly the rendered UCI batch — no deploy scaffolding, just the
+    // same bytes a real deploy would send for the UCI phase.
+    target.sh(&format!("set -e\n{}", compiled.uci_batch));
+
+    let cases: &[(&str, &str)] = &[
+        ("nuci_rt.vals.plain", "plain"),
+        ("nuci_rt.vals.spaces", "with spaces"),
+        ("nuci_rt.vals.quote", "it's"),
+        ("nuci_rt.vals.backslash", "back\\slash"),
+        ("nuci_rt.vals.dollar", "$HOME"),
+        ("nuci_rt.vals.hash", "# comment"),
+        ("nuci_rt.vals.semicolon", "semicolon;"),
+        ("nuci_rt.vals.unicode", "café—日本語"),
+    ];
+    for (key, want) in cases {
+        assert_eq!(
+            target.uci_get(key).as_deref(),
+            Some(*want),
+            "round-trip mismatch for {key}"
+        );
+    }
+    // List elements must round-trip too. `uci get list` returns the space-joined
+    // members, and UCI's display layer wraps any member containing whitespace in
+    // single quotes (so `a b` comes back as `'a b'`); members without whitespace
+    // are emitted verbatim even if they contain a quote (`it's`). The stored
+    // values are correct — assert the exact UCI display string (after trimming the
+    // transport newline), which proves the rendered `add_list` payloads came back
+    // byte-for-byte from `uci`.
+    let list_raw = target
+        .uci_get("nuci_rt.vals.list")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    assert_eq!(
+        list_raw,
+        "'a b' it's x\\y $Z café",
+        "list round-trip mismatch"
+    );
+    target.reset_uci_state();
+}
+
 #[tokio::test]
 async fn test_custom_file_text_opkg() {
     let target = get_opkg_target().await;
