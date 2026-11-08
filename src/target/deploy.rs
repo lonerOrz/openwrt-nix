@@ -12,6 +12,52 @@ use crate::target::diff::{
 };
 use crate::utils::error::ConfigError;
 use indexmap::IndexMap;
+/// Removes the per-deploy staging script and watchdog pid file left on the
+/// target when `run` returns early (e.g. a failed UCI command aborts the deploy
+/// script via `set -e`, so execution never reaches the success-path cleanup).
+/// RAII: dropped on every `return` from `run`, so a failed deploy does not leave
+/// `/tmp/deploy.sh` behind (audit TODO 1.2, acceptance item 5).
+struct StagingCleanup<'a> {
+    target: &'a str,
+    ssh: &'a dyn SshExec,
+    config: &'a DeployConfig,
+    active: bool,
+}
+
+impl<'a> StagingCleanup<'a> {
+    /// Starts inert: no remote `rm` on drop until `arm()` is called, which only
+    /// happens after the staging script has actually been uploaded. This keeps the
+    /// guard a no-op for early returns that never wrote the script (no-op skip),
+    /// so it never issues a stray remote command.
+    fn new(target: &'a str, ssh: &'a dyn SshExec, config: &'a DeployConfig) -> Self {
+        Self { target, ssh, config, active: false }
+    }
+    /// Arm the guard: the staging script exists on the target and must be removed
+    /// on any subsequent early return.
+    fn arm(&mut self) {
+        self.active = true;
+    }
+    /// Success-path cleanup runs explicitly and disarms the guard so it does not
+    /// double-exec (the guard only needs to cover the early-return paths).
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for StagingCleanup<'_> {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let _ = self.ssh.exec(
+            self.target,
+            "rm -f /tmp/deploy.sh /tmp/.uci-watchdog-pid",
+            None,
+            self.config,
+        );
+    }
+}
+
 
 pub struct DeployConfig {
     pub port: u16,
@@ -192,6 +238,10 @@ pub fn run(
     secrets_dir: Option<&Path>,
     ssh: &dyn SshExec,
 ) -> Result<(), ConfigError> {
+    // Drop guard: removes the staging script + watchdog pid on any early return
+    // (e.g. a failing UCI command aborts the remote script via `set -e`). The
+    // success path disarms it after doing the full cleanup below.
+    let mut staging_cleanup = StagingCleanup::new(target, ssh, config);
     // The package manager actually on the target wins; probe only when the config
     // emits package-manager commands. Pure UCI/file deployments need no SSH probe.
     let hint = crate::compile::pipeline::read_package_manager_hint(json_path)?;
@@ -272,6 +322,11 @@ pub fn run(
             verbose: config.verbose,
         },
     );
+    // Arm the staging guard now: the script is about to be uploaded via this exec,
+    // and `cat > /tmp/deploy.sh` runs (and writes the file) before `&& sh` can
+    // fail. Any `set -e` abort inside the script returns early via `?` below, and
+    // the guard's Drop then removes the staged script.
+    staging_cleanup.arm();
     let deploy_out = ssh.exec(
         target,
         "cat > /tmp/deploy.sh && sh /tmp/deploy.sh",
@@ -304,10 +359,11 @@ pub fn run(
         ));
     }
 
-    // Best-effort cancel the rollback watchdog. Guard on the pid file so a missing
-    // file (already cleaned up, or this was a non-disconnect deploy) is a no-op
-    // rather than an error — but a real kill failure is still reported by `set -e`
-    // on the device. Its exec result is not required for deploy success.
+    // Full success cleanup: cancel watchdog, drop the rollback backup + boot hook,
+    // and clear the apply-done sentinel. The staging script + watchdog pid are
+    // already covered by `staging_cleanup` (which also fires on early returns), so
+    // disarm it here to avoid a redundant remote exec.
+    staging_cleanup.disarm();
     let _ = ssh.exec(
         target,
         "test -f /tmp/.uci-watchdog-pid && kill $(cat /tmp/.uci-watchdog-pid)",
@@ -805,6 +861,81 @@ mod tests {
             // calls[4] is the second deploy script (first 4 are from the first run)
             let script2 = String::from_utf8_lossy(calls[4].1.as_ref().unwrap());
             assert!(script2.contains("base64 -d > '/tmp/bin'"));
+        }
+    }
+
+    /// Audit TODO 1.2, acceptance item 5: a failed deploy must still clean up the
+    /// staging script. The guard is armed only after the script is uploaded, so a
+    /// failing remote `sh /tmp/deploy.sh` triggers an early `?` return in `run`,
+    /// and the `StagingCleanup` drop must issue `rm -f /tmp/deploy.sh` even though
+    /// the success-path cleanup never runs.
+    #[test]
+    fn run_cleans_staging_script_on_failed_deploy() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(
+            br#"{
+                "packageManager": "opkg",
+                "settings": {
+                    "network": { "lan": { "_type": "interface", "proto": "static" } }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let config = DeployConfig {
+            port: 22,
+            identity_file: None,
+            force: false,
+            no_sops: false,
+            watchdog_timeout: 60,
+            verbose: false,
+        };
+        // FailingSsh succeeds on the capability probe but errors when asked to run
+        // the deploy script, simulating a `set -e` abort on the target.
+        let ssh = FailingSsh {
+            calls: std::cell::RefCell::new(Vec::new()),
+        };
+
+        let result = run(f.path(), "root@127.0.0.1", &config, None, &ssh);
+        assert!(result.is_err(), "failed deploy script must surface an error");
+
+        let calls = ssh.calls.borrow();
+        let cleanup_ran = calls
+            .iter()
+            .any(|(cmd, _)| cmd.contains("rm -f /tmp/deploy.sh"));
+        assert!(
+            cleanup_ran,
+            "staging script must be removed even when the deploy fails: {calls:?}"
+        );
+    }
+
+    /// Like `FakeSsh` but the deploy-script exec fails, so `run` returns early.
+    struct FailingSsh {
+        calls: std::cell::RefCell<Vec<(String, Option<Vec<u8>>)>>,
+    }
+
+    impl SshExec for FailingSsh {
+        fn exec(
+            &self,
+            _target: &str,
+            cmd: &str,
+            stdin_data: Option<&[u8]>,
+            _config: &DeployConfig,
+        ) -> Result<String, ConfigError> {
+            self.calls
+                .borrow_mut()
+                .push((cmd.to_string(), stdin_data.map(|d| d.to_vec())));
+            if cmd.contains("command -v apk") {
+                return Ok("opkg\n".to_string());
+            }
+            // The deploy script is run via `cat > /tmp/deploy.sh && sh /tmp/deploy.sh`.
+            if cmd.contains("sh /tmp/deploy.sh") {
+                return Err(ConfigError::Deploy("simulated deploy failure".into()));
+            }
+            Ok(String::new())
         }
     }
 }

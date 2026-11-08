@@ -1061,3 +1061,4 @@ async fn test_apk_local_package_install_and_cleanup() {
         "staged /tmp/{pkg_name}.apk must be cleaned up after install"
     );
 }
+
