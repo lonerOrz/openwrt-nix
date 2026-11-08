@@ -117,8 +117,17 @@ pub(crate) fn extract_desired_map(
                     }
                 }
                 Section::List(arr) => {
-                    for (idx, item) in arr.iter().enumerate() {
+                    // Anonymous sections are indexed per-type in UCI
+                    // (`@rule[0]`, `@rule[1]`), not by global array position.
+                    // The renderer (compile/uci.rs) uses the same per-type
+                    // counter, so this must match or remote/diff key alignment
+                    // breaks.
+                    let mut type_index: std::collections::HashMap<&str, usize> =
+                        std::collections::HashMap::new();
+                    for item in arr.iter() {
                         let ty = &item.section_type;
+                        let idx = *type_index.entry(ty.as_str()).or_insert(0);
+                        *type_index.get_mut(ty.as_str()).unwrap() = idx + 1;
                         map.insert(anonymous_section_key(config_name, ty, idx), ty.clone());
                         for (opt, val) in &item.options {
                             if let Some(s) = val_str(val) {
@@ -405,6 +414,55 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+
+    fn extract_desired_map_indexes_anonymous_sections_per_type() {
+        use crate::config::models::{Section, SectionData};
+        use indexmap::IndexMap;
+        use serde_json::Value;
+        // Heterogeneous list: rule, redirect, rule. Per-type indexing yields
+        // @rule[0], @redirect[0], @rule[1] — NOT @rule[2]. A regression to a
+        // global enumerate() misaligns with the per-type UCI show output and
+        // breaks diff/deploy key matching.
+        let mut sections = IndexMap::new();
+        sections.insert(
+            "firewall".into(),
+            Section::List(vec![
+                SectionData {
+                    section_type: "rule".into(),
+                    options: IndexMap::from([("target".into(), Value::String("ACCEPT".into()))]),
+                },
+                SectionData {
+                    section_type: "redirect".into(),
+                    options: IndexMap::from([("dest".into(), Value::String("lan".into()))]),
+                },
+                SectionData {
+                    section_type: "rule".into(),
+                    options: IndexMap::from([("target".into(), Value::String("DROP".into()))]),
+                },
+            ]),
+        );
+        let mut configs = IndexMap::new();
+        configs.insert("firewall".into(), sections);
+
+        let map = extract_desired_map(&configs);
+        assert!(map.contains_key("firewall.@rule[0]"));
+        assert!(map.contains_key("firewall.@redirect[0]"));
+        assert!(map.contains_key("firewall.@rule[1]"));
+        assert!(!map.contains_key("firewall.@rule[2]"));
+        assert_eq!(
+            map.get("firewall.@rule[0].target"),
+            Some(&"ACCEPT".to_string())
+        );
+        assert_eq!(
+            map.get("firewall.@rule[1].target"),
+            Some(&"DROP".to_string())
+        );
+        assert_eq!(
+            map.get("firewall.@redirect[0].dest"),
+            Some(&"lan".to_string())
+        );
+    }
 
     #[test]
     fn parse_uci_show_strips_quotes() {
