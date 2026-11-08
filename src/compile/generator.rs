@@ -1,11 +1,8 @@
-use crate::config::models::{PackageSources, PkgBackend, Section, SectionData};
+use crate::config::models::{PackageSources, PkgBackend, Section};
 use crate::config::package::{PackageAction, RemotePath};
-use crate::config::uci_key::{anonymous_option_key, named_option_key};
 use crate::utils::error::ConfigError;
 use crate::utils::helpers::{extract_package_name, push_escaped_single_quotes, shell_quote};
 use indexmap::IndexMap;
-use serde_json::Value;
-use std::borrow::Cow;
 use std::fmt::Write as FmtWrite;
 use std::path::Path;
 
@@ -150,152 +147,20 @@ fn resolve_feeds(
     }
 }
 
-fn serialize_option_val(writer: &mut String, key: &str, val: &Value) -> Result<(), ConfigError> {
-    match val {
-        Value::String(s) => {
-            write!(writer, "set {key}='").unwrap();
-            push_escaped_single_quotes(writer, s);
-            writeln!(writer, "'").unwrap();
-        }
-        Value::Number(n) => {
-            writeln!(writer, "set {key}='{n}'").unwrap();
-        }
-        Value::Bool(b) => {
-            let bool_str = if *b { "1" } else { "0" };
-            writeln!(writer, "set {key}='{bool_str}'").unwrap();
-        }
-        Value::Array(arr) => {
-            for item in arr {
-                let s = match item {
-                    Value::String(s) => Cow::Borrowed(s.as_str()),
-                    Value::Number(n) => Cow::Owned(n.to_string()),
-                    Value::Bool(b) => Cow::Borrowed(if *b { "1" } else { "0" }),
-                    _ => {
-                        return Err(ConfigError::Validation(format!(
-                            "{:?} is not a supported list value type",
-                            item
-                        )));
-                    }
-                };
-                write!(writer, "add_list {key}='").unwrap();
-                push_escaped_single_quotes(writer, &s);
-                writeln!(writer, "'").unwrap();
-            }
-        }
-        _ => {
-            return Err(ConfigError::Validation(format!(
-                "{:?} is not a supported option value type",
-                val
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn list_type_of<'a>(item: &'a SectionData, fallback: &'a str) -> &'a str {
-    if item.section_type.is_empty() {
-        fallback
-    } else {
-        &item.section_type
-    }
-}
-
+/// Legacy entry point retained for callers and tests. This now delegates to the
+/// structured UCI model in `crate::compile::uci`, producing byte-identical
+/// output (audit TODO 2.1/2.2/2.3). The structured types are the supported
+/// interface going forward; this wrapper exists only to avoid churning every
+/// caller in this pure-refactor step.
+///
+/// Each UCI op is emitted as its own `uci <verb>` line (not a batch heredoc) so
+/// a deploy script under `set -e` aborts at the first failing command — `uci
+/// batch` can swallow an inner failure and still exit 0.
 pub(crate) fn serialize_uci(
     writer: &mut String,
     configs: &IndexMap<String, IndexMap<String, Section>>,
 ) -> Result<(), ConfigError> {
-    for (config_name, sections) in configs {
-        let mut shell_cmds = String::new();
-        let mut uci_cmds = String::new();
-
-        for (section_name, section) in sections {
-            match section {
-                Section::List(arr) => {
-                    let mut wiped_types = std::collections::HashSet::new();
-                    for list_obj in arr {
-                        let list_ty = list_type_of(list_obj, section_name);
-                        if wiped_types.insert(list_ty) {
-                            writeln!(
-                                shell_cmds,
-                                "while uci -q delete {config_name}.@{list_ty}[0]; do :; done"
-                            )
-                            .unwrap();
-                        }
-                    }
-
-                    // Anonymous sections are indexed per-type in UCI, so track a
-                    // separate counter for each type rather than the global position.
-                    let mut type_index: std::collections::HashMap<&str, usize> =
-                        std::collections::HashMap::new();
-                    for list_obj in arr.iter() {
-                        let ty = list_type_of(list_obj, section_name);
-                        let idx = *type_index.entry(ty).or_insert(0);
-                        type_index.insert(ty, idx + 1);
-                        writeln!(uci_cmds, "add {config_name} {ty}").unwrap();
-
-                        for (option_name, option) in &list_obj.options {
-                            let key = anonymous_option_key(config_name, ty, idx, option_name);
-                            serialize_option_val(&mut uci_cmds, &key, option)?;
-                        }
-                    }
-                }
-                Section::Named(section) => {
-                    let ty = &section.section_type;
-                    // Guard the delete on existence so a missing named section is a
-                    // no-op under `set -e` on first deploy — without hiding real
-                    // failures. `uci -q get` returns non-zero when absent, so the
-                    // `then` branch is skipped and the script continues; any later
-                    // `set`/`commit` failure still aborts via `set -e`.
-                    writeln!(
-                        uci_cmds,
-                        "if uci -q get {config_name}.{section_name}; then uci -q delete {config_name}.{section_name}; fi"
-                    )
-                    .unwrap();
-                    writeln!(uci_cmds, "set {config_name}.{section_name}={ty}").unwrap();
-
-                    for (option_name, option) in &section.options {
-                        let key = named_option_key(config_name, section_name, option_name);
-                        serialize_option_val(&mut uci_cmds, &key, option)?;
-                    }
-                }
-            }
-        }
-
-        // Invariant: shell_cmds (anonymous-section wipe loops) is only emitted
-        // alongside uci_cmds, never on its own.
-        debug_assert!(shell_cmds.is_empty() || !uci_cmds.is_empty());
-        write!(writer, "{shell_cmds}").unwrap();
-
-        if !uci_cmds.is_empty() {
-            // Each UCI op is emitted as its own `uci <verb>` line (not a batch
-            // heredoc). `set -e` then aborts the script at the first failing op —
-            // `uci batch` can swallow an inner failure and still exit 0, which
-            // would wrongly report success. We `touch` the config first so the
-            // file exists for `set`/`add`, then commit per-config so a failing op
-            // can't reach this config's commit.
-            //
-            // Lines that are shell guards (`if …; then`, `fi`, …) are passed
-            // through verbatim; all other lines get the `uci ` prefix. This lets
-            // a named-section delete be guarded on existence (`if uci -q get …;
-            // then uci -q delete …; fi`) so a missing section is a no-op under
-            // `set -e` — without swallowing any *real* failure.
-            writeln!(writer, "touch /etc/config/{config_name}").unwrap();
-            for line in uci_cmds.lines() {
-                if line.starts_with("if ")
-                    || line.starts_with("then ")
-                    || line.starts_with("else")
-                    || line.starts_with("fi")
-                {
-                    writeln!(writer, "{line}").unwrap();
-                } else {
-                    writeln!(writer, "uci {line}").unwrap();
-                }
-            }
-            writeln!(writer, "uci commit {config_name}").unwrap();
-        }
-    }
-
-    Ok(())
+    crate::compile::uci::compile_and_render(writer, configs)
 }
 
 pub(crate) fn serialize_package_management(
@@ -406,75 +271,8 @@ pub(crate) fn serialize_package_management(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::models::SectionData;
-
-    #[test]
-    fn serialize_string_val() {
-        let mut w = String::new();
-        serialize_option_val(&mut w, "system.hostname", &Value::String("test".into())).unwrap();
-        assert_eq!(w, "set system.hostname='test'\n");
-    }
-
-    #[test]
-    fn serialize_number_val() {
-        let mut w = String::new();
-        serialize_option_val(&mut w, "dhcp.start", &Value::Number(100.into())).unwrap();
-        assert_eq!(w, "set dhcp.start='100'\n");
-    }
-
-    #[test]
-    fn serialize_bool_val() {
-        let mut w = String::new();
-        serialize_option_val(&mut w, "wifi.enabled", &Value::Bool(true)).unwrap();
-        assert_eq!(w, "set wifi.enabled='1'\n");
-    }
-
-    #[test]
-    fn serialize_bool_false_val() {
-        let mut w = String::new();
-        serialize_option_val(&mut w, "wifi.enabled", &Value::Bool(false)).unwrap();
-        assert_eq!(w, "set wifi.enabled='0'\n");
-    }
-
-    #[test]
-    fn serialize_array_val() {
-        let mut w = String::new();
-        let arr = Value::Array(vec!["a".into(), "b".into()]);
-        serialize_option_val(&mut w, "net.dns", &arr).unwrap();
-        assert!(w.contains("add_list net.dns='a'"));
-        assert!(w.contains("add_list net.dns='b'"));
-    }
-
-    #[test]
-    fn serialize_nested_object_errors() {
-        let mut w = String::new();
-        let obj = serde_json::json!({"nested": "value"});
-        let err = serialize_option_val(&mut w, "key", &obj).unwrap_err();
-        assert!(format!("{err}").contains("not a supported option value type"));
-    }
-
-    #[test]
-    fn serialize_array_with_nested_object_errors() {
-        let mut w = String::new();
-        let arr = Value::Array(vec![serde_json::json!({"bad": true})]);
-        let err = serialize_option_val(&mut w, "key", &arr).unwrap_err();
-        assert!(format!("{err}").contains("not a supported list value type"));
-    }
-
-    #[test]
-    fn serialize_null_val_errors() {
-        let mut w = String::new();
-        let err = serialize_option_val(&mut w, "key", &Value::Null).unwrap_err();
-        assert!(format!("{err}").contains("not a supported option value type"));
-    }
-
-    #[test]
-    fn serialize_with_quote_escaping() {
-        let mut w = String::new();
-        let val = Value::String("it's".into());
-        serialize_option_val(&mut w, "sys.name", &val).unwrap();
-        assert_eq!(w, "set sys.name='it'\\''s'\n");
-    }
+    use crate::config::models::{Section, SectionData};
+    use serde_json::Value;
 
     #[test]
     fn serialize_named_section() {
@@ -1077,14 +875,6 @@ mod tests {
                 "{backend:?} clears __nuci_rc on success"
             );
         }
-    }
-    #[test]
-    fn serialize_array_bool_val() {
-        let mut w = String::new();
-        let arr = Value::Array(vec![Value::Bool(true), Value::Bool(false)]);
-        serialize_option_val(&mut w, "net.flag", &arr).unwrap();
-        assert!(w.contains("add_list net.flag='1'"));
-        assert!(w.contains("add_list net.flag='0'"));
     }
 
     #[test]
