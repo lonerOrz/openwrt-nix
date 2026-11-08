@@ -173,7 +173,10 @@ fn test_command_generation_apk() {
 #[tokio::test]
 async fn test_opkg_full_lifecycle() {
     let target = get_opkg_target().await;
-    target.reset_uci_state();
+    // Initial setup deploys the FULL config (packages + feeds), since this test
+    // asserts package state. `reset_uci_state` is now UCI-only/offline-safe and
+    // no longer installs packages.
+    target.nuci_deploy(&opkg_json_path());
 
     assert_eq!(
         target.uci_get("system.@system[0].hostname").as_deref(),
@@ -267,7 +270,10 @@ async fn test_opkg_full_lifecycle() {
 #[tokio::test]
 async fn test_apk_full_lifecycle() {
     let target = get_apk_target().await;
-    target.reset_uci_state();
+    // Initial setup deploys the FULL config (packages + repos), since this test
+    // asserts package state. `reset_uci_state` is now UCI-only/offline-safe and
+    // no longer installs packages.
+    target.nuci_deploy(&apk_json_path());
 
     assert_eq!(
         target.uci_get("system.@system[0].hostname").as_deref(),
@@ -789,7 +795,9 @@ fn sha256_hex(data: &[u8]) -> String {
 #[tokio::test]
 async fn test_package_matrix_opkg_all_scenarios() {
     let target = get_opkg_target().await;
-    target.reset_uci_state();
+    // Deploy the FULL config (packages + feeds) for setup; this test asserts
+    // package state, which `reset_uci_state` (UCI-only/offline-safe) no longer installs.
+    target.nuci_deploy(&opkg_json_path());
 
     assert!(
         !target.sh_ok("opkg status tcpdump 2>/dev/null | grep -q 'Status:.*installed'"),
@@ -804,7 +812,9 @@ async fn test_package_matrix_opkg_all_scenarios() {
 #[tokio::test]
 async fn test_package_matrix_apk_all_scenarios() {
     let target = get_apk_target().await;
-    target.reset_uci_state();
+    // Deploy the FULL config (packages + repos) for setup; this test asserts
+    // package state, which `reset_uci_state` (UCI-only/offline-safe) no longer installs.
+    target.nuci_deploy(&apk_json_path());
 
     assert!(
         !target.sh_ok("apk info -e tcpdump >/dev/null 2>&1"),
@@ -1059,7 +1069,10 @@ async fn test_compile_roundtrip_basic_scalar_config() {
 #[tokio::test]
 async fn test_apk_local_package_install_and_cleanup() {
     let target = get_apk_target().await;
-    target.reset_uci_state();
+    // Deploy the FULL config (packages + repos) for setup so the apk repositories
+    // are written; this test fetches a local .apk from a repo, which the
+    // UCI-only `reset_uci_state` no longer configures.
+    target.nuci_deploy(&apk_json_path());
 
     // Fetch a small, already-available package inside the container so the test
     // needs no extra network egress. Stage it on the device, copy it out with the
