@@ -242,9 +242,8 @@ pub fn run(
     secrets_dir: Option<&Path>,
     ssh: &dyn SshExec,
 ) -> Result<(), ConfigError> {
-    // Drop guard: removes the staging script + watchdog pid on any early return
-    // (e.g. a failing UCI command aborts the remote script via `set -e`). The
-    // success path disarms it after doing the full cleanup below.
+    // Drop guard (see StagingCleanup): removes the staging script + watchdog pid
+    // on any early return; the success path disarms it after the full cleanup.
     let mut staging_cleanup = StagingCleanup::new(target, ssh, config);
     // The package manager actually on the target wins; probe only when the config
     // emits package-manager commands. Pure UCI/file deployments need no SSH probe.
@@ -271,14 +270,19 @@ pub fn run(
 
     if !managed_refs.is_empty() {
         let discovery_cmd = build_discovery_command(&managed_refs);
-        if let Ok(remote_output) = ssh.exec(target, &discovery_cmd, None, config) {
-            let mut parts = remote_output.splitn(2, SERVICE_SEPARATOR);
-            let uci_output = parts.next().unwrap_or("");
-            let services_output = parts.next().unwrap_or("");
+        let remote_output = ssh
+            .exec(target, &discovery_cmd, None, config)
+            .map_err(|e| {
+                ConfigError::Deploy(format!(
+                    "Failed to read current configuration from {target} before deploy: {e}"
+                ))
+            })?;
+        let mut parts = remote_output.splitn(2, SERVICE_SEPARATOR);
+        let uci_output = parts.next().unwrap_or("");
+        let services_output = parts.next().unwrap_or("");
 
-            service_map = parse_services(services_output);
-            remote_map = parse_uci_show(uci_output);
-        }
+        service_map = parse_services(services_output);
+        remote_map = parse_uci_show(uci_output);
     }
 
     let desired_map = extract_desired_map(&compiled.resolved_root.settings);
@@ -343,6 +347,14 @@ pub fn run(
     }
 
     eprintln!("Waiting for target to come back (60s rollback window)...");
+    // The reconnect probe and the success cleanup are merged into one exec: the
+    // first round-trip that succeeds both verifies connectivity *and* runs the
+    // best-effort cleanup, eliminating up to two extra SSH round-trips after a
+    // successful reconnect.
+    let cleanup = "test -f /tmp/.uci-watchdog-pid && kill $(cat /tmp/.uci-watchdog-pid); \
+                   rm -rf /etc/.uci-rollback-backup /etc/init.d/nuci_rollback \
+                          /etc/rc.d/S15nuci_rollback /tmp/.uci-watchdog-pid \
+                          /tmp/.nuci-deploy-ok /tmp/deploy.sh";
     let mut connected = false;
     for _ in 0..30 {
         std::thread::sleep(std::time::Duration::from_secs(2));
@@ -350,8 +362,14 @@ pub fn run(
         // exec runs). This must NOT depend on the watchdog pid file: after a prior
         // successful deploy the pid is cleaned up, and a subsequent deploy would
         // otherwise be misreported as "not back".
-        if ssh.exec(target, "true", None, config).is_ok() {
+        if ssh
+            .exec(target, &format!("true && {cleanup}"), None, config)
+            .is_ok()
+        {
             eprintln!("Connectivity verified.");
+            // Full success cleanup done above (best-effort); disarm the RAII guard
+            // so its Drop does not issue a redundant remote `rm`.
+            staging_cleanup.disarm();
             connected = true;
             break;
         }
@@ -362,25 +380,6 @@ pub fn run(
             "Failed to reconnect within 60s. Target may have rolled back.".into(),
         ));
     }
-
-    // Full success cleanup: cancel watchdog, drop the rollback backup + boot hook,
-    // and clear the apply-done sentinel. The staging script + watchdog pid are
-    // already covered by `staging_cleanup` (which also fires on early returns), so
-    // disarm it here to avoid a redundant remote exec.
-    staging_cleanup.disarm();
-    let _ = ssh.exec(
-        target,
-        "test -f /tmp/.uci-watchdog-pid && kill $(cat /tmp/.uci-watchdog-pid)",
-        None,
-        config,
-    );
-
-    let _ = ssh.exec(
-        target,
-        "rm -rf /etc/.uci-rollback-backup /etc/init.d/nuci_rollback /etc/rc.d/S15nuci_rollback /tmp/.uci-watchdog-pid /tmp/.nuci-deploy-ok /tmp/deploy.sh",
-        None,
-        config,
-    );
 
     Ok(())
 }
@@ -488,13 +487,14 @@ mod tests {
         run(f.path(), "root@127.0.0.1", &config, None, &ssh).unwrap();
 
         let calls = ssh.calls.borrow();
-        assert_eq!(calls.len(), 5);
+        // discovery(0) + deploy(1) + reconnect/cleanup merged(2).
+        assert_eq!(calls.len(), 3);
         let (deploy_cmd, deploy_stdin) = &calls[1];
         assert_eq!(deploy_cmd, "cat > /tmp/deploy.sh && sh /tmp/deploy.sh");
         let script = String::from_utf8_lossy(deploy_stdin.as_ref().unwrap());
         assert!(script.contains("set network.lan.proto='static'"));
-        assert!(calls[3].0.contains("kill $(cat /tmp/.uci-watchdog-pid)"));
-        assert!(calls[4].0.contains("rm -rf /etc/.uci-rollback-backup"));
+        assert!(calls[2].0.contains("kill $(cat /tmp/.uci-watchdog-pid)"));
+        assert!(calls[2].0.contains("rm -rf /etc/.uci-rollback-backup"));
     }
 
     #[test]
@@ -537,12 +537,14 @@ mod tests {
         let script = String::from_utf8_lossy(calls[0].1.as_ref().unwrap());
 
         assert!(script.contains("mkdir -p '/etc/custom'"));
-        assert!(script.contains("cat > '/etc/rc.local'"));
+        assert!(script.contains("cat > '/etc/rc.local.tmp'"));
         assert!(script.contains("#!/bin/sh"));
         assert!(script.contains("echo hello"));
-        assert!(script.contains("chmod 755 '/etc/rc.local'"));
-        assert!(script.contains("cat > '/etc/custom/config.txt'"));
-        assert!(script.contains("chmod 644 '/etc/custom/config.txt'"));
+        assert!(script.contains("chmod 755 '/etc/rc.local.tmp'"));
+        assert!(script.contains("mv -f '/etc/rc.local.tmp' '/etc/rc.local'"));
+        assert!(script.contains("cat > '/etc/custom/config.txt.tmp'"));
+        assert!(script.contains("chmod 644 '/etc/custom/config.txt.tmp'"));
+        assert!(script.contains("mv -f '/etc/custom/config.txt.tmp' '/etc/custom/config.txt'"));
     }
 
     #[test]
@@ -581,13 +583,15 @@ mod tests {
         let calls = ssh.calls.borrow();
         let script = String::from_utf8_lossy(calls[0].1.as_ref().unwrap());
 
-        assert!(script.contains("echo 'aGVsbG8=' | base64 -d > '/usr/bin/blob'"));
-        assert!(script.contains("chmod 755 '/usr/bin/blob'"));
-        assert!(script.contains("sha256sum '/usr/bin/blob'"));
+        assert!(script.contains("echo 'aGVsbG8=' | base64 -d > '/usr/bin/blob.tmp'"));
+        assert!(script.contains("chmod 755 '/usr/bin/blob.tmp'"));
+        // Post-write checksum verify is against the .tmp file before rename.
+        assert!(script.contains("sha256sum '/usr/bin/blob.tmp'"));
         assert!(
             script.contains("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
         );
         assert!(script.contains("if [ \"$(sha256sum '/usr/bin/blob'"));
+        assert!(script.contains("mv -f '/usr/bin/blob.tmp' '/usr/bin/blob'"));
         assert!(script.contains("( sleep 1; "));
     }
 
@@ -651,9 +655,10 @@ mod tests {
 
         run(f.path(), "root@127.0.0.1", &config, None, &ssh).unwrap();
         let calls = ssh.calls.borrow();
-        assert_eq!(calls.len(), 4, "files declared must bypass the no-op skip");
+        assert_eq!(calls.len(), 2, "files declared must bypass the no-op skip");
         let script = String::from_utf8_lossy(calls[0].1.as_ref().unwrap());
-        assert!(script.contains("cat > '/etc/flag'"));
+        assert!(script.contains("cat > '/etc/flag.tmp'"));
+        assert!(script.contains("mv -f '/etc/flag.tmp' '/etc/flag'"));
     }
 
     #[test]
@@ -685,7 +690,7 @@ mod tests {
 
         run(f.path(), "root@127.0.0.1", &config, None, &ssh).unwrap();
         let calls = ssh.calls.borrow();
-        assert_eq!(calls.len(), 4, "rawUci declared must bypass the no-op skip");
+        assert_eq!(calls.len(), 2, "rawUci declared must bypass the no-op skip");
         let script = String::from_utf8_lossy(calls[0].1.as_ref().unwrap());
         assert!(script.contains("uci set network.lan.proto='static'"));
     }
@@ -721,8 +726,8 @@ mod tests {
         let calls = ssh.calls.borrow();
         assert_eq!(
             calls.len(),
-            5,
-            "capability probe + deploy + connectivity probe + watchdog + rollback"
+            3,
+            "capability probe + deploy + (connectivity probe + cleanup merged)"
         );
         let script = String::from_utf8_lossy(calls[1].1.as_ref().unwrap());
         assert!(script.contains("opkg install 'htop'"));
@@ -759,7 +764,7 @@ mod tests {
         let calls = ssh.calls.borrow();
         assert_eq!(
             calls.len(),
-            4,
+            2,
             "sshKeys declared must bypass the no-op skip"
         );
         let script = String::from_utf8_lossy(calls[0].1.as_ref().unwrap());
@@ -803,7 +808,7 @@ mod tests {
         )
         .unwrap();
         let calls = ssh.calls.borrow();
-        assert_eq!(calls.len(), 4, "loaded secrets must bypass the no-op skip");
+        assert_eq!(calls.len(), 2, "loaded secrets must bypass the no-op skip");
     }
 
     #[test]
@@ -837,14 +842,15 @@ mod tests {
 
         run(f.path(), "root@127.0.0.1", &config, None, &ssh).unwrap();
 
-        // First run: calls[0]=deploy script, calls[1]=connectivity probe,
-        // calls[2]=watchdog check, calls[3]=cleanup (discovery skipped when no
-        // settings to manage). Second run appends its own 4 calls, so the second
-        // deploy script is at calls[4].
+        // First run: calls[0]=deploy script, calls[1]=capability probe,
+        // calls[2]=reconnect probe + success cleanup (merged into one exec;
+        // discovery is skipped when there are no settings to manage). Second
+        // run appends its own 3 calls, so the second deploy script is at calls[3].
         {
             let calls = ssh.calls.borrow();
             let script = String::from_utf8_lossy(calls[0].1.as_ref().unwrap());
-            assert!(script.contains("cat > '/tmp/test.txt'"));
+            assert!(script.contains("cat > '/tmp/test.txt.tmp'"));
+            assert!(script.contains("mv -f '/tmp/test.txt.tmp' '/tmp/test.txt'"));
             assert!(script.contains("hello world"));
         }
         let json_text2 = r##"{
@@ -862,17 +868,15 @@ mod tests {
         run(f2.path(), "root@127.0.0.1", &config, None, &ssh).unwrap();
         {
             let calls = ssh.calls.borrow();
-            // calls[4] is the second deploy script (first 4 are from the first run)
-            let script2 = String::from_utf8_lossy(calls[4].1.as_ref().unwrap());
-            assert!(script2.contains("base64 -d > '/tmp/bin'"));
+            // calls[2] is the second deploy script (first 2 calls are from the first run)
+            let script2 = String::from_utf8_lossy(calls[2].1.as_ref().unwrap());
+            assert!(script2.contains("base64 -d > '/tmp/bin.tmp'"));
+            assert!(script2.contains("mv -f '/tmp/bin.tmp' '/tmp/bin'"));
         }
     }
 
-    /// Audit TODO 1.2, acceptance item 5: a failed deploy must still clean up the
-    /// staging script. The guard is armed only after the script is uploaded, so a
-    /// failing remote `sh /tmp/deploy.sh` triggers an early `?` return in `run`,
-    /// and the `StagingCleanup` drop must issue `rm -f /tmp/deploy.sh` even though
-    /// the success-path cleanup never runs.
+    /// A failed remote deploy (early `?` return) must still leave no staging
+    /// script: `StagingCleanup::drop` issues `rm -f /tmp/deploy.sh`.
     #[test]
     fn run_cleans_staging_script_on_failed_deploy() {
         use std::io::Write;
