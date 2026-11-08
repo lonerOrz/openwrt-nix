@@ -6,6 +6,7 @@
 //! - `transfer_packages`: bundles declared local packages into a tar and ships
 //!   them through the injected `SshExec` transport.
 
+use crate::utils::helpers::shell_quote;
 use std::path::Path;
 
 use crate::config::models::{File, FileContent, Root};
@@ -21,11 +22,17 @@ pub fn render_file_block(files: &[File]) -> String {
         let dest = &file.path;
         let dir = Path::new(dest).parent().unwrap_or_else(|| Path::new("/"));
         let dir_str = dir.to_string_lossy();
-        script.push_str(&format!("mkdir -p '{dir_str}'\n"));
+        // Paths are user-supplied and may contain spaces or single quotes, so
+        // every occurrence is shell-quoted (matching how packages are hardened
+        // via `RemotePath`). Naked `'{dest}'` would let a quote in a path break
+        // out of the argument and inject shell syntax.
+        script.push_str(&format!("mkdir -p {}\n", shell_quote(&dir_str)));
 
         let guard_open = match &file.checksum {
             Some(sum) => format!(
-                "if [ \"$(sha256sum '{dest}' 2>/dev/null | cut -d' ' -f1)\" != '{sum}' ]; then\n"
+                "if [ \"$(sha256sum {} 2>/dev/null | cut -d' ' -f1)\" != '{}' ]; then\n",
+                shell_quote(dest),
+                sum
             ),
             None => String::new(),
         };
@@ -36,7 +43,10 @@ pub fn render_file_block(files: &[File]) -> String {
         // heredoc, and only explicit base64 payloads are decoded (never re-encoded).
         match &file.content {
             FileContent::Text(text) => {
-                script.push_str(&format!("{indent}cat > '{dest}' <<'NUCI_FILE_{i}_EOF'\n"));
+                script.push_str(&format!(
+                    "{indent}cat > {} <<'NUCI_FILE_{i}_EOF'\n",
+                    shell_quote(dest)
+                ));
                 script.push_str(indent);
                 script.push_str(text);
                 if !text.ends_with('\n') {
@@ -45,14 +55,18 @@ pub fn render_file_block(files: &[File]) -> String {
                 script.push_str(&format!("{indent}NUCI_FILE_{i}_EOF\n"));
             }
             FileContent::Base64(b64) => {
-                script.push_str(&format!("{indent}echo '{b64}' | base64 -d > '{dest}'\n"));
+                script.push_str(&format!(
+                    "{indent}echo '{}' | base64 -d > {}\n",
+                    b64,
+                    shell_quote(dest)
+                ));
             }
         }
 
         if file.executable {
-            script.push_str(&format!("{indent}chmod 755 '{dest}'\n"));
+            script.push_str(&format!("{indent}chmod 755 {}\n", shell_quote(dest)));
         } else {
-            script.push_str(&format!("{indent}chmod 644 '{dest}'\n"));
+            script.push_str(&format!("{indent}chmod 644 {}\n", shell_quote(dest)));
         }
 
         if file.checksum.is_some() {
@@ -123,4 +137,57 @@ pub fn transfer_packages(
     eprintln!("Transferring to {target}:/tmp/ via SSH stream...");
     ssh.exec(target, "tar -xf - -C /tmp", Some(&tar_bytes), config)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::models::FileContent;
+
+    fn file(path: &str, content: &str) -> File {
+        File {
+            path: path.to_string(),
+            content: FileContent::Text(content.to_string()),
+            executable: false,
+            checksum: None,
+        }
+    }
+
+    #[test]
+    fn quotes_path_with_single_quote() {
+        // A `'` in the path must be escaped inside the argument, not break the
+        // surrounding single quotes (which would let it inject shell syntax).
+        // `dir` is the parent (`/etc/foo'bar`); the file target is the full path.
+        let script = render_file_block(&[file("/etc/foo'bar/baz", "hi")]);
+        assert!(
+            script.contains("mkdir -p '/etc/foo'\\''bar'"),
+            "got: {script}"
+        );
+        assert!(
+            script.contains("cat > '/etc/foo'\\''bar/baz' <<'NUCI_FILE_0_EOF'"),
+            "got: {script}"
+        );
+        // Must NOT contain a bare unescaped quote that splits the argument.
+        assert!(!script.contains("'/etc/foo'bar/baz"), "got: {script}");
+    }
+
+    #[test]
+    fn quotes_path_with_space() {
+        // `mkdir -p` receives the *parent* dir; the file target keeps the full
+        // path. Both must be quoted when they contain spaces.
+        let script = render_file_block(&[file("/etc/my dir/rc.local", "x")]);
+        assert!(script.contains("mkdir -p '/etc/my dir'"), "got: {script}");
+        assert!(
+            script.contains("cat > '/etc/my dir/rc.local'"),
+            "got: {script}"
+        );
+    }
+
+    #[test]
+    fn plain_path_renders_unchanged() {
+        // No special chars -> output identical to the old (safe) rendering.
+        let script = render_file_block(&[file("/etc/rc.local", "#!/bin/sh")]);
+        assert!(script.contains("mkdir -p '/etc'"), "got: {script}");
+        assert!(script.contains("cat > '/etc/rc.local'"), "got: {script}");
+    }
 }

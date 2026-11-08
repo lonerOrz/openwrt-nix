@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 use std::collections::HashSet;
 
 use crate::compile::secrets::SecretMap;
+use crate::utils::helpers::shell_quote;
+
 use crate::config::models::Root;
 
 fn reload_commands(modified: &[String], service_map: &BTreeMap<String, String>) -> String {
@@ -92,12 +94,20 @@ fn render_root_password(root_password: &str) -> String {
     if root_password.is_empty() {
         return String::new();
     }
+    // `chpasswd` reads `user:password` from stdin, so the password is carried in
+    // a single-quoted heredoc body — safe for any password content (quotes, `%`,
+    // backslashes). The `passwd` fallback pipes two copies of the password into
+    // `passwd root`; it is the *format arguments* that are shell-quoted (NOT
+    // interpolated bare inside single quotes), so a password containing `'` or
+    // other shell-significant characters cannot break out of the argument.
     format!(
         "if command -v chpasswd >/dev/null 2>&1; then\n\
          chpasswd <<'CHPWD'\nroot:{root_password}\nCHPWD\n\
          else\n\
-         printf '%s\\n%s\\n' '{root_password}' '{root_password}' | passwd root >/dev/null 2>&1\n\
-         fi\n"
+         printf '%s\\n%s\\n' {} {} | passwd root >/dev/null 2>&1\n\
+         fi\n",
+        shell_quote(root_password),
+        shell_quote(root_password),
     )
 }
 
@@ -395,5 +405,28 @@ mod tests {
         assert!(pos("[nuci] stage: ssh-keys") < pos("[nuci] stage: files"));
         assert!(pos("[nuci] stage: files") < pos("[nuci] stage: uci"));
         assert!(pos("[nuci] stage: uci") < pos("[nuci] stage: reload"));
+    }
+
+    #[test]
+    fn root_password_fallback_quotes_special_chars() {
+        // The `passwd` fallback interpolates the password as a `printf` argument;
+        // a `'` in the password must be escaped, not break out of the single
+        // quotes. `%` and `\` must also stay literal (no format/escape expansion).
+        let out = render_root_password("a'b%c\\d");
+        assert!(
+            out.contains("printf '%s\\n%s\\n' 'a'\\''b%c\\d' 'a'\\''b%c\\d'"),
+            "got: {out}"
+        );
+        // chpasswd path (primary) carries the password in a heredoc body: safe,
+        // printed verbatim.
+        assert!(
+            out.contains("chpasswd <<'CHPWD'\nroot:a'b%c\\d\nCHPWD"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn root_password_empty_is_noop() {
+        assert_eq!(render_root_password(""), "");
     }
 }

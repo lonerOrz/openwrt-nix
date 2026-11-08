@@ -716,8 +716,7 @@ async fn test_uci_value_roundtrip_on_real_target() {
         .trim()
         .to_string();
     assert_eq!(
-        list_raw,
-        "'a b' it's x\\y $Z café",
+        list_raw, "'a b' it's x\\y $Z café",
         "list round-trip mismatch"
     );
     target.reset_uci_state();
@@ -1145,4 +1144,3 @@ async fn test_apk_local_package_install_and_cleanup() {
         "staged /tmp/{pkg_name}.apk must be cleaned up after install"
     );
 }
-

@@ -30,7 +30,12 @@ impl<'a> StagingCleanup<'a> {
     /// guard a no-op for early returns that never wrote the script (no-op skip),
     /// so it never issues a stray remote command.
     fn new(target: &'a str, ssh: &'a dyn SshExec, config: &'a DeployConfig) -> Self {
-        Self { target, ssh, config, active: false }
+        Self {
+            target,
+            ssh,
+            config,
+            active: false,
+        }
     }
     /// Arm the guard: the staging script exists on the target and must be removed
     /// on any subsequent early return.
@@ -57,7 +62,6 @@ impl Drop for StagingCleanup<'_> {
         );
     }
 }
-
 
 pub struct DeployConfig {
     pub port: u16,
@@ -900,7 +904,10 @@ mod tests {
         };
 
         let result = run(f.path(), "root@127.0.0.1", &config, None, &ssh);
-        assert!(result.is_err(), "failed deploy script must surface an error");
+        assert!(
+            result.is_err(),
+            "failed deploy script must surface an error"
+        );
 
         let calls = ssh.calls.borrow();
         let cleanup_ran = calls

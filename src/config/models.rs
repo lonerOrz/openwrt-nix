@@ -185,24 +185,15 @@ impl std::fmt::Debug for PackageSources {
         f.debug_struct("PackageSources")
             .field(
                 "opkg_feeds",
-                &self
-                    .opkg_feeds
-                    .as_ref()
-                    .map_or(0, |v| v.len()),
+                &self.opkg_feeds.as_ref().map_or(0, |v| v.len()),
             )
             .field(
                 "apk_repositories",
-                &self
-                    .apk_repositories
-                    .as_ref()
-                    .map_or(0, |v| v.len()),
+                &self.apk_repositories.as_ref().map_or(0, |v| v.len()),
             )
             .field(
                 "local_packages",
-                &self
-                    .local_packages
-                    .as_ref()
-                    .map_or(0, |v| v.len()),
+                &self.local_packages.as_ref().map_or(0, |v| v.len()),
             )
             .finish()
     }
@@ -297,16 +288,14 @@ pub enum FileContent {
 impl std::fmt::Debug for FileContent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FileContent::Text(s) => {
-                f.debug_tuple("Text")
-                    .field(&format_args!("<{} bytes redacted>", s.len()))
-                    .finish()
-            }
-            FileContent::Base64(s) => {
-                f.debug_tuple("Base64")
-                    .field(&format_args!("<{} bytes redacted>", s.len()))
-                    .finish()
-            }
+            FileContent::Text(s) => f
+                .debug_tuple("Text")
+                .field(&format_args!("<{} bytes redacted>", s.len()))
+                .finish(),
+            FileContent::Base64(s) => f
+                .debug_tuple("Base64")
+                .field(&format_args!("<{} bytes redacted>", s.len()))
+                .finish(),
         }
     }
 }
@@ -437,7 +426,10 @@ mod tests {
             ]),
         });
         let section_dbg = format!("{section:?}");
-        assert!(section_dbg.contains("interface"), "type must stay visible: {section_dbg}");
+        assert!(
+            section_dbg.contains("interface"),
+            "type must stay visible: {section_dbg}"
+        );
         assert!(
             !section_dbg.contains("PLAINTEXT_PW"),
             "section option value leaked: {section_dbg}"
@@ -450,7 +442,10 @@ mod tests {
             checksum: Some("abc123".into()),
         };
         let file_dbg = format!("{file:?}");
-        assert!(file_dbg.contains("/etc/secret.conf"), "path must stay visible: {file_dbg}");
+        assert!(
+            file_dbg.contains("/etc/secret.conf"),
+            "path must stay visible: {file_dbg}"
+        );
         assert!(file_dbg.contains("<11 bytes redacted>"), "got: {file_dbg}");
         assert!(
             !file_dbg.contains("LEAKED_BODY"),
@@ -460,7 +455,10 @@ mod tests {
         // Base64 variant redacts the encoded bytes too.
         let b64_payload = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=";
         let b64_dbg = format!("{:?}", FileContent::Base64(b64_payload.into()));
-        assert!(b64_dbg.contains(&format!("<{} bytes redacted>", b64_payload.len())), "got: {b64_dbg}");
+        assert!(
+            b64_dbg.contains(&format!("<{} bytes redacted>", b64_payload.len())),
+            "got: {b64_dbg}"
+        );
         assert!(
             !b64_dbg.contains("QUJD"),
             "base64 payload leaked: {b64_dbg}"
@@ -474,7 +472,10 @@ mod tests {
         };
         let sources_dbg = format!("{sources:?}");
         assert!(sources_dbg.contains("opkg_feeds: 1"), "got: {sources_dbg}");
-        assert!(sources_dbg.contains("apk_repositories: 1"), "got: {sources_dbg}");
+        assert!(
+            sources_dbg.contains("apk_repositories: 1"),
+            "got: {sources_dbg}"
+        );
         assert!(
             !sources_dbg.contains("user:pass"),
             "feed URL credentials leaked: {sources_dbg}"
