@@ -144,6 +144,15 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), super::super::utils::erro
                     format!("rawUci[{i}] must be a 'uci' command, got: {trimmed}"),
                 ));
             }
+            // rawUci lines are emitted verbatim into the deploy script. Reject
+            // any Shell metacharacter so a single "command" cannot chain,
+            // substitute, or redirect (newline/`;`, `$()`, backtick, `&`, `|`,
+            // `<`, `>`). This closes the injection gap noted in audit TODO 1.3.
+            if has_shell_metacharacter(trimmed) {
+                return Err(super::super::utils::error::ConfigError::Validation(
+                    format!("rawUci[{i}] contains a shell metacharacter: {trimmed}"),
+                ));
+            }
         }
     }
 
@@ -217,6 +226,17 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), super::super::utils::erro
     Ok(())
 }
 
+/// Reject strings that could break out of a single Shell argument/command line.
+///
+/// rawUci lines are written verbatim into the deploy script, so a newline,
+/// `;`, `&`, `|`, backtick, `$`, `(`, `)`, `<`, or `>` would let a single
+/// "command" inject additional Shell syntax (command chaining, command
+/// substitution, redirection). This mirrors the character class already used
+/// to harden `authorized_keys` lines — a consistent, conservative rule.
+fn has_shell_metacharacter(s: &str) -> bool {
+    s.contains(['\n', '\r', ';', '&', '|', '`', '$', '(', ')', '<', '>'])
+}
+
 /// A valid `authorized_keys` line is a single line (no newline/CR) containing at
 /// least two space-separated tokens (keytype + base64 body) and no shell
 /// metacharacters. We deliberately do NOT whitelist key types: the set evolves
@@ -228,10 +248,7 @@ fn is_valid_authorized_key(line: &str) -> bool {
     if line.is_empty() || line.contains(['\n', '\r']) {
         return false;
     }
-    if line
-        .chars()
-        .any(|c| matches!(c, ';' | '&' | '|' | '`' | '$' | '(' | ')' | '<' | '>'))
-    {
+    if has_shell_metacharacter(line) {
         return false;
     }
     line.split_whitespace().count() >= 2
@@ -621,14 +638,46 @@ mod tests {
 
     #[test]
     fn validates_raw_uci() {
+        // Not a `uci` command at all.
         let root = Root {
             raw_uci: Some(vec!["rm -rf /".into()]),
             ..empty_root()
         };
         assert_rejects(&root, "must be a 'uci' command");
 
+        // Legitimate single uci command.
         let root = Root {
             raw_uci: Some(vec!["uci rename network.lan=lan2".into()]),
+            ..empty_root()
+        };
+        assert!(validate_root(&root).is_ok());
+    }
+
+    #[test]
+    fn rejects_raw_uci_shell_injection() {
+        // rawUci is written verbatim into the deploy script; any Shell
+        // metacharacter must be rejected so a single "command" cannot chain,
+        // substitute, or redirect (audit TODO 1.3).
+        for bad in [
+            "uci show system; rm -rf /",    // command chaining
+            "uci set x=y $(id)",            // command substitution
+            "uci set x=`id`",               // backtick substitution
+            "uci show system\nuci set x=y", // newline / multi-line
+            "uci set x=y &",                // background
+            "uci set x=y | cat",            // pipe
+            "uci set x=y > /etc/passwd",    // redirection
+        ] {
+            let root = Root {
+                raw_uci: Some(vec![bad.to_string()]),
+                ..empty_root()
+            };
+            assert_rejects(&root, "shell metacharacter");
+        }
+
+        // Values that legitimately contain a dot or equals are fine; only Shell
+        // metacharacters are rejected.
+        let root = Root {
+            raw_uci: Some(vec!["uci set network.lan.proto='static'".into()]),
             ..empty_root()
         };
         assert!(validate_root(&root).is_ok());
