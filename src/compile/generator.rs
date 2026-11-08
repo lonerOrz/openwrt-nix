@@ -71,18 +71,29 @@ impl PkgBackend {
         }
     }
 
+    /// Render a local-package install block: install from the streamed
+    /// `/tmp/<file>` (already uploaded by `transfer_packages`), then verify the
+    /// package is actually registered, then remove the staged file.
+    ///
+    /// apk local packages are unsigned, so `--allow-untrusted` is correct here
+    /// (it must NOT be used for ordinary repository packages). The post-install
+    /// check catches a silent non-error that did not actually register the
+    /// package; `set -e` then aborts the deploy. Cleanup avoids leaving the
+    /// staged archive on the device after a successful install.
     pub(crate) fn local_install_block(&self, pkg_name: &str, remote: &RemotePath) -> String {
         let probe = self.is_installed_cmd(pkg_name);
         let path = shell_quote(remote.as_str());
         match self {
-            PkgBackend::Opkg => {
-                format!("\nif ! {probe}; then\n    opkg install {path}\nfi")
-            }
-            // If extract_package_name fails, probe stays false and apk reinstalls
-            // every deploy — safe, just not idempotent.
-            PkgBackend::Apk => {
-                format!("\nif ! {probe}; then\n    apk add --allow-untrusted {path}\nfi")
-            }
+            PkgBackend::Opkg => format!(
+                "\nif ! {probe}; then\n    opkg install {path}\nfi\n\
+                 if ! {probe}; then\n    echo 'local package {pkg_name} not installed after opkg install' >&2\n    exit 1\nfi\n\
+                 rm -f {path}"
+            ),
+            PkgBackend::Apk => format!(
+                "\nif ! {probe}; then\n    apk add --allow-untrusted {path}\nfi\n\
+                 if ! {probe}; then\n    echo 'local package {pkg_name} not installed after apk add' >&2\n    exit 1\nfi\n\
+                 rm -f {path}"
+            ),
         }
     }
 
@@ -793,6 +804,11 @@ mod tests {
         serialize_package_management(&mut w, PkgBackend::Opkg, Some(&sources), None).unwrap();
         assert!(w.contains("opkg status 'test'"));
         assert!(w.contains("opkg install '/tmp/test_1.0_all.ipk'"));
+        assert!(w.contains("exit 1"), "missing post-install verify guard");
+        assert!(
+            w.contains("rm -f '/tmp/test_1.0_all.ipk'"),
+            "missing cleanup"
+        );
     }
 
     #[test]
@@ -807,6 +823,11 @@ mod tests {
         serialize_package_management(&mut w, PkgBackend::Apk, Some(&sources), None).unwrap();
         assert!(w.contains("if ! apk info -e 'test' >/dev/null 2>&1; then"));
         assert!(w.contains("apk add --allow-untrusted '/tmp/test_1.0_all.apk'"));
+        assert!(w.contains("exit 1"), "missing post-install verify guard");
+        assert!(
+            w.contains("rm -f '/tmp/test_1.0_all.apk'"),
+            "missing cleanup"
+        );
     }
 
     #[test]

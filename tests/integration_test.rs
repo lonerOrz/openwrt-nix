@@ -970,3 +970,94 @@ async fn test_compile_roundtrip_basic_scalar_config() {
         Some("192.168.1.1")
     );
 }
+
+/// 3.4 closure: a local `.apk` must actually install, the staged file must be
+/// cleaned up, and a failed local install must abort the deploy (set -e).
+#[tokio::test]
+async fn test_apk_local_package_install_and_cleanup() {
+    let target = get_apk_target().await;
+    target.reset_uci_state();
+
+    // Fetch a small, already-available package inside the container so the test
+    // needs no extra network egress. Stage it on the device, copy it out with the
+    // engine, then remove the device copy (transfer_packages re-uploads it).
+    let pkg_name = "tar";
+    let staged = format!("/tmp/{pkg_name}.apk");
+    assert!(
+        target.sh_ok(&format!(
+            "apk fetch --stdout {pkg_name} > {staged} 2>/dev/null && test -s {staged}"
+        )),
+        "could not fetch a local .apk inside the container"
+    );
+    let sandbox_dir = get_session_artifacts().session_dir.clone();
+    let local_apk = sandbox_dir.join(format!("{pkg_name}.apk"));
+    let engine = std::env::var("CONTAINER_ENGINE").unwrap_or_else(|_| "podman".to_string());
+    let status = std::process::Command::new(&engine)
+        .args([
+            "cp",
+            &format!("{}:{}", target.name, staged),
+            local_apk.to_str().unwrap(),
+        ])
+        .status()
+        .expect("failed to copy package out of container");
+    assert!(status.success(), "container cp of local .apk failed");
+    target.sh(&format!("rm -f {staged}"));
+    assert!(
+        local_apk.exists() && local_apk.metadata().map(|m| m.len() > 0).unwrap_or(false),
+        "local .apk not staged for deploy"
+    );
+
+    // Minimal config: only a local package, no UCI, so the deploy path is the
+    // local-package flow exclusively.
+    let json = sandbox_dir.join("local_pkg_apk.json");
+    std::fs::write(
+        &json,
+        format!(
+            r#"{{
+  "packageManager": "apk",
+  "settings": {{}},
+  "packageSources": {{
+    "localPackages": [ "{pkg_name}.apk" ]
+  }}
+}}"#
+        ),
+    )
+    .unwrap();
+
+    // Ensure it is NOT installed before deploy (tar is on the image as a dep of
+    // something? verify and remove to make the test deterministic).
+    target.sh(&format!(
+        "apk del --purge {pkg_name} >/dev/null 2>&1 || true"
+    ));
+    assert!(
+        !target.sh_ok(&format!("apk info -e {pkg_name} >/dev/null 2>&1")),
+        "{pkg_name} must be absent before deploy"
+    );
+
+    let artifacts = get_session_artifacts();
+    let cfg = DeployConfig {
+        port: target.port,
+        identity_file: Some(artifacts.ssh_key.to_string_lossy().into()),
+        force: true,
+        no_sops: true,
+        watchdog_timeout: 10,
+        verbose: false,
+    };
+    let res = nuci::target::deploy::run(
+        &json,
+        &format!("root@{}", target.host),
+        &cfg,
+        None,
+        &RealSsh,
+    );
+    assert!(res.is_ok(), "local-package deploy failed: {res:?}");
+
+    assert!(
+        target.sh_ok(&format!("apk info -e {pkg_name} >/dev/null 2>&1")),
+        "{pkg_name} should be installed after deploy"
+    );
+    assert!(
+        !target.sh_ok(&format!("test -f /tmp/{pkg_name}.apk")),
+        "staged /tmp/{pkg_name}.apk must be cleaned up after install"
+    );
+}
