@@ -880,3 +880,93 @@ async fn test_deploy_invalid_uci_fails_loudly() {
         "failed deploy must not corrupt the existing config"
     );
 }
+
+/// Audit plan H.2: real-UCI round-trip regression.
+///
+/// A string snapshot (H.1) only proves the generated script text didn't change;
+/// it does NOT prove the commands are correct. This test compiles a fixed sample
+/// and actually executes the generated `uci_batch` against a real `uci` on a
+/// container, then reads the resulting state back via `uci get` / section counts.
+/// If the generator ever emits a wrong path or index, the real UCI tool rejects
+/// or mis-orders it and this fails — the authoritative correctness gate.
+fn sample_path(name: &str) -> PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("samples")
+        .join(name)
+}
+
+#[tokio::test]
+async fn test_compile_roundtrip_heterogeneous_anonymous_sections() {
+    let target = get_opkg_target().await;
+    target.reset_uci_state();
+
+    // Compile the committed heterogeneous sample (opkg backend, no sops).
+    let compiled = with_sops_env(|| {
+        nuci::compile::pipeline::compile_config(
+            &sample_path("uci-heterogeneous.json"),
+            None,
+            true,
+            Some(nuci::config::models::PkgBackend::Opkg),
+        )
+        .expect("sample must compile")
+    });
+
+    // Apply the generated UCI commands verbatim on the target. `set -e` mirrors
+    // the real deploy script: a malformed command aborts instead of silently
+    // producing wrong state.
+    target.guarded(|| {
+        target.sh_inner(&format!("set -e\n{}", compiled.uci_batch));
+    });
+
+    // Per-type anonymous indexing (audit 1.1): rule/redirect/rule must yield
+    // @rule[0], @redirect[0], @rule[1] — and the generated commands actually
+    // commit all three sections with the right options/values.
+    assert_eq!(
+        target.uci_get("firewall.@rule[0].target").as_deref(),
+        Some("ACCEPT")
+    );
+    assert_eq!(
+        target.uci_get("firewall.@redirect[0].dest").as_deref(),
+        Some("lan")
+    );
+    assert_eq!(
+        target.uci_get("firewall.@rule[1].target").as_deref(),
+        Some("DROP")
+    );
+    assert!(!target.uci_exists("firewall.@rule[2]"));
+    assert!(!target.uci_exists("firewall.@redirect[1]"));
+}
+
+#[tokio::test]
+async fn test_compile_roundtrip_basic_scalar_config() {
+    let target = get_opkg_target().await;
+    target.reset_uci_state();
+
+    let compiled = with_sops_env(|| {
+        nuci::compile::pipeline::compile_config(
+            &sample_path("uci-basic.json"),
+            None,
+            true,
+            Some(nuci::config::models::PkgBackend::Opkg),
+        )
+        .expect("sample must compile")
+    });
+
+    target.guarded(|| {
+        target.sh_inner(&format!("set -e\n{}", compiled.uci_batch));
+    });
+
+    assert_eq!(
+        target.uci_get("system.system.hostname").as_deref(),
+        Some("test-router")
+    );
+    assert_eq!(
+        target.uci_get("network.lan.proto").as_deref(),
+        Some("static")
+    );
+    assert_eq!(
+        target.uci_get("network.lan.ipaddr").as_deref(),
+        Some("192.168.1.1")
+    );
+}

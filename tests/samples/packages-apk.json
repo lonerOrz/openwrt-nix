@@ -1,0 +1,8 @@
+{
+  "packageManager": "apk",
+  "settings": {},
+  "packages": ["luci", "-luci-ssl"],
+  "packageSources": {
+    "apkRepositories": ["https://example.com/packages"]
+  }
+}

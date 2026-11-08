@@ -323,3 +323,166 @@ mod tests {
         assert!(out.uci_batch.contains("set wireless.radio0.key='alpha'"));
     }
 }
+
+/// Compile-output regression baselines (audit plan H.1).
+///
+/// These pin the *exact* emitted `uci_batch` / `package_commands` shape for a set
+/// of fixed sample configs under `tests/samples/`. They prove the generator's
+/// behaviour is preserved across refactors (the C/F/G structural rewrites must
+/// keep every assertion below green). A snapshot only guards against accidental
+/// output change — correctness of the generated UCI is covered by the in-container
+/// round-trip tests (audit plan H.2), not by string matching here.
+#[cfg(test)]
+mod snapshots {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn sample(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("samples")
+            .join(name)
+    }
+
+    fn compile_sample(name: &str, backend: PkgBackend) -> CompiledConfig {
+        compile_config(&sample(name), None, true, Some(backend)).unwrap()
+    }
+
+    #[test]
+    fn snapshot_uci_basic() {
+        let out = compile_sample("uci-basic.json", PkgBackend::Opkg);
+        assert!(
+            out.uci_batch
+                .contains("set system.system.hostname='test-router'")
+        );
+        assert!(out.uci_batch.contains("set network.lan.ifname='eth0'"));
+        assert!(out.uci_batch.contains("set network.lan.proto='static'"));
+        assert!(
+            out.uci_batch
+                .contains("set network.lan.ipaddr='192.168.1.1'")
+        );
+        // Discrete `uci <verb>` lines, not a `uci batch` heredoc.
+        assert!(!out.uci_batch.contains("uci batch"));
+        // No packages declared -> no package commands.
+        assert!(out.package_commands.is_empty());
+    }
+
+    #[test]
+    fn snapshot_uci_heterogeneous_per_type_indexing() {
+        // Audit 1.1: anonymous-section indexes count per type, not across the
+        // whole array. rule/redirect/rule must yield @rule[0], @redirect[0],
+        // @rule[1] — never @redirect[1] or @rule[2].
+        let out = compile_sample("uci-heterogeneous.json", PkgBackend::Opkg);
+        assert!(out.uci_batch.contains("add firewall rule"));
+        assert!(out.uci_batch.contains("add firewall redirect"));
+        assert!(
+            out.uci_batch
+                .contains("set firewall.@rule[0].target='ACCEPT'")
+        );
+        assert!(
+            out.uci_batch
+                .contains("set firewall.@redirect[0].dest='lan'")
+        );
+        assert!(
+            out.uci_batch
+                .contains("set firewall.@rule[1].target='DROP'")
+        );
+        assert!(!out.uci_batch.contains("@rule[2]"));
+        assert!(!out.uci_batch.contains("@redirect[1]"));
+    }
+
+    #[test]
+    fn snapshot_raw_uci_verbatim_and_config_touch() {
+        let out = compile_sample("raw-uci.json", PkgBackend::Opkg);
+        // Typed section emitted first.
+        let typed = out.uci_batch.find("set system").unwrap();
+        let raw = out.uci_batch.find("# Raw UCI escape hatch").unwrap();
+        assert!(typed < raw, "typed UCI must precede rawUci");
+        // rawUci references network.lan -> the generator touches that config.
+        assert!(out.uci_batch.contains("touch /etc/config/network"));
+        assert!(out.uci_batch.contains("uci rename system.@system[0]=sys0"));
+        assert!(out.uci_batch.contains("uci set network.lan.proto='static'"));
+    }
+
+    #[test]
+    fn snapshot_packages_opkg() {
+        let out = compile_config(
+            &sample("packages-opkg.json"),
+            None,
+            true,
+            Some(PkgBackend::Opkg),
+        )
+        .unwrap();
+        assert!(
+            out.package_commands
+                .contains("printf '' > /etc/opkg/customfeeds.conf")
+        );
+        assert!(
+            out.package_commands
+                .contains("src/gz custom https://example.com/packages")
+        );
+        // Package names are shell-quoted in the generated commands.
+        assert!(out.package_commands.contains("opkg install 'luci'"));
+        assert!(out.package_commands.contains("opkg remove 'luci-ssl'"));
+    }
+
+    #[test]
+    fn snapshot_packages_apk() {
+        let out = compile_config(
+            &sample("packages-apk.json"),
+            None,
+            true,
+            Some(PkgBackend::Apk),
+        )
+        .unwrap();
+        assert!(
+            out.package_commands
+                .contains("mkdir -p /etc/apk/repositories.d")
+        );
+        assert!(
+            out.package_commands
+                .contains("https://example.com/packages")
+        );
+        assert!(out.package_commands.contains("apk add 'luci'"));
+        assert!(out.package_commands.contains("apk del 'luci-ssl'"));
+    }
+
+    #[test]
+    fn snapshot_files_text_and_binary() {
+        let out = compile_sample("files.json", PkgBackend::Opkg);
+        assert!(out.uci_batch.is_empty(), "files produce no UCI commands");
+        let resolved = &out.resolved_root.files.unwrap();
+        // Text content rendered verbatim in deploy script (checked via file block in remote_script,
+        // but the resolved model must carry the original text).
+        match &resolved[0].content {
+            crate::config::models::FileContent::Text(t) => assert_eq!(t, "hello world"),
+            _ => panic!("expected text content"),
+        }
+        match &resolved[1].content {
+            crate::config::models::FileContent::Base64(b) => assert_eq!(b, "aGVsbG8="),
+            _ => panic!("expected base64 content"),
+        }
+        assert_eq!(
+            resolved[1].checksum.as_deref(),
+            Some("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+        );
+    }
+
+    #[test]
+    fn snapshot_secrets_interpolation() {
+        let dir = sample("secrets_dir");
+        let out = compile_config(
+            &sample("secrets.json"),
+            Some(&dir),
+            true,
+            Some(PkgBackend::Opkg),
+        )
+        .unwrap();
+        // The @wifi_pass@ placeholder must be resolved from the secrets dir.
+        assert!(
+            out.uci_batch
+                .contains("set wireless.default_radio0.key='s3cr3t-wpa-psk'")
+        );
+        assert!(!out.uci_batch.contains("@wifi_pass@"), "placeholder leaked");
+    }
+}
