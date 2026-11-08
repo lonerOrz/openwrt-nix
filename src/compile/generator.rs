@@ -237,10 +237,16 @@ pub(crate) fn serialize_uci(
                 }
                 Section::Named(section) => {
                     let ty = &section.section_type;
-                    // `-q` keeps delete idempotent: a missing named section must
-                    // not abort the script under `set -e` (the target may not
-                    // yet have the section). Anonymous wipes above already use -q.
-                    writeln!(uci_cmds, "-q delete {config_name}.{section_name} || true").unwrap();
+                    // Guard the delete on existence so a missing named section is a
+                    // no-op under `set -e` on first deploy — without hiding real
+                    // failures. `uci -q get` returns non-zero when absent, so the
+                    // `then` branch is skipped and the script continues; any later
+                    // `set`/`commit` failure still aborts via `set -e`.
+                    writeln!(
+                        uci_cmds,
+                        "if uci -q get {config_name}.{section_name}; then uci -q delete {config_name}.{section_name}; fi"
+                    )
+                    .unwrap();
                     writeln!(uci_cmds, "set {config_name}.{section_name}={ty}").unwrap();
 
                     for (option_name, option) in &section.options {
@@ -258,14 +264,28 @@ pub(crate) fn serialize_uci(
 
         if !uci_cmds.is_empty() {
             // Each UCI op is emitted as its own `uci <verb>` line (not a batch
-            // heredoc). `set -e` then aborts the script at the first failing
-            // command — `uci batch` can swallow an inner failure and still exit
-            // 0, which would wrongly report success. We `touch` the config first
-            // so the file exists for `set`/`add`, then commit per-config so a
-            // failing op can't reach this config's commit.
+            // heredoc). `set -e` then aborts the script at the first failing op —
+            // `uci batch` can swallow an inner failure and still exit 0, which
+            // would wrongly report success. We `touch` the config first so the
+            // file exists for `set`/`add`, then commit per-config so a failing op
+            // can't reach this config's commit.
+            //
+            // Lines that are shell guards (`if …; then`, `fi`, …) are passed
+            // through verbatim; all other lines get the `uci ` prefix. This lets
+            // a named-section delete be guarded on existence (`if uci -q get …;
+            // then uci -q delete …; fi`) so a missing section is a no-op under
+            // `set -e` — without swallowing any *real* failure with `|| true`.
             writeln!(writer, "touch /etc/config/{config_name}").unwrap();
             for line in uci_cmds.lines() {
-                writeln!(writer, "uci {line}").unwrap();
+                if line.starts_with("if ")
+                    || line.starts_with("then ")
+                    || line.starts_with("else")
+                    || line.starts_with("fi")
+                {
+                    writeln!(writer, "{line}").unwrap();
+                } else {
+                    writeln!(writer, "uci {line}").unwrap();
+                }
             }
             writeln!(writer, "uci commit {config_name}").unwrap();
         }
@@ -470,7 +490,7 @@ mod tests {
         let mut w = String::new();
         serialize_uci(&mut w, &configs).unwrap();
 
-        assert!(w.contains("uci -q delete network.lan || true"));
+        assert!(w.contains("if uci -q get network.lan; then uci -q delete network.lan; fi"));
         assert!(w.contains("set network.lan=interface"));
         assert!(w.contains("set network.lan.proto='static'"));
         assert!(w.contains("uci set network.lan=interface"));
@@ -562,7 +582,7 @@ mod tests {
 
         let mut w = String::new();
         serialize_uci(&mut w, &configs).unwrap();
-        assert!(w.contains("uci -q delete network.lan || true"));
+        assert!(w.contains("if uci -q get network.lan; then uci -q delete network.lan; fi"));
     }
 
     #[test]
