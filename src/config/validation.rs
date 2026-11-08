@@ -1,5 +1,7 @@
 use crate::config::models::{Root, Section};
+use crate::config::package::{PackageAction, RemotePath};
 use serde_json::Value;
+use std::path::Path;
 
 fn is_valid_uci_identifier(s: &str) -> bool {
     !s.is_empty()
@@ -143,6 +145,30 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), super::super::utils::erro
                 ));
             }
             // Empty content allowed: writes a zero-byte file.
+        }
+    }
+
+    if let Some(packages) = &root.packages {
+        for spec in packages {
+            // Validates the package name charset at the boundary; a lone `-`
+            // or a shell-payload name is a config error, never passed through.
+            PackageAction::parse(spec)?;
+        }
+    }
+
+    if let Some(sources) = &root.package_sources
+        && let Some(local) = &sources.local_packages
+    {
+        for (i, p) in local.iter().enumerate() {
+            let file_name = Path::new(p)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| {
+                    super::super::utils::error::ConfigError::Validation(format!(
+                        "package_sources.local_packages[{i}] must be a file path: {p}"
+                    ))
+                })?;
+            RemotePath::tmp(file_name)?;
         }
     }
 
@@ -333,6 +359,86 @@ mod tests {
             ))
             .is_ok()
         );
+    }
+
+    fn with_packages(mut root: Root, packages: Vec<String>) -> Root {
+        root.packages = Some(packages);
+        root
+    }
+
+    fn with_local_packages(mut root: Root, paths: Vec<String>) -> Root {
+        root.package_sources = Some(crate::config::models::PackageSources {
+            opkg_feeds: None,
+            apk_repositories: None,
+            local_packages: Some(paths),
+        });
+        root
+    }
+
+    #[test]
+    fn accepts_valid_package_specs() {
+        for specs in [
+            vec!["luci".to_string(), "-tcpdump".to_string()],
+            vec!["kmod-nf-conntrack".to_string(), "gtk+".to_string()],
+            vec!["prometheus-node-exporter-lua".to_string()],
+        ] {
+            assert!(
+                validate_root(&with_packages(empty_root(), specs)).is_ok(),
+                "valid specs accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_package_specs() {
+        for bad in [
+            "",            // empty spec
+            "-",           // lone dash
+            "a b",         // space
+            "$(touch /x)", // command substitution
+            "pkg;rm",      // shell metacharacter
+            "../pkg",      // path traversal
+            "a'b",         // quote
+        ] {
+            let root = with_packages(empty_root(), vec![bad.to_string()]);
+            let err = validate_root(&root).unwrap_err();
+            assert!(
+                format!("{err}").contains("Invalid package name"),
+                "'{bad}' must be rejected: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_local_package_filenames() {
+        for bad in [
+            "a b.ipk",  // space
+            "$(x).ipk", // payload
+            "a'b",      // quote
+            "a;b.ipk",  // shell metacharacter
+            "",         // not a file path
+        ] {
+            let root = with_local_packages(empty_root(), vec![bad.to_string()]);
+            let err = validate_root(&root).unwrap_err();
+            assert!(
+                format!("{err}").contains("Invalid local package file name")
+                    || format!("{err}").contains("must be a file path"),
+                "'{bad}' must be rejected: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_valid_local_package_filenames() {
+        for ok in [
+            "./packages/luci-app-nlbwmon_0.3-1_all.ipk",
+            "build/test_1.0_all.apk",
+        ] {
+            assert!(
+                validate_root(&with_local_packages(empty_root(), vec![ok.to_string()])).is_ok(),
+                "'{ok}' should be accepted"
+            );
+        }
     }
 
     #[test]

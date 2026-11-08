@@ -1,4 +1,5 @@
-use crate::config::models::{PackageAction, PackageSources, PkgBackend, Section, SectionData};
+use crate::config::models::{PackageSources, PkgBackend, Section, SectionData};
+use crate::config::package::{PackageAction, RemotePath};
 use crate::config::uci_key::{anonymous_option_key, named_option_key};
 use crate::utils::error::ConfigError;
 use crate::utils::helpers::{extract_package_name, push_escaped_single_quotes, shell_quote};
@@ -66,16 +67,17 @@ impl PkgBackend {
         }
     }
 
-    pub(crate) fn local_install_block(&self, pkg_name: &str, file_name: &str) -> String {
+    pub(crate) fn local_install_block(&self, pkg_name: &str, remote: &RemotePath) -> String {
         let probe = self.is_installed_cmd(pkg_name);
+        let path = shell_quote(remote.as_str());
         match self {
             PkgBackend::Opkg => {
-                format!("\nif ! {probe}; then\n    opkg install /tmp/{file_name}\nfi")
+                format!("\nif ! {probe}; then\n    opkg install {path}\nfi")
             }
             // If extract_package_name fails, probe stays false and apk reinstalls
             // every deploy — safe, just not idempotent.
             PkgBackend::Apk => {
-                format!("\nif ! {probe}; then\n    apk add --allow-untrusted /tmp/{file_name}\nfi")
+                format!("\nif ! {probe}; then\n    apk add --allow-untrusted {path}\nfi")
             }
         }
     }
@@ -285,23 +287,27 @@ pub(crate) fn serialize_package_management(
         && let Some(local_pkgs) = &src_val.local_packages
     {
         for ipk_path_str in local_pkgs {
-            let ipk_path = Path::new(ipk_path_str);
-            if let Some(file_name) = ipk_path.file_name().and_then(|n| n.to_str()) {
-                let pkg_name = extract_package_name(file_name);
-                writeln!(
-                    writer,
-                    "{}",
-                    backend.local_install_block(pkg_name, file_name)
-                )
-                .unwrap();
-            }
+            let file_name = Path::new(ipk_path_str)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| {
+                    ConfigError::Validation(format!(
+                        "Invalid localPackages entry '{ipk_path_str}': not a file path"
+                    ))
+                })?;
+            let remote = RemotePath::tmp(file_name)?;
+            let pkg_name = extract_package_name(file_name);
+            writeln!(writer, "{}", backend.local_install_block(pkg_name, &remote)).unwrap();
         }
     }
 
     if let Some(pkgs) = packages
         && !pkgs.is_empty()
     {
-        let actions: Vec<PackageAction> = pkgs.iter().map(|p| PackageAction::parse(p)).collect();
+        let actions: Vec<PackageAction> = pkgs
+            .iter()
+            .map(|p| PackageAction::parse(p))
+            .collect::<Result<_, _>>()?;
         let (removes, installs): (Vec<PackageAction>, Vec<PackageAction>) =
             actions.into_iter().partition(|a| a.is_remove());
 
@@ -876,7 +882,7 @@ mod tests {
         };
         serialize_package_management(&mut w, PkgBackend::Opkg, Some(&sources), None).unwrap();
         assert!(w.contains("opkg status test"));
-        assert!(w.contains("opkg install /tmp/test_1.0_all.ipk"));
+        assert!(w.contains("opkg install '/tmp/test_1.0_all.ipk'"));
     }
 
     #[test]
@@ -890,7 +896,20 @@ mod tests {
         };
         serialize_package_management(&mut w, PkgBackend::Apk, Some(&sources), None).unwrap();
         assert!(w.contains("if ! apk info -e test >/dev/null 2>&1; then"));
-        assert!(w.contains("apk add --allow-untrusted /tmp/test_1.0_all.apk"));
+        assert!(w.contains("apk add --allow-untrusted '/tmp/test_1.0_all.apk'"));
+    }
+
+    #[test]
+    fn serialize_local_package_with_traversal_filename_errors() {
+        let mut w = String::new();
+        let sources = PackageSources {
+            opkg_feeds: None,
+            apk_repositories: None,
+            local_packages: Some(vec!["a b.ipk".into()]),
+        };
+        let res = serialize_package_management(&mut w, PkgBackend::Opkg, Some(&sources), None);
+        assert!(res.is_err());
+        assert!(format!("{res:?}").contains("Invalid local package file name"));
     }
 
     #[test]

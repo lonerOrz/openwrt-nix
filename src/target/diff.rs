@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::compile::pipeline::compile_config;
-use crate::config::models::{PackageAction, PkgBackend, Section};
+use crate::config::models::{PkgBackend, Section};
+use crate::config::package::PackageAction;
 use crate::config::uci_key::{
     anonymous_option_key, anonymous_section_key, named_option_key, named_section_key,
 };
@@ -38,11 +39,14 @@ pub(crate) fn build_discovery_command(managed: &[&str]) -> String {
     )
 }
 
-pub(crate) fn build_state_command(packages: &[String], backend: PkgBackend) -> String {
+pub(crate) fn build_state_command(
+    packages: &[String],
+    backend: PkgBackend,
+) -> Result<String, ConfigError> {
     let quoted_probed: Vec<String> = packages
         .iter()
-        .map(|p| PackageAction::parse(p).quoted_name())
-        .collect();
+        .map(|p| PackageAction::parse(p).map(|a| a.quoted_name()))
+        .collect::<Result<_, _>>()?;
 
     let mut cmd = String::new();
     if !quoted_probed.is_empty() {
@@ -64,7 +68,7 @@ pub(crate) fn build_state_command(packages: &[String], backend: PkgBackend) -> S
          echo '{sep}'; grep '^root:' /etc/shadow 2>/dev/null | cut -d: -f2",
         sep = STATE_SEPARATOR
     ));
-    cmd
+    Ok(cmd)
 }
 
 pub(crate) fn parse_package_state(output: &str) -> BTreeMap<String, bool> {
@@ -267,7 +271,7 @@ pub fn run(
         PkgBackend::try_from(declared_pm.as_str())?
     };
     let packages = compiled.resolved_root.packages.clone().unwrap_or_default();
-    let state_cmd = build_state_command(&packages, backend);
+    let state_cmd = build_state_command(&packages, backend)?;
     let state_output = ssh.exec(target, &state_cmd, None, config)?;
     if config.verbose {
         eprintln!("-- remote state output --");
@@ -343,7 +347,7 @@ pub fn run(
     {
         println!("\n\x1b[1;35m[Packages]\x1b[0m");
         for spec in packages {
-            let action = PackageAction::parse(spec);
+            let action = PackageAction::parse(spec)?;
             let name = action.name();
             let is_installed = pkg_state.get(name).copied().unwrap_or(false);
 
@@ -520,7 +524,8 @@ mod tests {
 
     #[test]
     fn build_state_command_opkg_probes_packages() {
-        let cmd = build_state_command(&["luci".into(), "tcpdump".into()], PkgBackend::Opkg);
+        let cmd =
+            build_state_command(&["luci".into(), "tcpdump".into()], PkgBackend::Opkg).unwrap();
         assert!(cmd.contains("opkg status"));
         assert!(cmd.contains("luci"));
         assert!(cmd.contains(STATE_SEPARATOR));
@@ -530,13 +535,13 @@ mod tests {
 
     #[test]
     fn build_state_command_apk_probes_packages() {
-        let cmd = build_state_command(&["luci".into()], PkgBackend::Apk);
+        let cmd = build_state_command(&["luci".into()], PkgBackend::Apk).unwrap();
         assert!(cmd.contains("apk info -e"));
     }
 
     #[test]
     fn build_state_command_probes_removal_without_dash() {
-        let cmd = build_state_command(&["-wpad-basic-mbedtls".into()], PkgBackend::Opkg);
+        let cmd = build_state_command(&["-wpad-basic-mbedtls".into()], PkgBackend::Opkg).unwrap();
         assert!(cmd.contains("wpad-basic-mbedtls"));
         assert!(!cmd.contains("opkg status \"-wpad"));
         assert!(cmd.contains("for p in 'wpad-basic-mbedtls'"));

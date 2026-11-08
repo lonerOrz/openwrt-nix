@@ -134,35 +134,6 @@ where
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PackageAction {
-    Install(String),
-    Remove(String),
-}
-
-impl PackageAction {
-    pub fn parse(spec: &str) -> Self {
-        match spec.strip_prefix('-') {
-            Some(name) => PackageAction::Remove(name.to_string()),
-            None => PackageAction::Install(spec.to_string()),
-        }
-    }
-
-    pub fn name(&self) -> &str {
-        match self {
-            PackageAction::Install(name) | PackageAction::Remove(name) => name,
-        }
-    }
-
-    pub fn quoted_name(&self) -> String {
-        crate::utils::helpers::shell_quote(self.name())
-    }
-
-    pub fn is_remove(&self) -> bool {
-        matches!(self, PackageAction::Remove(_))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
