@@ -237,7 +237,10 @@ pub(crate) fn serialize_uci(
                 }
                 Section::Named(section) => {
                     let ty = &section.section_type;
-                    writeln!(uci_cmds, "delete {config_name}.{section_name}").unwrap();
+                    // `-q` keeps delete idempotent: a missing named section must
+                    // not abort the script under `set -e` (the target may not
+                    // yet have the section). Anonymous wipes above already use -q.
+                    writeln!(uci_cmds, "delete -q {config_name}.{section_name}").unwrap();
                     writeln!(uci_cmds, "set {config_name}.{section_name}={ty}").unwrap();
 
                     for (option_name, option) in &section.options {
@@ -254,14 +257,17 @@ pub(crate) fn serialize_uci(
         write!(writer, "{shell_cmds}").unwrap();
 
         if !uci_cmds.is_empty() {
-            // No `-q`: a failing command's diagnostic (`uci: ... at line N`) must
-            // reach stderr, and the non-zero exit must propagate to run() instead
-            // of a false success. Batch still commits atomically on success.
+            // Each UCI op is emitted as its own `uci <verb>` line (not a batch
+            // heredoc). `set -e` then aborts the script at the first failing
+            // command — `uci batch` can swallow an inner failure and still exit
+            // 0, which would wrongly report success. We `touch` the config first
+            // so the file exists for `set`/`add`, then commit per-config so a
+            // failing op can't reach this config's commit.
             writeln!(writer, "touch /etc/config/{config_name}").unwrap();
-            writeln!(writer, "uci batch <<'UCI_EOF'").unwrap();
-            write!(writer, "{uci_cmds}").unwrap();
-            writeln!(writer, "commit {config_name}").unwrap();
-            writeln!(writer, "UCI_EOF").unwrap();
+            for line in uci_cmds.lines() {
+                writeln!(writer, "uci {line}").unwrap();
+            }
+            writeln!(writer, "uci commit {config_name}").unwrap();
         }
     }
 
@@ -464,12 +470,16 @@ mod tests {
         let mut w = String::new();
         serialize_uci(&mut w, &configs).unwrap();
 
-        assert!(w.contains("uci batch <<'UCI_EOF'"));
-        assert!(w.contains("delete network.lan"));
+        assert!(w.contains("uci delete -q network.lan"));
         assert!(w.contains("set network.lan=interface"));
         assert!(w.contains("set network.lan.proto='static'"));
-        assert!(w.contains("commit network"));
-        assert!(w.contains("UCI_EOF"));
+        assert!(w.contains("uci set network.lan=interface"));
+        assert!(w.contains("uci set network.lan.proto='static'"));
+        assert!(w.contains("uci commit network"));
+        assert!(
+            !w.contains("uci batch"),
+            "commands must be discrete, not batched"
+        );
     }
 
     #[test]
@@ -490,11 +500,69 @@ mod tests {
         let mut w = String::new();
         serialize_uci(&mut w, &configs).unwrap();
 
-        assert!(w.contains("while uci -q delete dropbear.@dropbear[0]; do :; done"));
-        assert!(w.contains("uci batch <<'UCI_EOF'"));
         assert!(w.contains("add dropbear dropbear"));
         assert!(w.contains("set dropbear.@dropbear[0].Port='22'"));
-        assert!(w.contains("commit dropbear"));
+        assert!(w.contains("uci add dropbear dropbear"));
+        assert!(w.contains("uci set dropbear.@dropbear[0].Port='22'"));
+        assert!(w.contains("uci commit dropbear"));
+        assert!(!w.contains("uci batch"));
+    }
+
+    #[test]
+    fn serialize_uci_emits_discrete_commands() {
+        // Discrete `uci <verb>` lines (not a batch heredoc) so a deploy script
+        // under `set -e` aborts at the first failing command.
+        let mut configs = IndexMap::new();
+        let mut sections = IndexMap::new();
+        let mut options = IndexMap::new();
+        options.insert("proto".into(), Value::String("static".into()));
+        sections.insert(
+            "lan".into(),
+            Section::Named(SectionData {
+                section_type: "interface".into(),
+                options,
+            }),
+        );
+        configs.insert("network".into(), sections);
+
+        let mut w = String::new();
+        serialize_uci(&mut w, &configs).unwrap();
+
+        let lines: Vec<&str> = w.lines().collect();
+        let set_line = lines
+            .iter()
+            .find(|l| l.contains("uci set network.lan=interface"))
+            .expect("set line present");
+        let commit_line = lines
+            .iter()
+            .find(|l| l.contains("uci commit network"))
+            .expect("commit line present");
+        assert!(
+            lines.iter().position(|l| l == set_line).unwrap()
+                < lines.iter().position(|l| l == commit_line).unwrap(),
+            "commit must follow set within the same config"
+        );
+        assert!(!w.contains("uci batch"), "must not batch");
+    }
+
+    #[test]
+    fn serialize_named_delete_is_quiet() {
+        // Named-section delete uses -q so a missing section doesn't abort the
+        // script under `set -e`.
+        let mut configs = IndexMap::new();
+        let mut sections = IndexMap::new();
+        sections.insert(
+            "lan".into(),
+            Section::Named(SectionData {
+                section_type: "interface".into(),
+                options: IndexMap::new(),
+            }),
+        );
+        configs.insert("network".into(), sections);
+
+        let mut w = String::new();
+        serialize_uci(&mut w, &configs).unwrap();
+        assert!(w.contains("uci delete -q network.lan"));
     }
 
     #[test]

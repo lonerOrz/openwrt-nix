@@ -143,7 +143,10 @@ mod tests {
         assert!(out.uci_batch.contains("uci rename system.@system[0]=sys0"));
         let raw_pos = out.uci_batch.find("uci rename").unwrap();
         let typed_pos = out.uci_batch.find("add system system").unwrap();
-        assert!(raw_pos > typed_pos, "rawUci should follow typed uci batch");
+        assert!(
+            raw_pos > typed_pos,
+            "rawUci should follow typed uci commands"
+        );
     }
 
     #[test]

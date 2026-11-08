@@ -103,15 +103,16 @@ fn render_root_password(root_password: &str) -> String {
     )
 }
 
-/// Detach-on-disconnect watchdog plus a foreground reload tail.
+/// Arms the detach-on-disconnect watchdog WITHOUT running a reload.
 ///
 /// The watchdog runs `sleep {watchdog_timeout}` in a `trap '' HUP` subshell so
 /// it survives SSH session loss; if a rollback backup still exists when it
 /// fires, it restores `/etc/config` and re-runs the reload commands before
-/// clearing state. The separate `( sleep 1; {reload_cmds} ) &` tail lets
-/// `/tmp/deploy.sh` exit 0 first so a foreground network/Dropbear reload
-/// doesn't sever the SSH link.
-fn render_watchdog(reload_cmds: &str, watchdog_timeout: u64) -> String {
+/// clearing state. This MUST be armed *before* the UCI apply stage, so that if
+/// the script aborts under `set -e` (a failing UCI op, or an SSH drop) the
+/// in-window rollback path is already live. The separate success-reload tail
+/// (see [`render_success_reload`]) runs only after a successful apply.
+fn arm_watchdog(reload_cmds: &str, watchdog_timeout: u64) -> String {
     format!(
         "( trap '' HUP; sleep {watchdog_timeout}; \
           if [ -d /etc/.uci-rollback-backup ]; then \
@@ -120,9 +121,15 @@ fn render_watchdog(reload_cmds: &str, watchdog_timeout: u64) -> String {
           fi; \
           rm -rf /etc/.uci-rollback-backup /etc/init.d/nuci_rollback /etc/rc.d/S15nuci_rollback /tmp/.uci-watchdog-pid \
         ) >/dev/null 2>&1 </dev/null & \
-          echo $! > /tmp/.uci-watchdog-pid\n\
-         ( sleep 1; {reload_cmds} ) >/dev/null 2>&1 &\n"
+          echo $! > /tmp/.uci-watchdog-pid\n"
     )
+}
+
+/// Foreground reload tail, emitted only after a successful UCI apply. Running it
+/// here (not inside the watchdog) guarantees a failed apply never reloads the
+/// broken config: under `set -e` the script exits before reaching this stage.
+fn render_success_reload(reload_cmds: &str) -> String {
+    format!("( sleep 1; {reload_cmds} ) >/dev/null 2>&1 &\n")
 }
 
 /// All inputs needed to render the remote deploy script. Bundling them in one
@@ -159,6 +166,10 @@ pub fn build_remote_script(input: &RenderInput) -> String {
     } = input;
     let mut script = String::with_capacity(4096);
 
+    // `set -e` first: any stage failure (SSH key write, file render, or a UCI op
+    // error) aborts the script with a non-zero exit, which the SSH layer reports
+    // as a deploy failure — never a false success.
+    script.push_str("set -e\n");
     if *verbose {
         script.push_str("set -x\n");
     }
@@ -182,13 +193,20 @@ pub fn build_remote_script(input: &RenderInput) -> String {
     }
 
     stage(&mut script, "uci");
+    // Backup + boot hook first, so a rollback target exists before we mutate.
     script.push_str(&boot_rollback_hook());
+    // Arm the timeout-rollback watchdog before applying, so `set -e` aborts and
+    // SSH drops both land inside the protected window.
+    let reload_cmds = reload_commands(managed_configs, service_map);
+    script.push_str(&arm_watchdog(&reload_cmds, *watchdog_timeout));
     script.push_str(uci_commands);
     script.push('\n');
 
-    let reload_cmds = reload_commands(managed_configs, service_map);
     stage(&mut script, "reload");
-    script.push_str(&render_watchdog(&reload_cmds, *watchdog_timeout));
+    // Success reload runs only after the apply stage completed (set -e otherwise
+    // exited first). It detaches so /tmp/deploy.sh can exit 0 and the foreground
+    // network/Dropbear reload doesn't sever the SSH link.
+    script.push_str(&render_success_reload(&reload_cmds));
 
     script
 }
@@ -318,6 +336,10 @@ mod tests {
             watchdog_timeout: 60,
             verbose: false,
         });
+        assert!(
+            quiet.contains("set -e"),
+            "every script must fail-fast on error"
+        );
         assert!(!quiet.contains("set -x"), "quiet must not enable tracing");
         assert!(
             !quiet.contains("[nuci] stage:"),

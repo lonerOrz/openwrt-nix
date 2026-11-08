@@ -805,3 +805,59 @@ async fn verbose_echoes_remote_stdout() {
         "non-verbose deploy must not echo remote stdout, got:\n{quiet_stdout}"
     );
 }
+
+#[tokio::test]
+async fn test_deploy_invalid_uci_fails_loudly() {
+    let target = get_opkg_target().await;
+    target.reset_uci_state();
+    // Baseline: the valid hostname from the base config is present.
+    assert_eq!(
+        target.uci_get("system.@system[0].hostname").as_deref(),
+        Some("rauter")
+    );
+
+    // A rawUci command that `uci` rejects (setting a non-existent section). Under
+    // `set -e` the deploy script must abort at this command and report failure
+    // via a non-zero exit, so `run()` returns Err — not a false success.
+    let json = serde_json::json!({
+        "packageManager": "opkg",
+        "settings": {},
+        "rawUci": ["uci set nonexistent.cfg01=bad"]
+    });
+    let path = write_tmp_json(json.to_string());
+
+    let artifacts = get_session_artifacts();
+    let config = DeployConfig {
+        port: target.port,
+        identity_file: Some(artifacts.ssh_key.to_string_lossy().into()),
+        force: true,
+        no_sops: false,
+        watchdog_timeout: 10,
+        verbose: false,
+    };
+
+    let result = nuci::target::deploy::run(
+        &path,
+        &format!("root@{}", target.host),
+        &config,
+        None,
+        &RealSsh,
+    );
+    assert!(
+        result.is_err(),
+        "a failing UCI command must make deploy fail, not report success"
+    );
+
+    // Reconnect and confirm the failed op did NOT commit (acceptance: no
+    // subsequent commit, target stays at its pre-deploy state).
+    target.wait_ssh(Duration::from_secs(10));
+    assert_eq!(
+        target.uci_get("system.@system[0].hostname").as_deref(),
+        Some("rauter"),
+        "failed deploy must not corrupt the existing config"
+    );
+    assert!(
+        !target.uci_exists("nonexistent.cfg01"),
+        "the rejected section must not have been committed"
+    );
+}

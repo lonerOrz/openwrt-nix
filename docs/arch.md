@@ -16,7 +16,7 @@ Nix config ──► uci.json ──► nuci CLI ──► SSH ──► OpenWrt
 - **CLI layer**: `compile` generates UCI commands, `diff` performs a read-only comparison, `deploy` compiles and deploys.
 - **Target layer**: applies configuration idempotently, handling backup, rollback, and service reloads.
 
-Deployment lifecycle: backup → apply → async reload → SSH handshake confirmation → automatic rollback on failure.
+Deployment lifecycle: backup `/etc/config` → arm rollback watchdog → apply (per-command `set -e`, per-config atomic commit) → on success, async reload → SSH handshake confirmation → automatic rollback on failure.
 
 ## Project Features and Advantages
 
@@ -30,8 +30,8 @@ Deployment lifecycle: backup → apply → async reload → SSH handshake confir
 **Advantages**
 
 - **Idempotent**: repeated deploys leave no duplicate or stale configuration.
-- **Anti-brick**: network loss, timeouts, and power loss all trigger automatic rollback.
-- **SSH-friendly**: reloading network services never causes false failures from connection resets.
+- **Anti-brick**: `set -e` makes a single failed UCI command abort the script and report failure (never a false success); the rollback watchdog — armed before apply — restores `/etc/config` on timeout, session loss, or power loss.
+- **SSH-friendly**: the success reload detaches after `set -e` reaches it, so reloading network services never causes false failures from connection resets, and a failed apply never reloads a broken config.
 - **Previewable**: `nuci diff` shows changes read-only without touching the target.
 
 ## Components Overview
