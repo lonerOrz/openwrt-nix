@@ -13,9 +13,10 @@ pub struct SessionArtifacts {
     pub sops_key_dir: PathBuf,
     pub opkg_json: PathBuf,
     pub apk_json: PathBuf,
-    /// UCI-only reset configs: the full deploy config with `packages` and
-    /// `packageSources` stripped so `reset_uci_state` never touches the package
-    /// manager (and thus never needs network to `opkg update`/`apk update`).
+    /// UCI-only reset configs: derived from the full deploy config via nix
+    /// (test_config_reset{,_apk}.nix) by dropping `packages` and
+    /// `packageSources`, so `reset_uci_state` never touches the package manager
+    /// (and thus never needs network to `opkg update`/`apk update`).
     /// This keeps resets fast and offline-safe, removing the network flake that
     /// otherwise fails every reset-using test when feeds are unreachable.
     pub opkg_reset_json: PathBuf,
@@ -62,10 +63,17 @@ pub fn get_session_artifacts() -> &'static SessionArtifacts {
         let opkg_json = eval_nix_json(&manifest_dir, &temp_opkg_nix);
         let apk_json = eval_nix_json(&manifest_dir, &temp_apk_nix);
 
-        // Build UCI-only reset configs (no packages/feeds) so `reset_uci_state`
-        // is offline-safe and never runs `opkg update`/`apk update`.
-        let opkg_reset_json = strip_package_management(&session_dir, "opkg_reset.json", &opkg_json);
-        let apk_reset_json = strip_package_management(&session_dir, "apk_reset.json", &apk_json);
+        // Reset configs are derived from the (already-substituted) full configs
+        // via nix (see test_config_reset{,_apk}.nix), dropping only the
+        // package-manager keys. This keeps the single nix source of truth and the
+        // eval_nix_json pipeline intact; `reset_uci_state` is offline-safe and
+        // never runs `opkg update`/`apk update`.
+        let opkg_reset_json =
+            eval_nix_json(&manifest_dir, &session_dir.join("test_config_reset.nix"));
+        let apk_reset_json = eval_nix_json(
+            &manifest_dir,
+            &session_dir.join("test_config_reset_apk.nix"),
+        );
 
         SessionArtifacts {
             session_dir,
@@ -77,25 +85,6 @@ pub fn get_session_artifacts() -> &'static SessionArtifacts {
             apk_reset_json,
         }
     })
-}
-
-/// Reads a compiled nuci config JSON, drops `packages` and `packageSources`
-/// (the package-manager parts that require network to apply), and writes the
-/// result to `session_dir/<name>`. Returns the new path. Used to build the
-/// offline reset config so `reset_uci_state` never depends on feed reachability.
-fn strip_package_management(session_dir: &Path, name: &str, full_json: &Path) -> PathBuf {
-    let text = std::fs::read_to_string(full_json)
-        .unwrap_or_else(|e| panic!("read reset source {full_json:?}: {e}"));
-    let mut root: serde_json::Value = serde_json::from_str(&text)
-        .unwrap_or_else(|e| panic!("parse reset source {full_json:?}: {e}"));
-    if let Some(obj) = root.as_object_mut() {
-        obj.remove("packages");
-        obj.remove("packageSources");
-    }
-    let out_path = session_dir.join(name);
-    std::fs::write(&out_path, serde_json::to_string_pretty(&root).unwrap())
-        .unwrap_or_else(|e| panic!("write reset config {out_path:?}: {e}"));
-    out_path
 }
 
 fn generate_ssh_keypair(ssh_key: &Path) {

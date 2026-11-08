@@ -106,6 +106,7 @@
               rustfmt
               config.treefmt.build.wrapper
             ];
+          };
         };
     };
 }

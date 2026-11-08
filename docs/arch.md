@@ -30,7 +30,7 @@ Deployment lifecycle: backup `/etc/config` → arm rollback watchdog (guarded by
 **Advantages**
 
 - **Idempotent**: repeated deploys leave no duplicate or stale configuration.
-- **Watchdog cancellation**: after the apply completes, the deployer confirms the SSH handshake; on success it explicitly cancels the rollback watchdog (`test -f /tmp/.uci-watchdog-pid && kill …`). The "apply done" sentinel and the handshake cancellation are two halves of the same guard: the sentinel prevents the watchdog from firing on a *completed* apply, and the handshake cancellation prevents it from firing on a *successful reconnect* after the apply window. If the SSH session is lost before either happens, the watchdog reverts the config on timeout.
+- **Watchdog cancellation**: after the apply completes, the deployer confirms the SSH handshake; on success it explicitly cancels the rollback watchdog (`test -f /tmp/.uci-watchdog-pid && kill …`). The "apply done" sentinel and the handshake cancellation are two halves of the same guard: the sentinel prevents the watchdog from firing on a _completed_ apply, and the handshake cancellation prevents it from firing on a _successful reconnect_ after the apply window. If the SSH session is lost before either happens, the watchdog reverts the config on timeout.
 - **Previewable**: `nuci diff` shows changes read-only without touching the target.
 
 ## Components Overview

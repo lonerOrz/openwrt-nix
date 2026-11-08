@@ -913,9 +913,13 @@ mod tests {
         let plain_a = dir.path().join("a.json");
         fs::write(&plain_a, r#"{"key": "val_a"}"#).unwrap();
         let enc_a = dir.path().join("a.enc.json");
-        Command::new("sops")
+        // `--config /dev/null` isolates the encryption from any repo-local
+        // .sops.yaml, whose creation_rules do not match these temp paths.
+        let out = Command::new("sops")
             .env("SOPS_AGE_KEY_FILE", key_file.to_str().unwrap())
             .args([
+                "--config",
+                "/dev/null",
                 "--encrypt",
                 "--age",
                 &pub_key,
@@ -925,13 +929,20 @@ mod tests {
             ])
             .output()
             .expect("sops encrypt a");
+        assert!(
+            out.status.success(),
+            "sops encrypt a failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
 
         let plain_b = dir.path().join("b.json");
         fs::write(&plain_b, r#"{"key": "val_b"}"#).unwrap();
         let enc_b = dir.path().join("b.enc.json");
-        Command::new("sops")
+        let out = Command::new("sops")
             .env("SOPS_AGE_KEY_FILE", key_file.to_str().unwrap())
             .args([
+                "--config",
+                "/dev/null",
                 "--encrypt",
                 "--age",
                 &pub_key,
@@ -941,6 +952,11 @@ mod tests {
             ])
             .output()
             .expect("sops encrypt b");
+        assert!(
+            out.status.success(),
+            "sops encrypt b failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
 
         // The decryption child process inherits this to locate the age key.
         unsafe {
