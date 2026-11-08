@@ -747,7 +747,7 @@ async fn verbose_echoes_remote_stdout() {
     let json = r#"{
             "packageManager": "opkg",
             "settings": {},
-            "rawUci": ["uci show system"]
+            "rawUci": ["uci show dropbear"]
         }"#
     .to_string();
     let dir = std::env::temp_dir().join("nuci_test");
@@ -784,8 +784,8 @@ async fn verbose_echoes_remote_stdout() {
     );
     let stdout = String::from_utf8_lossy(&verbose_out.stdout);
     assert!(
-        stdout.contains("system."),
-        "verbose deploy should echo remote 'uci show system' stdout, got:\n{stdout}"
+        stdout.contains("dropbear."),
+        "verbose deploy should echo remote 'uci show dropbear' stdout, got:\n{stdout}"
     );
 
     // Non-verbose: the same probe must NOT appear in local stdout.
@@ -812,7 +812,7 @@ async fn verbose_echoes_remote_stdout() {
     );
     let quiet_stdout = String::from_utf8_lossy(&quiet_out.stdout);
     assert!(
-        !quiet_stdout.contains("system."),
+        !quiet_stdout.contains("dropbear."),
         "non-verbose deploy must not echo remote stdout, got:\n{quiet_stdout}"
     );
 }
