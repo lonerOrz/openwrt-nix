@@ -12,11 +12,8 @@ use crate::target::diff::{
 };
 use crate::utils::error::ConfigError;
 use indexmap::IndexMap;
-/// Removes the per-deploy staging script and watchdog pid file left on the
-/// target when `run` returns early (e.g. a failed UCI command aborts the deploy
-/// script via `set -e`, so execution never reaches the success-path cleanup).
-/// RAII: dropped on every `return` from `run`, so a failed deploy does not leave
-/// `/tmp/deploy.sh` behind (audit TODO 1.2, acceptance item 5).
+/// Removes the per-deploy staging script and watchdog pid file when `run` returns
+/// early; RAII, dropped on every `return`.
 struct StagingCleanup<'a> {
     target: &'a str,
     ssh: &'a dyn SshExec,
@@ -25,10 +22,7 @@ struct StagingCleanup<'a> {
 }
 
 impl<'a> StagingCleanup<'a> {
-    /// Starts inert: no remote `rm` on drop until `arm()` is called, which only
-    /// happens after the staging script has actually been uploaded. This keeps the
-    /// guard a no-op for early returns that never wrote the script (no-op skip),
-    /// so it never issues a stray remote command.
+    /// Starts inert: no remote `rm` until the staging script was actually uploaded.
     fn new(target: &'a str, ssh: &'a dyn SshExec, config: &'a DeployConfig) -> Self {
         Self {
             target,
@@ -37,13 +31,11 @@ impl<'a> StagingCleanup<'a> {
             active: false,
         }
     }
-    /// Arm the guard: the staging script exists on the target and must be removed
-    /// on any subsequent early return.
+    /// Arm the guard: the staging script exists and must be removed on early return.
     fn arm(&mut self) {
         self.active = true;
     }
-    /// Success-path cleanup runs explicitly and disarms the guard so it does not
-    /// double-exec (the guard only needs to cover the early-return paths).
+    /// Disarms the guard so the success path does not double-exec.
     fn disarm(&mut self) {
         self.active = false;
     }
@@ -875,8 +867,7 @@ mod tests {
         }
     }
 
-    /// A failed remote deploy (early `?` return) must still leave no staging
-    /// script: `StagingCleanup::drop` issues `rm -f /tmp/deploy.sh`.
+    /// A failed remote deploy must still leave no staging script.
     #[test]
     fn run_cleans_staging_script_on_failed_deploy() {
         use std::io::Write;

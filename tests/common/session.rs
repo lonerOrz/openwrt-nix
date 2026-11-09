@@ -13,12 +13,8 @@ pub struct SessionArtifacts {
     pub sops_key_dir: PathBuf,
     pub opkg_json: PathBuf,
     pub apk_json: PathBuf,
-    /// UCI-only reset configs: derived from the full deploy config via nix
-    /// (test_config_reset{,_apk}.nix) by dropping `packages` and
-    /// `packageSources`, so `reset_uci_state` never touches the package manager
-    /// (and thus never needs network to `opkg update`/`apk update`).
-    /// This keeps resets fast and offline-safe, removing the network flake that
-    /// otherwise fails every reset-using test when feeds are unreachable.
+    /// UCI-only reset configs (packages and packageSources dropped), so resets
+    /// never touch the package manager and stay offline-safe.
     pub opkg_reset_json: PathBuf,
     pub apk_reset_json: PathBuf,
 }
@@ -48,13 +44,13 @@ pub fn get_session_artifacts() -> &'static SessionArtifacts {
 
         let temp_opkg_nix = prepare_nix_file(
             &session_dir,
-            "test_config.nix",
+            "integration/configs/test_config.nix",
             &pub_key,
             &encrypted_secrets,
         );
         let temp_apk_nix = prepare_nix_file(
             &session_dir,
-            "test_config_apk.nix",
+            "integration/configs/test_config_apk.nix",
             &pub_key,
             &encrypted_secrets,
         );
@@ -64,15 +60,17 @@ pub fn get_session_artifacts() -> &'static SessionArtifacts {
         let apk_json = eval_nix_json(&manifest_dir, &temp_apk_nix);
 
         // Reset configs are derived from the (already-substituted) full configs
-        // via nix (see test_config_reset{,_apk}.nix), dropping only the
+        // via nix (see integration/configs/test_config_reset{,_apk}.nix), dropping only the
         // package-manager keys. This keeps the single nix source of truth and the
         // eval_nix_json pipeline intact; `reset_uci_state` is offline-safe and
         // never runs `opkg update`/`apk update`.
-        let opkg_reset_json =
-            eval_nix_json(&manifest_dir, &session_dir.join("test_config_reset.nix"));
+        let opkg_reset_json = eval_nix_json(
+            &manifest_dir,
+            &session_dir.join("integration/configs/test_config_reset.nix"),
+        );
         let apk_reset_json = eval_nix_json(
             &manifest_dir,
-            &session_dir.join("test_config_reset_apk.nix"),
+            &session_dir.join("integration/configs/test_config_reset_apk.nix"),
         );
 
         SessionArtifacts {
@@ -144,10 +142,10 @@ fn encrypt_mock_secrets(
     encrypted_secrets: &Path,
     session_dir: &Path,
 ) {
-    let mock_secrets_path = session_dir.join("mock_secrets/secrets.json");
+    let mock_secrets_path = session_dir.join("integration/mock_secrets/secrets.json");
     assert!(
         mock_secrets_path.exists(),
-        "mock_secrets/secrets.json must exist in sandbox at {}",
+        "integration/mock_secrets/secrets.json must exist in sandbox at {}",
         mock_secrets_path.display()
     );
 
@@ -283,15 +281,11 @@ pub fn sops_key_file() -> PathBuf {
     get_session_artifacts().sops_key_dir.join("keys.txt")
 }
 
-/// Returns a FRESH container for the given role, scoped to the calling test.
+/// Returns a FRESH container per test.
 ///
-/// Earlier revisions reused two process-lifetime `OnceCell` containers across all
-/// tests. That sharing caused non-deterministic cross-test contamination: a deploy's
-/// DETACHED success reload (`( sleep 1; reload_config ) &`) could fire into a later
-/// test's setup, and stray UCI sections from one test leaked into another's
-/// assertions. Per testcontainers' model each test owns its container; `Target`'s
-/// `ContainerAsync` is dropped when the `Target` leaves scope, which stops the
-/// container (the library's own destructor handles teardown — no manual `stop`/`rm`).
+/// Shared containers caused cross-test contamination: a detached success reload
+/// could fire into a later test's setup. Each `Target` owns its container and
+/// stops it on drop.
 pub async fn get_opkg_target() -> Target {
     Target::new("opkg")
         .await
@@ -308,8 +302,7 @@ pub fn opkg_json_path() -> PathBuf {
     get_session_artifacts().opkg_json.clone()
 }
 
-/// UCI-only reset config (no `packages`/`packageSources`) so resets run
-/// offline and never invoke `opkg update`/`apk update`.
+/// UCI-only reset config, so resets stay offline.
 pub fn opkg_reset_json_path() -> PathBuf {
     get_session_artifacts().opkg_reset_json.clone()
 }

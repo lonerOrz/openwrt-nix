@@ -184,4 +184,11 @@ in
   uci.sshKeys = [
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKbBp2dH2X3dcU1zh+xW3ZsdYROKpJd3n13ssOP092qE joerg@turingmachine"
   ];
+  # ---- Runtime-only deploy options (transport concerns, NOT device state) ----
+  # These are injected into the generated `nuci deploy` invocation by
+  # nix/default.nix; they never enter uci.json. The CLI passthrough in
+  # `nix run .#example -- ...` passes later CLI flags that take precedence.
+  #   uci.verbose = true;                          # default --verbose on deploy
+  #   uci.port = 2222;                             # non-standard SSH port
+  #   uci.identity = "/home/you/.ssh/id_ed25519";  # str, NOT copied into the store
 }

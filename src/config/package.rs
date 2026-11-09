@@ -1,12 +1,8 @@
 use crate::utils::error::ConfigError;
 
-/// A package name validated against the apk/opkg charset
-/// (`[A-Za-z0-9][A-Za-z0-9.+_-]*`).
+/// A package name matching `[A-Za-z0-9][A-Za-z0-9.+_-]*`.
 ///
-/// Parsing at the config boundary makes shell injection via package names
-/// unrepresentable: the charset excludes whitespace, quotes, `$`, backticks,
-/// `;`, `&`, `|`, `/`, and globs, so a downstream call site cannot smuggle
-/// shell syntax even if it forgets to quote.
+/// The charset excludes shell syntax, so a call site cannot smuggle it in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageName(String);
 
@@ -39,7 +35,7 @@ fn is_valid_name(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'_' | b'-'))
 }
 
-/// One entry of the `packages` list: `"name"` installs, `"-name"` removes.
+/// `"name"` installs, `"-name"` removes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PackageAction {
     Install(PackageName),
@@ -47,8 +43,7 @@ pub enum PackageAction {
 }
 
 impl PackageAction {
-    /// Parse a package spec. A lone `-` or an invalid name part is a config
-    /// error, never a silent skip.
+    /// A lone `-` or an invalid name is a config error, never a silent skip.
     pub fn parse(spec: &str) -> Result<Self, ConfigError> {
         match spec.strip_prefix('-') {
             Some(name) => Ok(Self::Remove(PackageName::try_from(name)?)),
@@ -71,17 +66,12 @@ impl PackageAction {
     }
 }
 
-/// An absolute path on the target device, safe to interpolate into a remote
-/// command once shell-quoted.
+/// An absolute path on the target, safe to interpolate once shell-quoted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemotePath(String);
 
 impl RemotePath {
-    /// Destination for a streamed local package: `/tmp/{file_name}`.
-    ///
-    /// `file_name` must be a plain filename component (same charset as
-    /// [`PackageName`]), so the value can neither escape `/tmp` nor carry
-    /// shell syntax.
+    /// Destination `/tmp/{file_name}`; the name must be a plain filename component.
     pub fn tmp(file_name: &str) -> Result<Self, ConfigError> {
         if is_valid_name(file_name) {
             Ok(Self(format!("/tmp/{file_name}")))

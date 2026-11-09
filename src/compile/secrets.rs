@@ -8,12 +8,7 @@ use std::io::BufReader;
 use std::path::Path;
 use std::process::Command;
 
-/// A map of decrypted secret values keyed by their JSON path (e.g. `wifi_pass`).
-///
-/// Audit E.5/4.6: plaintext secret material must not be reachable through
-/// `Debug`. The inner map is private, `Debug` prints only a count, and the
-/// only way to read a plaintext value is an explicit [`SecretMap::get`] call —
-/// so a stray `dbg!(config)` cannot dump credentials.
+/// Decrypted secret values by key; plaintext is reachable only via [`SecretMap::get`].
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct SecretMap {
     inner: HashMap<String, String>,
@@ -24,8 +19,7 @@ impl SecretMap {
         Self { inner }
     }
 
-    /// Read one plaintext secret value. This is the deliberate boundary where
-    /// secret material is handed to the caller.
+    /// The deliberate boundary where plaintext secret material is handed out.
     pub fn get(&self, key: &str) -> Option<&str> {
         self.inner.get(key).map(|s| s.as_str())
     }
@@ -188,23 +182,13 @@ fn resolve_value(val: &mut Value, secrets: &HashMap<String, String>) -> Result<(
     Ok(())
 }
 
-/// Resolve `@name@` secret placeholders across an explicit field whitelist.
+/// Resolve `@name@` placeholders in a field whitelist.
 ///
-/// Supported (secrets MAY appear here):
-/// - `settings[*].options[*]` — UCI option values (scalars and list elements).
-/// - `packageSources.opkgFeeds` / `packageSources.apkRepositories` — feed/repo URLs.
-/// - `rawUci[*]` — custom UCI command lines.
-/// - `files[*].content` — only the `Text` variant; never `Base64` (it would corrupt
-///   the encoded bytes).
-/// - `sshKeys[*]` — authorized-key lines.
+/// Interpolated: `settings[*].options[*]`, `packageSources.{opkgFeeds,apkRepositories}`,
+/// `rawUci[*]`, `files[*].content` (Text only), `sshKeys[*]`.
+/// Not interpolated: `packages`, `packageSources.localPackages`, `files[*].base64`.
 ///
-/// Deliberately NOT interpolated (not secret-bearing, `@` is not valid there):
-/// - `packages` / `packageSources.localPackages` — package names and paths.
-/// - `files[*].content` `Base64` variant.
-///
-/// The placeholder syntax is `@name@` (a project-local convention, distinct from
-/// sops-nix's `{{name}}` templates). Unknown-but-valid identifiers error; sequences
-/// that are not valid identifiers are left verbatim.
+/// `@name@` is project-local (not sops-nix's `{{name}}`); unknown identifiers error.
 pub(crate) fn resolve_secrets(
     mut root: Root,
     secrets: &HashMap<String, String>,
@@ -307,13 +291,10 @@ pub(crate) fn load_secrets_dir(dir_path: &str) -> Result<HashMap<String, String>
     Ok(secrets)
 }
 
-/// Merge `incoming` into `existing`, treating identical values as an idempotent
-/// merge and conflicting (same key, different value) entries as a hard error.
+/// Merge `incoming` into `existing`: identical values merge, conflicting values error.
 ///
-/// `existing` is normally the SOPS-decrypted map; `incoming` the secrets
-/// directory. A bare `HashMap::extend` would silently overwrite the SOPS value
-/// with the directory value, hiding a misconfiguration — this rejects it
-/// instead. The error reports the conflicting key id, never the plaintext value.
+/// A bare `HashMap::extend` would silently overwrite the SOPS value with the
+/// directory value. The error names the conflicting key, never the plaintext.
 pub(crate) fn merge_secrets(
     existing: &mut HashMap<String, String>,
     incoming: HashMap<String, String>,
@@ -398,7 +379,7 @@ mod tests {
 
     #[test]
     fn secret_map_debug_redacts_values() {
-        // Audit E.5/4.6: plaintext secret material must never reach a log.
+        // Plaintext secret material must never reach a log.
         let mut m = std::collections::HashMap::new();
         m.insert("root_password".to_string(), "PLAINTEXT_PW".to_string());
         m.insert("wifi_pass".to_string(), "PLAINTEXT_WIFI".to_string());

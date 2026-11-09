@@ -1,10 +1,7 @@
 //! Runtime discovery of target capabilities.
 //!
-//! The package manager actually installed on the target (`apk` on OpenWrt 25.12+,
-//! `opkg` on older releases) is authoritative: a box cannot run the other's
-//! commands. The JSON `packageManager` field is only a hint. We probe the target
-//! over SSH and use the detected backend for execution; a mismatch with the declared
-//! field is reported but does not block a valid deployment (the probe wins).
+//! The probed package manager wins over the declared JSON field; a mismatch is
+//! reported but does not block the deployment.
 
 use crate::config::models::PkgBackend;
 use crate::target::deploy::{DeployConfig, SshExec};
@@ -30,8 +27,7 @@ pub fn discover_package_manager(
     }
 }
 
-/// Reconcile the declared backend with the probed one: the probed backend is
-/// always returned; a mismatch is reported as an error naming both values.
+/// Returns the probed backend, reporting a mismatch with the declared one.
 pub fn resolve_backend(declared: &str, discovered: PkgBackend) -> Result<PkgBackend, ConfigError> {
     // Validate the declared value first: a typo like "apt" must still be rejected.
     let declared = PkgBackend::try_from(declared)?;

@@ -97,14 +97,12 @@
             chmod +x $out/etc/uci-defaults/99-nuci-bootstrap
           '';
 
-      # resolve release
       resolvedRelease =
         if release != null then
           release
         else
           lib.trim (builtins.readFile "${openwrt-imagebuilder}/cache/LATEST_RELEASE");
 
-      # identify hardware profile → target/variant
       profiles = openwrt-imagebuilder.lib.profiles { inherit pkgs; };
       profileConfig = profiles.identifyProfile profile;
 

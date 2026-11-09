@@ -11,10 +11,13 @@
 
 ## Core
 
-| Option                | Type                    | Default  | Description                                                                 |
-| :-------------------- | :---------------------- | :------- | :-------------------------------------------------------------------------- |
-| `uci.packageManager`  | `enum [ "opkg" "apk" ]` | `"opkg"` | Package manager backend. Use apk on OpenWrt 25.12+, opkg on older releases. |
-| `uci.watchdogTimeout` | `int`                   | `60`     | Rollback watchdog timeout in seconds.                                       |
+| Option                | Type                    | Default  | Description                                                                                                                                               |
+| :-------------------- | :---------------------- | :------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `uci.packageManager`  | `enum [ "opkg" "apk" ]` | `"opkg"` | Package manager backend. Use apk on OpenWrt 25.12+, opkg on older releases.                                                                               |
+| `uci.watchdogTimeout` | `int`                   | `60`     | Rollback watchdog timeout in seconds.                                                                                                                     |
+| `uci.verbose`         | `bool`                  | `false`  | Pass `--verbose` to `deploy` (stage banners + remote `set -x`). A CLI `-v` takes precedence.                                                              |
+| `uci.port`            | `nullOr int`            | `null`   | SSH port injected into `deploy`; transport-only, ignored by `compile`/`diff`. A CLI `--port` takes precedence.                                            |
+| `uci.identity`        | `nullOr str`            | `null`   | SSH identity path injected as `--identity`, shell-quoted; a string (not a path) so the key is not copied into the Nix store. A CLI `-i` takes precedence. |
 
 ## UCI Configuration
 

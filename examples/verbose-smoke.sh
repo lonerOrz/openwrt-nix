@@ -20,7 +20,7 @@ TMPKEY=""
 ensure_image() {
   if ! "$ENGINE" image inspect "$IMAGE" >/dev/null 2>&1; then
     echo ">> Building container image $IMAGE ..."
-    "$ENGINE" build -q -t "$IMAGE" -f tests/Containerfile.apk . >/dev/null
+    "$ENGINE" build -q -t "$IMAGE" -f tests/integration/containerfiles/Containerfile.apk . >/dev/null
   fi
 }
 

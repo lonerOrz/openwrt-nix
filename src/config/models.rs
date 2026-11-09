@@ -21,10 +21,7 @@ pub struct Root {
     pub files: Option<Vec<File>>,
 }
 
-/// Debug view of `Root.settings`: lists config / section / option *names* but
-/// never option *values*. Option values are the place where interpolated
-/// secret plaintext ends up, so names-only keeps the shape visible for
-/// debugging without leaking credentials.
+/// Names only: option values hold interpolated secret plaintext.
 struct SettingsDebug<'a>(&'a IndexMap<String, IndexMap<String, Section>>);
 
 fn write_option_names<'a, I>(f: &mut std::fmt::Formatter<'_>, opts: I) -> std::fmt::Result
@@ -82,12 +79,7 @@ impl std::fmt::Debug for SettingsDebug<'_> {
 }
 
 impl std::fmt::Debug for Root {
-    /// Redacting Debug: `Root` holds secret-bearing data — SSH public keys,
-    /// rawUci commands, package-source URLs (which may embed credentials) and
-    /// arbitrary file contents. After secret interpolation the `settings`
-    /// values also contain plaintext credentials. Deriving `Debug` would leak
-    /// all of this through `dbg!(root)` / `{:?}` in logs, so we surface
-    /// structure only and never the sensitive payloads.
+    /// Redacting Debug: the struct holds secret-bearing data (keys, rawUci, URLs, values).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Root")
             .field("package_manager", &self.package_manager)
@@ -163,17 +155,13 @@ impl TryFrom<&str> for PkgBackend {
     }
 }
 
-/// Redacting Debug: feed/repo URLs can embed HTTP basic credentials
-/// (`https://user:pass@host/...`), so a derived `Debug` would leak them. Print
-/// only counts, never the URLs.
+/// Redacting Debug: feed URLs can embed HTTP basic credentials.
 #[derive(Deserialize)]
 pub struct PackageSources {
-    /// Opkg-style feeds (`src/gz <name> <url>`). Written to
-    /// `/etc/opkg/customfeeds.conf` only when the target uses opkg.
+    /// Opkg feeds, written to `/etc/opkg/customfeeds.conf` on opkg targets.
     #[serde(rename = "opkgFeeds", default)]
     pub opkg_feeds: Option<Vec<String>>,
-    /// Apk repository URLs. Written to
-    /// `/etc/apk/repositories.d/customfeeds.list` only when the target uses apk.
+    /// Apk repositories, written to `/etc/apk/repositories.d/customfeeds.list` on apk targets.
     #[serde(rename = "apkRepositories", default)]
     pub apk_repositories: Option<Vec<String>>,
     #[serde(rename = "localPackages", default)]
@@ -200,20 +188,14 @@ impl std::fmt::Debug for PackageSources {
 }
 
 impl PackageSources {
-    /// True only when every source list is absent or empty. Used by
-    /// `read_package_manager_hint` so an empty `packageSources = { … = []; }`
-    /// (as emitted by Nix modules) does not trigger an unnecessary runtime
-    /// capability probe.
+    /// True when no source list holds an entry (Nix modules emit empty lists).
     pub fn is_empty(&self) -> bool {
         self.opkg_feeds.as_ref().is_none_or(|v| v.is_empty())
             && self.apk_repositories.as_ref().is_none_or(|v| v.is_empty())
             && self.local_packages.as_ref().is_none_or(|v| v.is_empty())
     }
 }
-/// Holds UCI option values. After secret interpolation the `options` map carries
-/// plaintext credentials, so a derived `Debug` would leak them via any
-/// `dbg!(section)`. Custom Debug prints only the section `_type` and the option
-/// *names* — never the values.
+/// Holds option values, which carry plaintext credentials after interpolation.
 #[derive(Deserialize)]
 pub struct SectionData {
     #[serde(rename = "_type")]
@@ -231,9 +213,7 @@ impl std::fmt::Debug for SectionData {
     }
 }
 
-/// Redacting Debug: same rationale as [`SectionData`] — the inner options hold
-/// interpolated secret plaintext. Print only structure (the `_type`s present),
-/// never values.
+/// Redacting Debug: the inner options hold interpolated secret plaintext.
 #[derive(Deserialize)]
 #[serde(untagged)]
 pub enum Section {
@@ -253,9 +233,7 @@ impl std::fmt::Debug for Section {
     }
 }
 
-/// Redacting Debug: a `File`'s `content` is the full file body (which may be a
-/// secret like a private key or an authorized_keys blob). Derived `Debug` would
-/// dump it through any `dbg!(file)`. Print only the path and content length.
+/// Redacting Debug: `content` is the full file body and may be a secret.
 #[derive(Deserialize)]
 pub struct File {
     pub path: String,
@@ -278,8 +256,7 @@ impl std::fmt::Debug for File {
     }
 }
 
-/// Redacting Debug: print only the variant and byte length, never the payload
-/// (which can be interpolated secret plaintext or an entire key file).
+/// Redacting Debug: the payload can be secret plaintext or a key file.
 #[derive(Clone, PartialEq, Eq)]
 pub enum FileContent {
     Text(String),
@@ -355,8 +332,8 @@ mod tests {
 
     #[test]
     fn root_debug_redacts_secrets() {
-        // Audit E.5/4.6: Root Debug must never leak secret-bearing payloads
-        // (ssh keys, rawUci commands, file contents, or interpolated values).
+        // Root Debug must never leak secret-bearing payloads (ssh keys, rawUci
+        // commands, file contents, or interpolated values).
         let mut settings = IndexMap::new();
         let mut sec = IndexMap::new();
         sec.insert(
@@ -415,9 +392,9 @@ mod tests {
 
     #[test]
     fn inner_type_debug_redacts_secret_payloads() {
-        // Audit 4.6: the secret-bearing inner types must redact their own Debug,
-        // because `Root`/`CompiledConfig` redaction only protects the top level —
-        // a stray `dbg!(section)` / `dbg!(file)` must not dump plaintext either.
+        // The secret-bearing inner types must redact their own Debug, because
+        // `Root`/`CompiledConfig` redaction only protects the top level — a stray
+        // `dbg!(section)` / `dbg!(file)` must not dump plaintext either.
         let section = Section::Named(SectionData {
             section_type: "interface".into(),
             options: IndexMap::from([

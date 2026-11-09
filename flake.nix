@@ -2,7 +2,7 @@
   description = "OpenWrt router management with Nix";
 
   inputs = {
-    nixpkgs.url = "nixpkgs/nixos-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
     treefmt-nix = {
       url = "github:numtide/treefmt-nix";
@@ -16,7 +16,6 @@
 
   outputs =
     inputs@{
-      self,
       flake-parts,
       openwrt-imagebuilder,
       ...
@@ -39,17 +38,15 @@
         let
           uci = pkgs.callPackage ./nix { inherit openwrt-imagebuilder; };
           uciConfig = uci.writeUci ./example.nix;
-          testConfig = uci.writeUci ./tests/test_config.nix;
-          testConfigApk = uci.writeUci ./tests/test_config_apk.nix;
-          isX86Linux = pkgs.stdenv.hostPlatform.isLinux && pkgs.stdenv.hostPlatform.isx86_64;
-          exampleFirmware =
-            if isX86Linux then
-              uci.buildFirmware {
-                configuration = ./example.nix;
-                profile = "linksys_e8450-ubi";
-              }
-            else
-              null;
+          testConfig = uci.writeUci ./tests/integration/configs/test_config.nix;
+          testConfigApk = uci.writeUci ./tests/integration/configs/test_config_apk.nix;
+
+          isX86Linux = pkgs.stdenv.hostPlatform.system == "x86_64-linux";
+
+          uciApp = {
+            type = "app";
+            program = toString uciConfig.command;
+          };
         in
         {
           treefmt = {
@@ -72,29 +69,29 @@
           };
 
           packages = {
-            nuci = uci.nuci;
+            inherit (uci) nuci;
             default = uci.nuci;
             example-json = uciConfig.json;
             test-json = testConfig.json;
             test-json-apk = testConfigApk.json;
           }
-          // (pkgs.lib.optionalAttrs isX86Linux {
-            firmware = exampleFirmware;
-          });
-
-          apps = {
-            example = {
-              type = "app";
-              program = toString uciConfig.command;
-            };
-            default = {
-              type = "app";
-              program = toString uciConfig.command;
+          // pkgs.lib.optionalAttrs isX86Linux {
+            firmware = uci.buildFirmware {
+              configuration = ./example.nix;
+              profile = "linksys_e8450-ubi";
             };
           };
 
+          apps = {
+            default = uciApp;
+            example = uciApp;
+          };
+
           devShells.default = pkgs.mkShell {
-            buildInputs = with pkgs; [
+            buildInputs = [
+              config.treefmt.build.wrapper
+            ]
+            ++ (with pkgs; [
               just
               sops
               age
@@ -104,8 +101,7 @@
               rustc
               clippy
               rustfmt
-              config.treefmt.build.wrapper
-            ];
+            ]);
           };
         };
     };

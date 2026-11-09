@@ -24,28 +24,20 @@ fn is_valid_uci_type(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
-/// Reject option values that UCI cannot represent, or that our transport
-/// would silently corrupt.
+/// Reject option values that UCI cannot represent, or that our transport would
+/// silently corrupt.
 ///
-/// Verified against real UCI (`uci` 23.05.5 on OpenWrt 23.05 and
-/// `uci` 25.12.02 on OpenWrt 25.12) — both behave identically:
+/// Measured against `uci` 23.05.5 (OpenWrt 23.05) and `uci` 25.12.02 (25.12),
+/// which behave identically:
 ///
-/// - **NUL (0x00)** — the shell transport deletes NUL bytes from the script,
-///   so a value with an embedded NUL lands truncated: a *silent* wrong value
-///   with exit 0. `set -e` cannot catch it, so it must be rejected before it
-///   is emitted.
-/// - **0x01-0x08, 0x0B, 0x0C, 0x0E-0x1F** - UCI rejects these outright with
-///   "uci: Parse error" (exit 1).
-/// - **newline (0x0A)** - UCI accepts it via argv, but our generator emits
-///   each option as one line of a command buffer that is later split on
-///   newlines, so an embedded newline splits one command into two and the
-///   second half lands as a corrupted value while the deploy still reports
-///   success.
+/// - NUL (0x00): the shell transport deletes it, landing a silent wrong value
+///   with exit 0 — `set -e` cannot catch it.
+/// - 0x01-0x08, 0x0B, 0x0C, 0x0E-0x1F: UCI rejects them ("uci: Parse error").
+/// - newline (0x0A): UCI accepts it, but the generator emits one option per
+///   line, so it splits one command into two and the deploy still reports success.
 ///
-/// Everything else UCI accepts and round-trips correctly: space, tab (0x09), DEL,
-/// UTF-8, and the shell-significant characters backslash, double quote, single
-/// quote, dollar, semicolon, hash and equals. (CR and other C0 controls are
-/// rejected above — see the filter at line 59.)
+/// Everything else round-trips: space, tab, DEL, UTF-8, and the shell-significant
+/// characters backslash, quotes, dollar, semicolon, hash and equals.
 fn validate_uci_value_chars(value: &str, where_: &str) -> Result<(), ConfigError> {
     let bad = value.chars().find(|c| {
         let c = *c as u32;
@@ -133,18 +125,12 @@ fn validate_section_options(
     Ok(())
 }
 
-/// Validate the `rawUci` escape hatch.
+/// Validate the `rawUci` escape hatch on the final text of every line.
 ///
-/// rawUci lines are emitted **verbatim** into the deploy script, so a line
-/// containing shell metacharacters can chain, substitute or redirect commands.
-/// This must therefore be enforced on the *final* text of every line.
-///
-/// It is called twice on purpose: once on the raw config, and once again after
-/// secret interpolation. Interpolating a secret into a rawUci line can inject
-/// metacharacters that were not present in the original text — e.g.
-/// `uci set network.lan.proto='@proto@'` with a secret value of
-/// `static'; touch /tmp/pwned; echo '`. Validating only the pre-interpolation
-/// text would let that through to the shell.
+/// rawUci lines are emitted verbatim into the deploy script, so shell
+/// metacharacters can chain, substitute or redirect commands. Called twice on
+/// purpose: once on the raw config and again after secret interpolation, since
+/// an interpolated secret can introduce metacharacters.
 pub(crate) fn validate_raw_uci(raw: Option<&[String]>) -> Result<(), ConfigError> {
     let Some(raw) = raw else {
         return Ok(());
@@ -161,7 +147,7 @@ pub(crate) fn validate_raw_uci(raw: Option<&[String]>) -> Result<(), ConfigError
         }
         // Reject any Shell metacharacter so a single "command" cannot chain,
         // substitute, or redirect (newline/`;`, `$()`, backtick, `&`, `|`,
-        // `<`, `>`). This closes the injection gap noted in audit TODO 1.3.
+        // `<`, `>`). This closes the injection gap.
         if has_shell_metacharacter(trimmed) {
             return Err(ConfigError::Validation(format!(
                 "rawUci[{i}] contains a shell metacharacter: {trimmed}"
@@ -308,22 +294,14 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), super::super::utils::erro
 
 /// Reject strings that could break out of a single Shell argument/command line.
 ///
-/// rawUci lines are written verbatim into the deploy script, so a newline,
-/// `;`, `&`, `|`, backtick, `$`, `(`, `)`, `<`, or `>` would let a single
-/// "command" inject additional Shell syntax (command chaining, command
-/// substitution, redirection). This mirrors the character class already used
-/// to harden `authorized_keys` lines — a consistent, conservative rule.
+/// rawUci lines are written verbatim, so a newline, `;`, `&`, `|`, backtick,
+/// `$`, `(`, `)`, `<`, `>` would inject Shell syntax.
 fn has_shell_metacharacter(s: &str) -> bool {
     s.contains(['\n', '\r', ';', '&', '|', '`', '$', '(', ')', '<', '>'])
 }
 
-/// A valid `authorized_keys` line is a single line (no newline/CR) containing at
-/// least two space-separated tokens (keytype + base64 body) and no shell
-/// metacharacters. We deliberately do NOT whitelist key types: the set evolves
-/// across OpenSSH/Dropbear versions and Dropbear also allows an options prefix
-/// (`restrict`, `command="..."`, ...). Rejecting on metacharacters-only blocks
-/// injection (newlines, `;`, `&`, `|`, backticks, `$()`) without constraining
-/// legitimate keys.
+/// A valid `authorized_keys` line: one line, two tokens, no shell metacharacters.
+/// Key types are not whitelisted — the set evolves across OpenSSH/Dropbear.
 fn is_valid_authorized_key(line: &str) -> bool {
     if line.is_empty() || line.contains(['\n', '\r']) {
         return false;
@@ -334,9 +312,7 @@ fn is_valid_authorized_key(line: &str) -> bool {
     line.split_whitespace().count() >= 2
 }
 
-/// SHA-256 digest: exactly 64 hexadecimal digits (case-insensitive), per
-/// NIST FIPS 180-4. The target-side `sha256sum` guard already expects this
-/// shape; this rejects malformed values at the config boundary.
+/// SHA-256 digest: exactly 64 hex digits (case-insensitive), per NIST FIPS 180-4.
 fn is_valid_sha256(sum: &str) -> bool {
     sum.len() == 64 && sum.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -737,7 +713,7 @@ mod tests {
     fn rejects_raw_uci_shell_injection() {
         // rawUci is written verbatim into the deploy script; any Shell
         // metacharacter must be rejected so a single "command" cannot chain,
-        // substitute, or redirect (audit TODO 1.3).
+        // substitute, or redirect.
         for bad in [
             "uci show system; rm -rf /",    // command chaining
             "uci set x=y $(id)",            // command substitution

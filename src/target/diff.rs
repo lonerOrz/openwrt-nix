@@ -15,8 +15,7 @@ pub(crate) const SERVICE_SEPARATOR: &str = "===NUCI_SERVICES===";
 pub(crate) const STATE_SEPARATOR: &str = "===NUCI_STATE===";
 
 // OpenWrt procd limitation: no central inverse mapping from config to owning service exists.
-// The config_load grep heuristic is the community standard fallback; per ADR-0010 we intentionally
-// do not replace it — no official API exists to do better.
+// The config_load grep heuristic is the community standard fallback; no official API exists to do better.
 pub(crate) fn build_discovery_command(managed: &[&str]) -> String {
     format!(
         "for c in {configs}; do uci -q show \"$c\" 2>/dev/null; done; \

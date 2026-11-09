@@ -1,29 +1,36 @@
+# Target host and SSH port. Override via ROUTER_HOST / ROUTER_PORT.
+# A non-default port is needed when the target is a podman container whose 22
+# is published on a non-standard local port.
 host := env_var_or_default("ROUTER_HOST", "192.168.188.2")
-# SSH port for the target (override when the target is a podman container whose
-# 22 is published on a non-standard local port, e.g. ROUTER_PORT=22222).
 port := env_var_or_default("ROUTER_PORT", "22")
 
 ssh_opts := "-o ControlMaster=auto -o ControlPath=/tmp/ssh-%C -o ControlPersist=5m"
 
-eval-config:
+# --- Nix layer -------------------------------------------------------------
+
+# Compile the example config and print the UCI commands
+compile:
 	nix run .#example
 
-test-all:
-	cargo test
+# Nix-layer tests: module options -> generated command script.
+test-nix:
+	nix build --file tests/nix/test.nix --no-link --impure
 
-# Integration tests require Docker/Podman
-test-integration:
-	cargo test --test integration_test -- --test-threads=1 --nocapture
+# --- Rust tests ------------------------------------------------------------
 
+# Unit tests
 test-unit:
 	cargo test --lib
-	cargo run -- compile tests/test_uci.json > /dev/null
-	cargo run -- compile tests/test_edge_cases.json -s tests/test_secrets > /dev/null
-	@echo "All local mock configuration tests passed!"
+
+# Integration tests. Needs Docker/Podman and access to the package feeds.
+test-integration:
+	nix develop --command cargo test --test integration_test -- --test-threads=1
+
+# --- Quality ----------------------------------------------------------------
 
 fmt:
 	cargo fmt
-	nix fmt || true
+	nix fmt
 
 clippy:
 	cargo clippy --all-targets -- -D warnings
@@ -31,33 +38,35 @@ clippy:
 clean:
 	cargo clean
 
-build-containers:
-	podman build -q -t openwrt-test-opkg-env -f tests/Containerfile.opkg .
-	podman build -q -t openwrt-test-apk-env -f tests/Containerfile.apk .
+# --- Deploy -----------------------------------------------------------------
 
-# Smoke test for `deploy --verbose`: without a TARGET arg it spins up a throwaway
-# apk container to show per-stage banners vs. silent default output. Pass a target
-# to run against a real box: just smoke-verbose root@192.168.1.1 --identity ~/.ssh/id_ed25519
-smoke-verbose:
-	./examples/verbose-smoke.sh
-
-docs:
-	mdbook build
-
-docs-serve:
-	mdbook serve
-
-ssh +command:
-	ssh -p {{port}} {{ssh_opts}} "root@{{host}}" "{{command}}"
-
+# Read-only diff between the local config and the live target.
 dry-run:
 	nix build .#example-json -o /tmp/nuci-example.json
 	cargo run -- diff /tmp/nuci-example.json --target "root@{{host}}" --port {{port}}
 
-# Applies SSH keys, password, packages, UCI, and tinc — all hermetic.
+# Deploy the example config.
 apply:
 	nix run .#example -- "root@{{host}}" --port {{port}}
 
+# Upgrade the firmware, then re-apply the config.
 upgrade:
 	./scripts/upgrade.sh "{{host}}" "{{port}}" "{{ssh_opts}}"
 	just apply
+
+# With no arguments this spins up a throwaway apk container; pass a target and
+# an identity to run against a real box:
+#   just smoke-verbose root@192.168.1.1 ~/.ssh/id_ed25519
+# Show per-stage banners and the remote command trace.
+smoke-verbose *args:
+	./examples/verbose-smoke.sh {{args}}
+
+# --- Misc -------------------------------------------------------------------
+
+# Run a command on the target over SSH.
+ssh +command:
+	ssh -p {{port}} {{ssh_opts}} "root@{{host}}" "{{command}}"
+
+# Build the docs
+docs *mode:
+	{{ if mode == "serve" { "mdbook serve" } else { "mdbook build" } }}

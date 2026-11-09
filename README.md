@@ -21,6 +21,7 @@ Nix (writeUci) ──► uci.json ──► nuci compile/diff/deploy ──► S
 ```bash
 nuci diff   ./uci.json --target root@router          # Read-only diff
 nuci deploy ./uci.json --target root@router --force  # Deploy with rollback net
+nuci deploy ./uci.json --target root@router -v      # Deploy with stage banners & tracing
 nix run .#example -- "root@router"                   # Flake one-shot deploy
 ```
 

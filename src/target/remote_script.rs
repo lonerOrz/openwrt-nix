@@ -1,7 +1,5 @@
 //! Renders the remote deploy script from an already secret-resolved `Root`.
-//!
-//! Pure renderer: no IO, no execution. That separation keeps the deploy
-//! orchestrator a thin coordinator.
+//! Pure renderer: no IO, no execution.
 
 use std::collections::BTreeMap;
 use std::collections::HashSet;
@@ -35,9 +33,7 @@ fn reload_commands(modified: &[String], service_map: &BTreeMap<String, String>) 
     out
 }
 
-/// Installs procd init script `S15nuci_rollback`, which restores `/etc/config`
-/// from the backup on next boot if a rollback is still pending (e.g. after a
-/// power loss or failed deploy).
+/// Installs `S15nuci_rollback`, restoring `/etc/config` on next boot if a rollback is pending.
 fn boot_rollback_hook() -> String {
     let mut s = String::from("cp -a /etc/config /etc/.uci-rollback-backup\n");
     s.push_str("mkdir -p /etc/init.d /etc/rc.d\n");
@@ -55,11 +51,7 @@ fn boot_rollback_hook() -> String {
     s
 }
 
-/// Joins the declared SSH keys and appends the active deployer key to prevent
-/// lockout when it isn't already present, then writes
-/// `/etc/dropbear/authorized_keys`. `deployer_key` is `None` when no local
-/// agent key is available — the caller is warned but the block is still emitted
-/// for any configured keys. The `eprintln!` warnings are the only side effect.
+/// Writes `/etc/dropbear/authorized_keys`, appending the deployer key to prevent lockout.
 fn render_ssh_keys(keys: &[String], deployer_key: Option<&str>) -> String {
     if keys.is_empty() {
         return String::new();
@@ -88,8 +80,7 @@ fn render_ssh_keys(keys: &[String], deployer_key: Option<&str>) -> String {
     )
 }
 
-/// Uses `chpasswd` when available, else falls back to `passwd`. Emits nothing
-/// when `root_password` is absent or empty.
+/// Uses `chpasswd` when available, else `passwd`; emits nothing without a password.
 fn render_root_password(root_password: &str) -> String {
     if root_password.is_empty() {
         return String::new();
@@ -112,15 +103,8 @@ fn render_root_password(root_password: &str) -> String {
 }
 
 /// Arms the detach-on-disconnect watchdog WITHOUT running a reload.
-///
-/// The watchdog runs `sleep {watchdog_timeout}` in a `trap '' HUP` subshell so
-/// it survives SSH session loss. On fire it reverts `/etc/config` from the
-/// rollback backup ONLY if the UCI "apply done" sentinel
-/// (`/tmp/.nuci-deploy-ok`) is absent — i.e. the apply did not complete
-/// cleanly (a `set -e` abort, or an SSH drop mid-apply). If the sentinel is
-/// present the apply succeeded and the watchdog just cleans up state. This MUST
-/// be armed *before* the UCI apply stage so mid-apply failures/drops land
-/// inside the protected window.
+/// It reverts only when the `/tmp/.nuci-deploy-ok` sentinel is absent, and MUST be
+/// armed before the UCI stage so mid-apply failures fall inside the window.
 fn arm_watchdog(reload_cmds: &str, watchdog_timeout: u64) -> String {
     format!(
         "( trap '' HUP; sleep {watchdog_timeout}; \
@@ -134,23 +118,17 @@ fn arm_watchdog(reload_cmds: &str, watchdog_timeout: u64) -> String {
     )
 }
 
-/// Foreground reload tail, emitted only after a successful UCI apply. Running it
-/// here (not inside the watchdog) guarantees a failed apply never reloads the
-/// broken config: under `set -e` the script exits before reaching this stage.
+/// Foreground reload tail, emitted only after a successful UCI apply.
 fn render_success_reload(reload_cmds: &str) -> String {
     format!("( sleep 1; {reload_cmds} ) >/dev/null 2>&1 &\n")
 }
 
-/// All inputs needed to render the remote deploy script. Bundling them in one
-/// struct keeps `build_remote_script` a single-argument pure function and
-/// avoids an over-long parameter list.
+/// All inputs needed to render the remote deploy script.
 pub struct RenderInput<'a> {
     pub root: &'a Root,
     pub secrets: &'a SecretMap,
     pub uci_commands: String,
-    /// Package-manager operations, rendered AFTER the UCI "apply done" sentinel
-    /// so the rollback watchdog (armed before UCI) can't fire during a long
-    /// package install and wrongly revert an already-committed config.
+    /// Rendered AFTER the UCI sentinel so the watchdog cannot fire mid-install.
     pub package_commands: String,
     pub deployer_key: Option<String>,
     pub managed_configs: Vec<String>,
@@ -159,10 +137,8 @@ pub struct RenderInput<'a> {
     pub verbose: bool,
 }
 
-/// Renders the full remote script: SSH keys, root password, files, the boot
-/// rollback hook, the UCI apply stage (with the rollback watchdog armed before
-/// it), the "apply done" sentinel, the package-manager stage, and the detached
-/// success reload.
+/// Renders the full remote script: keys, password, files, rollback hook, UCI stage,
+/// sentinel, packages, detached reload.
 ///
 /// When `verbose` is set, the script enables `set -x` tracing and emits a
 /// `[nuci] stage:` banner before each logical stage so `--verbose` surfaces an

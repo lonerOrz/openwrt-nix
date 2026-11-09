@@ -1,16 +1,7 @@
 //! Structured UCI command model and its renderer.
 //!
-//! This module is a *pure refactor* of the former string-concatenation logic in
-//! `generator::serialize_uci`. It introduces explicit types for UCI paths,
-//! values and operations (audit TODO 2.1/2.2) and separates *command generation*
-//! from *script rendering* (TODO 2.3), without changing the emitted bytes.
-//!
-//! Invariant (byte-equivalence contract): for any input, the script produced by
-//! [`compile_and_render`] is identical to what the previous
-//! `serialize_uci` produced. This is locked by `generator::tests` (which still
-//! calls `serialize_uci`) and by the converter/renderer tests in this module.
-//! Do not "improve" the output format here — that belongs in a later behavioural
-//! change, not this refactor.
+//! Byte-equivalence contract: [`compile_and_render`] must emit exactly what
+//! `generator::serialize_uci` emits. Output format changes belong elsewhere.
 
 use crate::config::models::{Section, SectionData};
 use crate::config::uci_key::{anonymous_option_key, named_option_key};
@@ -20,16 +11,14 @@ use indexmap::IndexMap;
 use serde_json::Value;
 use std::fmt::Write as FmtWrite;
 
-/// A reference to a named UCI section (`config.name`). Used by `DeleteNamed`
-/// to address the section root for an existence-guarded delete.
+/// A reference to a named UCI section (`config.name`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UciSectionRef {
     Named { config: String, name: String },
 }
 
 impl UciSectionRef {
-    /// Stable string key used to address the section root (e.g. `network.lan`
-    /// or `system.@system[0]`).
+    /// Stable key addressing the section root (e.g. `network.lan`).
     fn key(&self) -> String {
         match self {
             UciSectionRef::Named { config, name } => format!("{config}.{name}"),
@@ -53,9 +42,7 @@ pub enum UciValue {
 }
 
 impl UciValue {
-    /// Build a [`UciValue`] from a JSON value, rejecting the types UCI cannot
-    /// store (null, object, list-of-objects). Mirrors the prior
-    /// `serialize_option_val` behaviour exactly.
+    /// Build a [`UciValue`] from JSON, rejecting the types UCI cannot store.
     fn try_from_json(val: &Value) -> Result<Self, ConfigError> {
         fn scalar(item: &Value) -> Result<UciScalar, ConfigError> {
             match item {
@@ -98,21 +85,17 @@ impl UciValue {
     }
 }
 
-/// A single UCI operation. Rendered later by [`UciRenderer`]; never stored as a
-/// shell string at construction time (TODO 2.2).
+/// A single UCI operation, rendered later by [`UciRenderer`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UciCommand {
-    /// `delete <ref>` guarded on existence (named section): a missing section is
-    /// a no-op under `set -e` on first deploy.
+    /// Existence-guarded delete: a missing section is a no-op under `set -e`.
     DeleteNamed { section: UciSectionRef },
     /// `add <config> <type>` for an anonymous section.
     Add {
         config: String,
         section_type: String,
     },
-    /// `set <path>=<type>` — the named-section *type* assignment. The original
-    /// generator emitted this **unquoted** (it is a fixed identifier, not a
-    /// value), so we keep it as a distinct case to preserve byte-equivalence.
+    /// Named-section type assignment, emitted unquoted (a fixed identifier).
     SetSectionType { path: String, type_name: String },
     /// `set <path>=<value>`.
     Set { path: String, value: UciValue },
@@ -120,17 +103,14 @@ pub enum UciCommand {
     AddList { path: String, value: UciScalar },
 }
 
-/// A guard that wipes every anonymous section of a given type before it is
-/// rebuilt: `while uci -q delete config.@type[0]; do :; done`.
+/// Wipes every anonymous section of a type before it is rebuilt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UciWipe {
     pub config: String,
     pub section_type: String,
 }
 
-/// The complete UCI program for one config file: an idempotency-restore wipe
-/// block (anonymous sections only) followed by the per-section body. Emitted
-/// *per config*, preserving the original per-config `touch`/`commit` framing.
+/// The complete UCI program for one config file: wipe block, then section body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigUciCommands {
     pub config: String,
@@ -138,8 +118,7 @@ pub struct ConfigUciCommands {
     pub body: Vec<UciCommand>,
 }
 
-/// Compile `Root.settings` into one [`ConfigUciCommands`] per config, in
-/// insertion order. Pure data — no shell text is produced here.
+/// Compile `Root.settings` into one [`ConfigUciCommands`] per config.
 pub fn compile_uci_commands(
     configs: &IndexMap<String, IndexMap<String, Section>>,
 ) -> Result<Vec<ConfigUciCommands>, ConfigError> {
@@ -243,8 +222,7 @@ fn list_type_of<'a>(item: &'a SectionData, fallback: &'a str) -> &'a str {
     }
 }
 
-/// Renders a single value (scalar or list element) as the *quoted* RHS of a
-/// `set`/`add_list` assignment, mirroring the prior `serialize_option_val` text.
+/// Renders a value as the quoted RHS of a `set`/`add_list` assignment.
 fn render_value_scalar(out: &mut String, scalar: &UciScalar) {
     match scalar {
         UciScalar::String(s) => {
@@ -261,8 +239,7 @@ fn render_value_scalar(out: &mut String, scalar: &UciScalar) {
     }
 }
 
-/// Renders [`UciCommand::Set`]'s payload `set path=value` (the line *without*
-/// the `uci ` prefix — the caller adds framing).
+/// Renders [`UciCommand::Set`]'s payload without the `uci ` prefix.
 fn render_set_line(out: &mut String, path: &str, value: &UciValue) {
     match value {
         UciValue::Scalar(scalar) => {
@@ -280,12 +257,7 @@ fn render_set_line(out: &mut String, path: &str, value: &UciValue) {
     }
 }
 
-/// Renderer: turns a [`ConfigUciCommands`] into the same bytes the previous
-/// `serialize_uci` produced for one config, appending them to `writer`.
-///
-/// The framing (anonymous wipe loops + `touch`/`uci <verb>`/`commit`) is
-/// reproduced exactly, including the shell-guard passthrough for the
-/// delete-named `if …; then …; fi` line.
+/// Renders one config into the bytes the previous `serialize_uci` produced.
 pub fn render_config(out: &mut String, cmd: &ConfigUciCommands) {
     let config_name = &cmd.config;
 
@@ -359,9 +331,7 @@ pub fn render_config(out: &mut String, cmd: &ConfigUciCommands) {
     }
 }
 
-/// Convenience: compile + render all configs into `writer`, preserving the
-/// original per-config ordering. Byte-equivalent to the previous
-/// `serialize_uci(configs)` output.
+/// Compile + render all configs, preserving the original ordering.
 pub fn compile_and_render(
     writer: &mut String,
     configs: &IndexMap<String, IndexMap<String, Section>>,
@@ -541,9 +511,7 @@ mod tests {
         assert!(out.contains("while uci -q delete firewall.@redirect[0]; do :; done"));
         assert!(out.contains("uci commit firewall"));
     }
-    /// Byte-exact check: the heterogeneous multi-type output must match the
-    /// historically emitted script verbatim (the audit's byte-equivalence
-    /// contract). This is the strongest regression guard for the refactor.
+    /// Byte-exact check for heterogeneous multi-type output.
     #[test]
     fn heterogeneous_output_is_byte_exact() {
         let mut sections = IndexMap::new();
@@ -591,8 +559,7 @@ uci commit firewall
         assert_eq!(out, expected, "byte-exact mismatch:\n{out}");
     }
 
-    /// Byte-exact check for a named section, including the unquoted type line
-    /// (`set network.lan=interface`) which the refactor must preserve.
+    /// Byte-exact check for a named section, including the unquoted type line.
     #[test]
     fn named_section_output_is_byte_exact() {
         let cfg = named("network", "lan", "interface", &[("proto", "static")]);

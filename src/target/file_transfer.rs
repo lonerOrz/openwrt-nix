@@ -1,10 +1,7 @@
 //! Local-package transfer and file-deploy rendering.
 //!
-//! Two responsibilities live here:
-//! - `render_file_block`: renders the remote file-write section of the deploy
-//!   script (per-file `mkdir`, guarded write, mode bits).
-//! - `transfer_packages`: bundles declared local packages into a tar and ships
-//!   them through the injected `SshExec` transport.
+//! `render_file_block` renders the remote file-write section; `transfer_packages`
+//! ships local packages as a tar through the injected `SshExec` transport.
 
 use crate::utils::helpers::shell_quote;
 use std::path::Path;
@@ -13,9 +10,7 @@ use crate::config::models::{File, FileContent, Root};
 use crate::target::deploy::{DeployConfig, SshExec};
 use crate::utils::error::ConfigError;
 
-/// Render the remote file-write block: per-file `mkdir`, guarded write (POSIX
-/// heredoc for text, `base64 -d` for binary), mode bits, and optional sha256
-/// guard. Pure string assembly — no IO.
+/// Renders the remote file-write block (per-file `mkdir`, guarded write, mode bits).
 pub fn render_file_block(files: &[File]) -> String {
     let mut script = String::new();
     for (i, file) in files.iter().enumerate() {
@@ -89,10 +84,7 @@ pub fn render_file_block(files: &[File]) -> String {
     script
 }
 
-/// Bundle declared local packages into a tar and stream them to
-/// `{target}:/tmp/` through the injected `SshExec` transport. Uses the trait
-/// (not the free `ssh_exec`) so test fakes are honored and the transport stays
-/// swappable.
+/// Bundles local packages into a tar and streams them to `{target}:/tmp/`.
 pub fn transfer_packages(
     json_path: &Path,
     target: &str,

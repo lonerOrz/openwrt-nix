@@ -71,15 +71,10 @@ impl PkgBackend {
         }
     }
 
-    /// Render a local-package install block: install from the streamed
-    /// `/tmp/<file>` (already uploaded by `transfer_packages`), then verify the
-    /// package is actually registered, then remove the staged file.
+    /// Install from the staged `/tmp/<file>`, verify registration, then clean up.
     ///
-    /// apk local packages are unsigned, so `--allow-untrusted` is correct here
-    /// (it must NOT be used for ordinary repository packages). The post-install
-    /// check catches a silent non-error that did not actually register the
-    /// package; `set -e` then aborts the deploy. Cleanup avoids leaving the
-    /// staged archive on the device after a successful install.
+    /// `--allow-untrusted` is correct for unsigned local apk packages only. The
+    /// post-install check catches a silent non-registering install.
     pub(crate) fn local_install_block(&self, pkg_name: &str, remote: &RemotePath) -> String {
         let probe = self.is_installed_cmd(pkg_name);
         let path = shell_quote(remote.as_str());
@@ -123,9 +118,7 @@ impl PkgBackend {
     }
 }
 
-/// `opkgFeeds` is only valid on an opkg target; `apkRepositories` only on an apk
-/// target. Supplying a field for the wrong backend is a configuration error (the
-/// two are mutually exclusive per target). An empty list means "no custom sources".
+/// `opkgFeeds` is valid only on opkg, `apkRepositories` only on apk.
 fn resolve_feeds(
     backend: PkgBackend,
     sources: &PackageSources,
@@ -160,9 +153,8 @@ fn resolve_feeds(
 
 /// Legacy entry point retained for callers and tests. This now delegates to the
 /// structured UCI model in `crate::compile::uci`, producing byte-identical
-/// output (audit TODO 2.1/2.2/2.3). The structured types are the supported
-/// interface going forward; this wrapper exists only to avoid churning every
-/// caller in this pure-refactor step.
+/// output. The structured types are the supported interface going forward; this
+/// wrapper exists only to avoid churning every caller.
 ///
 /// Each UCI op is emitted as its own `uci <verb>` line (not a batch heredoc) so
 /// a deploy script under `set -e` aborts at the first failing command — `uci

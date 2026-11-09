@@ -17,10 +17,8 @@ pub struct Target {
     pub port: u16,
     pub name: String,
     pub _container: Option<testcontainers::ContainerAsync<testcontainers::GenericImage>>,
-    /// Serializes all mutating access (deploys, resets, shell execs) to this
-    /// shared container so the concurrently-scheduled integration tests can't
-    /// truncate each other's /tmp/deploy.sh, clobber the rollback backup/boot
-    /// hook, or overwrite /sbin/reload_config mid-deploy.
+    /// Serializes mutating access so concurrent tests cannot clobber the shared
+    /// singleton paths (`/tmp/deploy.sh`, the rollback backup, `reload_config`).
     pub lock: std::sync::Mutex<()>,
 }
 
@@ -95,11 +93,8 @@ impl Target {
         })
     }
 
-    /// Serialize a closure against this container's shared-state lock. The
-    /// integration harness reuses a single opkg + single apk container across
-    /// concurrently-scheduled tests; the deploy path relies on singleton paths
-    /// (`/tmp/deploy.sh`, `/etc/.uci-rollback-backup`, `/sbin/reload_config`, …)
-    /// that are corrupted when deploys run concurrently against the same box.
+    /// Serialize a closure against this container's lock; concurrent deploys
+    /// would corrupt the singleton paths.
     pub(crate) fn guarded<T>(&self, f: impl FnOnce() -> T) -> T {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         f()
@@ -226,10 +221,8 @@ impl Target {
             .expect("nuci deploy failed during integration test");
     }
 
-    /// Lock-free deploy+restore primitive. `reset_uci_state` wraps this in the
-    /// container mutex; tests that must also hold the lock across setup and the
-    /// (detached, async) reload wait call `guarded(|| self.reset_uci_state_inner())`
-    /// so a neighbouring test's deferred reload cannot contaminate shared state.
+    /// Lock-free deploy+restore primitive; wrap it in the mutex to keep a
+    /// neighbouring test's deferred reload from contaminating shared state.
     pub(crate) fn reset_uci_state_inner(&self) {
         let json = if self.role == "opkg" {
             opkg_reset_json_path()
@@ -296,9 +289,9 @@ fn ensure_image(engine: &str, image_name: &str, role: &str) -> bool {
     }
 
     let containerfile = match role {
-        "opkg" => "tests/Containerfile.opkg",
-        "apk" => "tests/Containerfile.apk",
-        "agent" => "tests/Containerfile.agent-test",
+        "opkg" => "tests/integration/containerfiles/Containerfile.opkg",
+        "apk" => "tests/integration/containerfiles/Containerfile.apk",
+        "agent" => "tests/integration/containerfiles/Containerfile.agent-test",
         _ => return false,
     };
     Command::new(engine)

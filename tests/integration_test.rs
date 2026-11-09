@@ -38,7 +38,8 @@ fn test_container_image_build_opkg() {
         .unwrap_or(false);
 
     if !exists {
-        let containerfile = manifest_dir.join("tests/Containerfile.opkg");
+        let containerfile =
+            manifest_dir.join("tests/integration/containerfiles/Containerfile.opkg");
         let status = std::process::Command::new(&engine)
             .args([
                 "build",
@@ -83,7 +84,7 @@ fn test_container_image_build_apk() {
         .unwrap_or(false);
 
     if !exists {
-        let containerfile = manifest_dir.join("tests/Containerfile.apk");
+        let containerfile = manifest_dir.join("tests/integration/containerfiles/Containerfile.apk");
         let status = std::process::Command::new(&engine)
             .args([
                 "build",
@@ -645,20 +646,11 @@ async fn test_unified_lifecycle() {
     );
 }
 
-/// TODO 2.4: real-UCI round-trip for the escaping-critical value set.
-///
-/// `compile_config` renders `uci set path='value'` lines using single-quote
-/// escaping. A pure string snapshot (and even `compile_config` unit tests) cannot
-/// prove the shell-quoted payload is parsed back by `uci` into the *exact* original
-/// value. This test applies the rendered batch on a real OpenWrt target and reads
-/// each value back via `uci get`, asserting lossless round-trip for the characters
-/// that actually stress the escaping: spaces, a single quote, a backslash, a
-/// leading `#`, a `;`, a `$` (shell-unsafe but UCI-safe), Unicode, and list
-/// elements with the same characters. Newline/tab/C0 are excluded because
-/// `validate_uci_value_chars` rejects them at compile time (E.2). The empty string
-/// is excluded too: `uci get` of an empty value returns empty output,
-/// indistinguishable from a missing option at the shell level — its `'')` rendering
-/// is already fixed and covered by the renderer unit test.
+/// Proves the shell-quoted payload parses back into the exact original value,
+/// which string snapshots cannot show. Covers spaces, single quote, backslash,
+/// leading `#`, `;`, `$` and Unicode, in scalars and list elements.
+/// Newline/tab/C0 are rejected at compile time; the empty string is
+/// indistinguishable from a missing option at the shell level.
 #[tokio::test]
 async fn test_uci_value_roundtrip_on_real_target() {
     let target = get_opkg_target().await;
@@ -826,12 +818,8 @@ async fn test_package_matrix_apk_all_scenarios() {
     );
 }
 
-/// B-class proof that `--verbose` actually surfaces remote stdout.
-///
-/// Spawns the real `nuci` binary as a subprocess (isolated stdout, no shared
-/// capture races) against a live container. A `rawUci` probe echoes a unique
-/// marker; the remote command's stdout is captured by `ssh_exec` and, under
-/// `--verbose`, printed by `deploy::run`. Without the flag it must be silent.
+/// Proves `--verbose` surfaces remote stdout: a `rawUci` probe echoes a marker
+/// that `deploy::run` prints under the flag and hides without it.
 #[tokio::test]
 async fn verbose_echoes_remote_stdout() {
     let target = get_opkg_target().await;
@@ -974,14 +962,9 @@ async fn test_deploy_invalid_uci_fails_loudly() {
     );
 }
 
-/// Audit plan H.2: real-UCI round-trip regression.
-///
-/// A string snapshot (H.1) only proves the generated script text didn't change;
-/// it does NOT prove the commands are correct. This test compiles a fixed sample
-/// and actually executes the generated `uci_batch` against a real `uci` on a
-/// container, then reads the resulting state back via `uci get` / section counts.
-/// If the generator ever emits a wrong path or index, the real UCI tool rejects
-/// or mis-orders it and this fails — the authoritative correctness gate.
+/// Real-UCI round-trip: a string snapshot only proves the text is unchanged, not
+/// that the commands are correct. Executing them on a real `uci` is the
+/// authoritative gate.
 fn sample_path(name: &str) -> PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -989,6 +972,8 @@ fn sample_path(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// Real-UCI round-trip: a string snapshot only proves the text is unchanged, not
+/// that the commands are correct.
 #[tokio::test]
 async fn test_compile_roundtrip_heterogeneous_anonymous_sections() {
     let target = get_opkg_target().await;
@@ -1064,8 +1049,7 @@ async fn test_compile_roundtrip_basic_scalar_config() {
     );
 }
 
-/// 3.4 closure: a local `.apk` must actually install, the staged file must be
-/// cleaned up, and a failed local install must abort the deploy (set -e).
+/// A local `.apk` must install, clean up, and abort the deploy on failure.
 #[tokio::test]
 async fn test_apk_local_package_install_and_cleanup() {
     let target = get_apk_target().await;
