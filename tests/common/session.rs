@@ -2,22 +2,24 @@ use super::target::Target;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
-use tokio::sync::OnceCell;
 
-// Performance Decision: Sandbox creates dynamic test artifacts in /tmp/nuci_test_sandbox_*
-// to prevent Git working tree pollution and ensure parallel isolation across test sessions.
+// Use a /tmp sandbox to avoid Git working tree pollution and isolate parallel test sessions.
 pub struct SessionArtifacts {
+    // Kept alive for the session lifetime; never read directly.
     #[allow(dead_code)]
     pub session_dir: PathBuf,
+
     pub ssh_key: PathBuf,
     pub sops_key_dir: PathBuf,
     pub opkg_json: PathBuf,
     pub apk_json: PathBuf,
+    /// UCI-only reset configs (packages and packageSources dropped), so resets
+    /// never touch the package manager and stay offline-safe.
+    pub opkg_reset_json: PathBuf,
+    pub apk_reset_json: PathBuf,
 }
 
 static ARTIFACTS: OnceLock<SessionArtifacts> = OnceLock::new();
-static OPKG_TARGET: OnceCell<Target> = OnceCell::const_new();
-static APK_TARGET: OnceCell<Target> = OnceCell::const_new();
 
 pub fn get_session_artifacts() -> &'static SessionArtifacts {
     ARTIFACTS.get_or_init(|| {
@@ -26,7 +28,6 @@ pub fn get_session_artifacts() -> &'static SessionArtifacts {
         std::fs::create_dir_all(&session_dir).expect("Failed to create test sandbox dir");
 
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-
         let src_tests = manifest_dir.join("tests");
         copy_tests_to_sandbox(&src_tests, &session_dir);
 
@@ -43,20 +44,34 @@ pub fn get_session_artifacts() -> &'static SessionArtifacts {
 
         let temp_opkg_nix = prepare_nix_file(
             &session_dir,
-            "test_config.nix",
+            "integration/configs/test_config.nix",
             &pub_key,
             &encrypted_secrets,
         );
         let temp_apk_nix = prepare_nix_file(
             &session_dir,
-            "test_config_apk.nix",
+            "integration/configs/test_config_apk.nix",
             &pub_key,
             &encrypted_secrets,
         );
 
-        // Performance Decision: nix build uses --impure --expr to evaluate dynamic sandbox nix configs without creating git flakes.
+        // nix build uses --impure --expr to evaluate the sandbox configs without creating git flakes.
         let opkg_json = eval_nix_json(&manifest_dir, &temp_opkg_nix);
         let apk_json = eval_nix_json(&manifest_dir, &temp_apk_nix);
+
+        // Reset configs are derived from the (already-substituted) full configs
+        // via nix (see integration/configs/test_config_reset{,_apk}.nix), dropping only the
+        // package-manager keys. This keeps the single nix source of truth and the
+        // eval_nix_json pipeline intact; `reset_uci_state` is offline-safe and
+        // never runs `opkg update`/`apk update`.
+        let opkg_reset_json = eval_nix_json(
+            &manifest_dir,
+            &session_dir.join("integration/configs/test_config_reset.nix"),
+        );
+        let apk_reset_json = eval_nix_json(
+            &manifest_dir,
+            &session_dir.join("integration/configs/test_config_reset_apk.nix"),
+        );
 
         SessionArtifacts {
             session_dir,
@@ -64,6 +79,8 @@ pub fn get_session_artifacts() -> &'static SessionArtifacts {
             sops_key_dir,
             opkg_json,
             apk_json,
+            opkg_reset_json,
+            apk_reset_json,
         }
     })
 }
@@ -125,10 +142,10 @@ fn encrypt_mock_secrets(
     encrypted_secrets: &Path,
     session_dir: &Path,
 ) {
-    let mock_secrets_path = session_dir.join("mock_secrets/secrets.json");
+    let mock_secrets_path = session_dir.join("integration/mock_secrets/secrets.json");
     assert!(
         mock_secrets_path.exists(),
-        "mock_secrets/secrets.json must exist in sandbox at {}",
+        "integration/mock_secrets/secrets.json must exist in sandbox at {}",
         mock_secrets_path.display()
     );
 
@@ -264,28 +281,35 @@ pub fn sops_key_file() -> PathBuf {
     get_session_artifacts().sops_key_dir.join("keys.txt")
 }
 
-pub async fn get_opkg_target() -> &'static Target {
-    OPKG_TARGET
-        .get_or_init(|| async {
-            Target::new("opkg")
-                .await
-                .expect("FATAL: Failed to initialize OPKG container environment!")
-        })
+/// Returns a FRESH container per test.
+///
+/// Shared containers caused cross-test contamination: a detached success reload
+/// could fire into a later test's setup. Each `Target` owns its container and
+/// stops it on drop.
+pub async fn get_opkg_target() -> Target {
+    Target::new("opkg")
         .await
+        .expect("FATAL: Failed to initialize OPKG container environment!")
 }
 
-pub async fn get_apk_target() -> &'static Target {
-    APK_TARGET
-        .get_or_init(|| async {
-            Target::new("apk")
-                .await
-                .expect("FATAL: Failed to initialize APK container environment!")
-        })
+pub async fn get_apk_target() -> Target {
+    Target::new("apk")
         .await
+        .expect("FATAL: Failed to initialize APK container environment!")
 }
 
 pub fn opkg_json_path() -> PathBuf {
     get_session_artifacts().opkg_json.clone()
+}
+
+/// UCI-only reset config, so resets stay offline.
+pub fn opkg_reset_json_path() -> PathBuf {
+    get_session_artifacts().opkg_reset_json.clone()
+}
+
+/// UCI-only reset config for the apk target.
+pub fn apk_reset_json_path() -> PathBuf {
+    get_session_artifacts().apk_reset_json.clone()
 }
 
 pub fn apk_json_path() -> PathBuf {

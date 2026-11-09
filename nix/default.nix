@@ -62,6 +62,13 @@ in
           ;
         files = filesJson;
       };
+      verboseFlag = lib.optionalString res.config.uci.verbose "--verbose ";
+      portFlag = lib.optionalString (
+        res.config.uci.port != null
+      ) "--port ${toString res.config.uci.port} ";
+      identityFlag = lib.optionalString (
+        res.config.uci.identity != null
+      ) "--identity ${lib.escapeShellArg res.config.uci.identity} ";
     in
     {
       inherit json;
@@ -78,7 +85,13 @@ in
         else
           TARGET="$1"
           shift
-          ${nuci}/bin/nuci deploy "${json}" --target "$TARGET" --watchdog-timeout "${toString res.config.uci.watchdogTimeout}" "$@"
+          ${nuci}/bin/nuci deploy "${json}" \
+            --target "$TARGET" \
+            ${verboseFlag}\
+            ${portFlag}\
+            ${identityFlag}\
+            --watchdog-timeout "${toString res.config.uci.watchdogTimeout}" \
+            "$@"
         fi
       '';
     };

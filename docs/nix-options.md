@@ -1,44 +1,74 @@
-# Nix Module Options Specification
+# Nix Module Options
 
-Verified 1:1 against `nix/module-options.nix` and `nix/default.nix`.
+## Index
 
-## Options Reference
+1. [Core](#core)
+2. [UCI Configuration](#uci-configuration)
+3. [Packages](#packages)
+4. [Files and Keys](#files-and-keys)
+5. [Secrets and Raw Commands](#secrets-and-raw-commands)
+6. [Library Functions](#library-functions)
 
-| Option                             | Type                          | Default  | Description / Output Mapping                                                                   |
-| :--------------------------------- | :---------------------------- | :------- | :--------------------------------------------------------------------------------------------- |
-| `uci.packageManager`               | `enum [ "opkg" "apk" ]`       | `"opkg"` | Package backend (`opkg` ≤ 23.05, `apk` 24.10+).                                                |
-| `uci.settings`                     | `(pkgs.formats.json {}).type` | `{}`     | UCI configuration attrset (`config → section → option`).                                       |
-| `uci.secrets.sops.files`           | `listOf path`                 | `[]`     | SOPS encrypted files decrypted in-memory at compile time.                                      |
-| `uci.packages`                     | `listOf str`                  | `[]`     | Packages to install. Prefix with `-` to remove (`-pkg`).                                       |
-| `uci.packageSources.feeds`         | `listOf str`                  | `[]`     | Repository lines (`/etc/opkg/customfeeds.conf` or `/etc/apk/repositories.d/customfeeds.list`). |
-| `uci.packageSources.localPackages` | `listOf (either str path)`    | `[]`     | Local `.ipk`/`.apk` paths, streamed via in-memory tar to `/tmp/`.                              |
-| `uci.sshKeys`                      | `listOf str`                  | `[]`     | Public keys deployed to `/etc/dropbear/authorized_keys` (`0600`).                              |
-| `uci.watchdogTimeout`              | `int`                         | `60`     | Rollback watchdog timeout in seconds.                                                          |
-| `uci.rawUci`                       | `listOf str`                  | `[]`     | Raw UCI lines (must start with `"uci "`). Auto-touches missing `/etc/config/<file>`.           |
-| `uci.files`                        | `listOf (submodule)`          | `[]`     | Custom file payloads (spec below).                                                             |
+## Core
 
-### `uci.files.*` Submodule Options
+| Option                | Type                    | Default  | Description                                                                                                                                               |
+| :-------------------- | :---------------------- | :------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `uci.packageManager`  | `enum [ "opkg" "apk" ]` | `"opkg"` | Package manager backend. Use apk on OpenWrt 25.12+, opkg on older releases.                                                                               |
+| `uci.watchdogTimeout` | `int`                   | `60`     | Rollback watchdog timeout in seconds.                                                                                                                     |
+| `uci.verbose`         | `bool`                  | `false`  | Pass `--verbose` to `deploy` (stage banners + remote `set -x`). A CLI `-v` takes precedence.                                                              |
+| `uci.port`            | `nullOr int`            | `null`   | SSH port injected into `deploy`; transport-only, ignored by `compile`/`diff`. A CLI `--port` takes precedence.                                            |
+| `uci.identity`        | `nullOr str`            | `null`   | SSH identity path injected as `--identity`, shell-quoted; a string (not a path) so the key is not copied into the Nix store. A CLI `-i` takes precedence. |
 
-| Option       | Type         | Default      | Description                                                                            |
-| :----------- | :----------- | :----------- | :------------------------------------------------------------------------------------- |
-| `path`       | `str`        | _(required)_ | Absolute destination path on target.                                                   |
-| `content`    | `nullOr str` | `null`       | Text content (written via POSIX `cat` heredoc). Empty string creates a zero-byte file. |
-| `base64`     | `nullOr str` | `null`       | Base64 binary payload (decoded via `base64 -d`). Mutually exclusive with `content`.    |
-| `checksum`   | `nullOr str` | `null`       | Expected SHA256 hex. Skips write if target hash matches.                               |
-| `executable` | `bool`       | `false`      | File mode (`true` → `0755`, `false` → `0644`).                                         |
+## UCI Configuration
 
-## Nix Library Functions (`nix/default.nix`)
+| Option         | Type                          | Default | Description                                    |
+| :------------- | :---------------------------- | :------ | :--------------------------------------------- |
+| `uci.settings` | `(pkgs.formats.json {}).type` | `{}`    | UCI configuration (config → section → option). |
+
+## Packages
+
+| Option                               | Type                       | Default | Description                                                                  |
+| :----------------------------------- | :------------------------- | :------ | :--------------------------------------------------------------------------- |
+| `uci.packages`                       | `listOf str`               | `[]`    | Packages to install; prefix `-` to remove (e.g. `-tcpdump`).                 |
+| `uci.packageSources.opkgFeeds`       | `listOf str`               | `[]`    | opkg feeds (`src/gz <name> <url>`), written to `/etc/opkg/customfeeds.conf`. |
+| `uci.packageSources.apkRepositories` | `listOf str`               | `[]`    | apk repository URLs, written to `/etc/apk/repositories.d/customfeeds.list`.  |
+| `uci.packageSources.localPackages`   | `listOf (either str path)` | `[]`    | Local `.ipk` / `.apk` files, streamed to the target `/tmp/`.                 |
+
+> `opkgFeeds` and `apkRepositories` are mutually exclusive and must match `packageManager`.
+
+## Files and Keys
+
+| Option                                                                                                                                     | Type                                                                                                                                                                                                                                                                                                                                | Default | Description                                                |
+| :----------------------------------------------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------ | :--------------------------------------------------------- |
+| `uci.files`                                                                                                                                | `listOf (submodule)`                                                                                                                                                                                                                                                                                                                | `[]`    | Custom files; see submodule below.                         |
+| `uci.sshKeys`                                                                                                                              | `listOf str`                                                                                                                                                                                                                                                                                                                        | `[]`    | Keys deployed to `/etc/dropbear/authorized_keys` (`0600`). |
+| - `sshKeys` entries may carry an OpenSSH `command="..."` restriction, but the value **must not contain shell metacharacters** (`;`, `&`, ` | `, `` ` ``, `$()`, `$(`, etc.). `is_valid_authorized_key`rejects such keys as a conservative hardening measure — a`command=` that embeds shell syntax is treated as a potential injection vector, not a literal. If you need restricted keys, keep the command a single quoted program path plus arguments with no shell operators. |
+
+### `uci.files.*`
+
+| Option       | Type         | Default  | Description                                                                            |
+| :----------- | :----------- | :------- | :------------------------------------------------------------------------------------- |
+| `path`       | `str`        | required | Absolute destination path on the target.                                               |
+| `content`    | `nullOr str` | `null`   | Text content; empty string creates a zero-byte file. Mutually exclusive with `base64`. |
+| `base64`     | `nullOr str` | `null`   | Base64 binary content. Mutually exclusive with `content`.                              |
+| `checksum`   | `nullOr str` | `null`   | Expected SHA256; skips the write if the target hash matches.                           |
+| `executable` | `bool`       | `false`  | `true` sets `0755`, `false` sets `0644`.                                               |
+
+## Secrets and Raw Commands
+
+| Option                   | Type          | Default | Description                                                                              |
+| :----------------------- | :------------ | :------ | :--------------------------------------------------------------------------------------- |
+| `uci.secrets.sops.files` | `listOf path` | `[]`    | SOPS-encrypted files, decrypted in memory at compile time to fill `@name@` placeholders. |
+| `uci.rawUci`             | `listOf str`  | `[]`    | Raw UCI command lines; must start with `"uci "`.                                         |
+
+**`@name@` placeholder scope**: `settings` option values, `opkgFeeds` / `apkRepositories`, `rawUci`, `files.content`, `sshKeys`. Not supported in `packages`, `localPackages`, or `files.base64`.
+
+## Library Functions (`nix/default.nix`)
 
 ### `writeUci configuration`
 
-Evaluates Nix configuration module and returns:
-
-- `json`: Derivation generating `uci.json`.
-- `command`: Wrapper script executing `nuci compile` or `nuci deploy` (forwards `$@` flags).
+Returns `json` (a derivation producing `uci.json`) and `command` (a wrapper script running `nuci compile` / `nuci deploy`).
 
 ### `buildFirmware { configuration, profile, release ? null }`
 
-Combines `nuci` with `nix-openwrt-imagebuilder`:
-
-- Bakes compiled UCI directives into `/etc/uci-defaults/99-nuci-bootstrap`.
-- Inherits `settings`, `packages`, `packageSources`, `sshKeys`, `files`, and `rawUci`.
+Bakes compiled UCI directives into `/etc/uci-defaults/99-nuci-bootstrap` and inherits `settings`, `packages`, `packageSources`, `sshKeys`, `files`, `rawUci`.

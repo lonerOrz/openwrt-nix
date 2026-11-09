@@ -5,7 +5,12 @@ ARG OPENWRT_VERSION=x86-64-23.05.5
 FROM docker.io/openwrt/rootfs:${OPENWRT_VERSION}
 
 RUN mkdir -p /var/lock /var/run /etc/dropbear /etc/ssh /root/.ssh /etc/opkg
-RUN touch /etc/config/system /etc/config/wireless /etc/config/network
+# Real OpenWrt ships populated /etc/config/{system,network,wireless}; the upstream
+# rootfs leaves them absent, so seed minimal-but-valid defaults so uci show works
+# and tests that inspect concrete configs behave like a real device.
+RUN printf 'config system\n\toption hostname OpenWrt\n\toption timezone UTC\n' > /etc/config/system && \
+    printf 'config interface lan\n\toption device br-lan\n\toption proto static\n\toption ipaddr 192.168.1.1\n\toption netmask 255.255.255.0\n' > /etc/config/network && \
+    printf 'config wifi-device radio0\n\toption type mac80211\n\toption disabled 1\n' > /etc/config/wireless
 RUN mkdir -p /etc/opkg
 
 # Install SSH, CA certs (for real HTTPS feeds), and test utilities.

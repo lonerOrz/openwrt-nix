@@ -33,7 +33,7 @@
     "htop"
   ];
   uci.packageSources = {
-    feeds = [
+    apkRepositories = [
       "https://downloads.openwrt.org/snapshots/packages/x86_64/base/packages.adb"
       "https://downloads.openwrt.org/snapshots/packages/x86_64/packages/packages.adb"
     ];

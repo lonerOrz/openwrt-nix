@@ -38,7 +38,8 @@ fn test_container_image_build_opkg() {
         .unwrap_or(false);
 
     if !exists {
-        let containerfile = manifest_dir.join("tests/Containerfile.opkg");
+        let containerfile =
+            manifest_dir.join("tests/integration/containerfiles/Containerfile.opkg");
         let status = std::process::Command::new(&engine)
             .args([
                 "build",
@@ -83,7 +84,7 @@ fn test_container_image_build_apk() {
         .unwrap_or(false);
 
     if !exists {
-        let containerfile = manifest_dir.join("tests/Containerfile.apk");
+        let containerfile = manifest_dir.join("tests/integration/containerfiles/Containerfile.apk");
         let status = std::process::Command::new(&engine)
             .args([
                 "build",
@@ -117,7 +118,7 @@ fn test_container_image_build_apk() {
 #[test]
 fn test_command_generation_opkg() {
     with_sops_env(|| {
-        let compiled = compile_config(&opkg_json_path(), None, false).unwrap();
+        let compiled = compile_config(&opkg_json_path(), None, false, None).unwrap();
         let out = &compiled.uci_batch;
         assert!(
             out.contains("add system system"),
@@ -132,11 +133,15 @@ fn test_command_generation_opkg() {
             "missing wifi key"
         );
         assert!(
-            out.contains("opkg remove"),
+            !out.contains("opkg remove"),
+            "package commands must not be in uci_batch"
+        );
+        assert!(
+            compiled.package_commands.contains("opkg remove"),
             "missing opkg remove for -tcpdump"
         );
         assert!(
-            !out.contains("-tcpdump"),
+            !compiled.package_commands.contains("-tcpdump"),
             "negative pkg prefix should be stripped from command"
         );
     });
@@ -145,7 +150,7 @@ fn test_command_generation_opkg() {
 #[test]
 fn test_command_generation_apk() {
     with_sops_env(|| {
-        let compiled = compile_config(&apk_json_path(), None, false).unwrap();
+        let compiled = compile_config(&apk_json_path(), None, false, None).unwrap();
         let out = &compiled.uci_batch;
         assert!(
             out.contains("add system system"),
@@ -155,14 +160,24 @@ fn test_command_generation_apk() {
             out.contains("set system.@system[0].hostname='rauter-apk'"),
             "missing apk hostname"
         );
-        assert!(out.contains("apk del"), "missing apk del for -tcpdump");
+        assert!(
+            !out.contains("apk del"),
+            "package commands must not be in uci_batch"
+        );
+        assert!(
+            compiled.package_commands.contains("apk del"),
+            "missing apk del for -tcpdump"
+        );
     });
 }
 
 #[tokio::test]
 async fn test_opkg_full_lifecycle() {
     let target = get_opkg_target().await;
-    target.reset_uci_state();
+    // Initial setup deploys the FULL config (packages + feeds), since this test
+    // asserts package state. `reset_uci_state` is now UCI-only/offline-safe and
+    // no longer installs packages.
+    target.nuci_deploy(&opkg_json_path());
 
     assert_eq!(
         target.uci_get("system.@system[0].hostname").as_deref(),
@@ -221,6 +236,7 @@ async fn test_opkg_full_lifecycle() {
             force: false,
             no_sops: false,
             watchdog_timeout: 10,
+            verbose: false,
         };
         assert!(
             diff::run(
@@ -255,7 +271,10 @@ async fn test_opkg_full_lifecycle() {
 #[tokio::test]
 async fn test_apk_full_lifecycle() {
     let target = get_apk_target().await;
-    target.reset_uci_state();
+    // Initial setup deploys the FULL config (packages + repos), since this test
+    // asserts package state. `reset_uci_state` is now UCI-only/offline-safe and
+    // no longer installs packages.
+    target.nuci_deploy(&apk_json_path());
 
     assert_eq!(
         target.uci_get("system.@system[0].hostname").as_deref(),
@@ -300,6 +319,7 @@ async fn test_apk_full_lifecycle() {
             force: false,
             no_sops: false,
             watchdog_timeout: 10,
+            verbose: false,
         };
         assert!(
             diff::run(
@@ -346,7 +366,7 @@ async fn test_watchdog_rollback() {
 
     target.sh("cp -a /etc/config /tmp/.uci-rollback-backup");
     target.sh("uci set system.@system[0].hostname='CORRUPTED'; uci commit");
-    target.sh(&format!("pkill -f '/usr/sbin/{daemon}' || true"));
+    target.sh(&format!("pkill -f '/usr/sbin/{daemon}'"));
 
     target.sh("sleep 2");
     target.sh("cp -a /tmp/.uci-rollback-backup/* /etc/config/");
@@ -405,6 +425,7 @@ async fn test_diff_accuracy() {
             force: false,
             no_sops: false,
             watchdog_timeout: 10,
+            verbose: false,
         };
         assert!(
             diff::run(
@@ -423,37 +444,42 @@ async fn test_diff_accuracy() {
 #[tokio::test]
 async fn test_smart_reload_fallback() {
     let target = get_opkg_target().await;
-    target.sh("rm -f /sbin/reload_config");
-    target.sh("mkdir -p /etc/init.d");
-    for svc in &["dropbear", "network", "firewall", "dnsmasq", "system"] {
-        target.sh(&format!(
-            "printf '#!/bin/sh\\necho \"{svc} called\" >> /tmp/reload_history\\n' > /etc/init.d/{svc} && chmod +x /etc/init.d/{svc}",
-            svc = svc
-        ));
-    }
-    target.sh("rm -f /tmp/reload_history");
-    target.reset_uci_state();
-    // The reload is now async (delayed 1s background). Wait for it to complete.
-    target.wait_ssh(Duration::from_secs(10));
-    std::thread::sleep(Duration::from_secs(3));
-    let hist = target.sh("cat /tmp/reload_history 2>/dev/null");
-    assert!(
-        hist.contains("network called"),
-        "network not reloaded: {hist}"
-    );
-    assert!(
-        hist.contains("system called"),
-        "system not reloaded: {hist}"
-    );
-    assert!(
-        !hist.contains("firewall called"),
-        "firewall should not be reloaded: {hist}"
-    );
-    let _ = target.sh("rm -f /sbin/reload_config");
-    for svc in &["dropbear", "network", "firewall", "dnsmasq", "system"] {
-        let _ = target.sh(&format!("rm -f /etc/init.d/{svc}"));
-    }
-    let _ = target.sh("rm -f /tmp/reload_history");
+    // Hold the container lock for the whole test. The deploy path detaches the
+    // reload as an async `( sleep 1; reload ) &`, so a neighboring test's
+    // deferred reload could otherwise fire after this test's deploy returns and
+    // contaminate /tmp/reload_history. Serializing setup+reload-wait avoids it.
+    target.guarded(|| {
+        target.sh_inner("rm -f /sbin/reload_config");
+        target.sh_inner("mkdir -p /etc/init.d");
+        for svc in &["dropbear", "network", "firewall", "dnsmasq", "system"] {
+            target.sh_inner(&format!(
+                "printf '#!/bin/sh\\necho \"{svc} called\" >> /tmp/reload_history\\n' > /etc/init.d/{svc} && chmod +x /etc/init.d/{svc}",
+                svc = svc
+            ));
+        }
+        target.sh_inner("rm -f /tmp/reload_history");
+        target.reset_uci_state_inner();
+        target.wait_ssh(Duration::from_secs(10));
+        std::thread::sleep(Duration::from_secs(3));
+        let hist = target.sh_inner("cat /tmp/reload_history 2>/dev/null");
+        assert!(
+            hist.contains("network called"),
+            "network not reloaded: {hist}"
+        );
+        assert!(
+            hist.contains("system called"),
+            "system not reloaded: {hist}"
+        );
+        assert!(
+            !hist.contains("firewall called"),
+            "firewall should not be reloaded: {hist}"
+        );
+        let _ = target.sh_inner("rm -f /sbin/reload_config");
+        for svc in &["dropbear", "network", "firewall", "dnsmasq", "system"] {
+            let _ = target.sh_inner(&format!("rm -f /etc/init.d/{svc}"));
+        }
+        let _ = target.sh_inner("rm -f /tmp/reload_history");
+    });
 }
 
 #[tokio::test]
@@ -462,7 +488,6 @@ async fn test_smart_reload_primary() {
     target.sh("printf '#!/bin/sh\\ntouch /tmp/.reload_config_primary\\n' > /sbin/reload_config && chmod +x /sbin/reload_config");
     target.sh("rm -f /tmp/.reload_config_primary");
     target.reset_uci_state();
-    // Wait for async reload to fire (1s delay + processing time)
     target.wait_ssh(Duration::from_secs(10));
     std::thread::sleep(Duration::from_secs(3));
     assert!(
@@ -589,17 +614,13 @@ fn test_nested_and_null_values() {
             r#"{"packageManager":"opkg","settings":{"x":{"s":{"_type":"t","k":null}}}"#,
         ),
         (
-            "hyphen config",
-            r#"{"packageManager":"opkg","settings":{"my-config":{}}}"#,
-        ),
-        (
             "hyphen option",
             r#"{"packageManager":"opkg","settings":{"network":{"lan":{"_type":"interface","ip-address":"10.0.0.1"}}}}"#,
         ),
     ];
     for (name, json) in cases {
         let path = write_tmp_json(json);
-        let result = compile_config(&path, None, true);
+        let result = compile_config(&path, None, true, None);
         assert!(result.is_err(), "{name} should be rejected");
     }
 }
@@ -612,11 +633,8 @@ async fn test_unified_lifecycle() {
     fs::create_dir_all(&dir).unwrap();
     let boot_path = dir.join("bootstrap.json");
     fs::write(&boot_path, boot_json).unwrap();
-    let compiled = compile_config(&boot_path, None, true).unwrap();
-    target.sh(&format!(
-        "uci -q batch <<'U'\n{}\nU\nuci commit",
-        compiled.uci_batch
-    ));
+    let compiled = compile_config(&boot_path, None, true, None).unwrap();
+    target.sh(&format!("set -e\n{}", compiled.uci_batch));
     assert_eq!(
         target.uci_get("wireless.default_radio0.key").as_deref(),
         Some("CHANGE_ME_ON_DEPLOY")
@@ -626,6 +644,80 @@ async fn test_unified_lifecycle() {
         target.uci_get("wireless.default_radio0.key").as_deref(),
         Some("my-test-password")
     );
+}
+
+/// Proves the shell-quoted payload parses back into the exact original value,
+/// which string snapshots cannot show. Covers spaces, single quote, backslash,
+/// leading `#`, `;`, `$` and Unicode, in scalars and list elements.
+/// Newline/tab/C0 are rejected at compile time; the empty string is
+/// indistinguishable from a missing option at the shell level.
+#[tokio::test]
+async fn test_uci_value_roundtrip_on_real_target() {
+    let target = get_opkg_target().await;
+    target.reset_uci_state();
+
+    // One named section carrying every tricky scalar, plus a list option whose
+    // elements exercise the same characters at the `add_list` layer.
+    let json = serde_json::json!({
+        "packageManager": "opkg",
+        "settings": {
+            "nuci_rt": {
+                "vals": {
+                    "_type": "test",
+                    "plain": "plain",
+                    "spaces": "with spaces",
+                    "quote": "it's",
+                    "backslash": "back\\slash",
+                    "dollar": "$HOME",
+                    "hash": "# comment",
+                    "semicolon": "semicolon;",
+                    "unicode": "café—日本語",
+                    "list": ["a b", "it's", "x\\y", "$Z", "café"]
+                }
+            }
+        }
+    });
+    let path = write_tmp_json(json.to_string());
+    let compiled = compile_config(&path, None, true, None).expect("config must compile");
+
+    // Apply exactly the rendered UCI batch — no deploy scaffolding, just the
+    // same bytes a real deploy would send for the UCI phase.
+    target.sh(&format!("set -e\n{}", compiled.uci_batch));
+
+    let cases: &[(&str, &str)] = &[
+        ("nuci_rt.vals.plain", "plain"),
+        ("nuci_rt.vals.spaces", "with spaces"),
+        ("nuci_rt.vals.quote", "it's"),
+        ("nuci_rt.vals.backslash", "back\\slash"),
+        ("nuci_rt.vals.dollar", "$HOME"),
+        ("nuci_rt.vals.hash", "# comment"),
+        ("nuci_rt.vals.semicolon", "semicolon;"),
+        ("nuci_rt.vals.unicode", "café—日本語"),
+    ];
+    for (key, want) in cases {
+        assert_eq!(
+            target.uci_get(key).as_deref(),
+            Some(*want),
+            "round-trip mismatch for {key}"
+        );
+    }
+    // List elements must round-trip too. `uci get list` returns the space-joined
+    // members, and UCI's display layer wraps any member containing whitespace in
+    // single quotes (so `a b` comes back as `'a b'`); members without whitespace
+    // are emitted verbatim even if they contain a quote (`it's`). The stored
+    // values are correct — assert the exact UCI display string (after trimming the
+    // transport newline), which proves the rendered `add_list` payloads came back
+    // byte-for-byte from `uci`.
+    let list_raw = target
+        .uci_get("nuci_rt.vals.list")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    assert_eq!(
+        list_raw, "'a b' it's x\\y $Z café",
+        "list round-trip mismatch"
+    );
+    target.reset_uci_state();
 }
 
 #[tokio::test]
@@ -657,16 +749,14 @@ async fn test_custom_file_text_apk() {
 }
 
 #[test]
-fn test_hyphen_in_config_name_rejected() {
+fn test_hyphen_in_config_name_accepted() {
+    // Real OpenWrt config names (e.g. prometheus-node-exporter-lua) contain hyphens.
     let json = serde_json::json!({"packageManager": "opkg", "settings": {"my-config": {}}});
     let path = write_tmp_json(json.to_string());
-    let result = compile_config(&path, None, true);
-    assert!(result.is_err(), "expected error for hyphenated config name");
+    let result = compile_config(&path, None, true, None);
     assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("Invalid config name")
+        result.is_ok(),
+        "hyphenated config name should compile: {result:?}"
     );
 }
 
@@ -674,7 +764,7 @@ fn test_hyphen_in_config_name_rejected() {
 fn test_hyphen_in_option_name_rejected() {
     let json = serde_json::json!({"packageManager": "opkg", "settings": {"network": {"lan": {"_type": "interface", "ip-address": "10.0.0.1"}}}});
     let path = write_tmp_json(json.to_string());
-    let result = compile_config(&path, None, true);
+    let result = compile_config(&path, None, true, None);
     assert!(result.is_err(), "expected error for hyphenated option name");
     assert!(result.unwrap_err().to_string().contains("Invalid option"));
 }
@@ -697,7 +787,9 @@ fn sha256_hex(data: &[u8]) -> String {
 #[tokio::test]
 async fn test_package_matrix_opkg_all_scenarios() {
     let target = get_opkg_target().await;
-    target.reset_uci_state();
+    // Deploy the FULL config (packages + feeds) for setup; this test asserts
+    // package state, which `reset_uci_state` (UCI-only/offline-safe) no longer installs.
+    target.nuci_deploy(&opkg_json_path());
 
     assert!(
         !target.sh_ok("opkg status tcpdump 2>/dev/null | grep -q 'Status:.*installed'"),
@@ -712,7 +804,9 @@ async fn test_package_matrix_opkg_all_scenarios() {
 #[tokio::test]
 async fn test_package_matrix_apk_all_scenarios() {
     let target = get_apk_target().await;
-    target.reset_uci_state();
+    // Deploy the FULL config (packages + repos) for setup; this test asserts
+    // package state, which `reset_uci_state` (UCI-only/offline-safe) no longer installs.
+    target.nuci_deploy(&apk_json_path());
 
     assert!(
         !target.sh_ok("apk info -e tcpdump >/dev/null 2>&1"),
@@ -721,5 +815,329 @@ async fn test_package_matrix_apk_all_scenarios() {
     assert!(
         target.sh_ok("apk info -e htop >/dev/null 2>&1"),
         "apk install htop from official feed failed"
+    );
+}
+
+/// Proves `--verbose` surfaces remote stdout: a `rawUci` probe echoes a marker
+/// that `deploy::run` prints under the flag and hides without it.
+#[tokio::test]
+async fn verbose_echoes_remote_stdout() {
+    let target = get_opkg_target().await;
+    let artifacts = get_session_artifacts();
+
+    let json = r#"{
+            "packageManager": "opkg",
+            "settings": {},
+            "rawUci": ["uci show system"]
+        }"#
+    .to_string();
+    let dir = std::env::temp_dir().join("nuci_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let json_path = dir.join("verbose_probe.json");
+    std::fs::write(&json_path, json).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_nuci");
+    let host = format!("root@{}", target.host);
+    let identity = artifacts.ssh_key.to_string_lossy().into_owned();
+
+    // Verbose: remote stdout must reach the local process stdout.
+    let verbose_out = target.guarded(|| {
+        std::process::Command::new(bin)
+            .args([
+                "deploy",
+                "--target",
+                &host,
+                "--port",
+                &target.port.to_string(),
+                "--identity",
+                &identity,
+                "--force",
+                "--verbose",
+                json_path.to_str().unwrap(),
+            ])
+            .output()
+            .expect("failed to run nuci deploy")
+    });
+    assert!(
+        verbose_out.status.success(),
+        "verbose deploy failed: {}",
+        String::from_utf8_lossy(&verbose_out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&verbose_out.stdout);
+    assert!(
+        stdout.contains("system."),
+        "verbose deploy should echo remote 'uci show system' stdout, got:\n{stdout}"
+    );
+
+    // Non-verbose: the same probe must NOT appear in local stdout.
+    let quiet_out = target.guarded(|| {
+        std::process::Command::new(bin)
+            .args([
+                "deploy",
+                "--target",
+                &host,
+                "--port",
+                &target.port.to_string(),
+                "--identity",
+                &identity,
+                "--force",
+                json_path.to_str().unwrap(),
+            ])
+            .output()
+            .expect("failed to run nuci deploy")
+    });
+    assert!(
+        quiet_out.status.success(),
+        "quiet deploy failed: {}",
+        String::from_utf8_lossy(&quiet_out.stderr)
+    );
+    let quiet_stdout = String::from_utf8_lossy(&quiet_out.stdout);
+    assert!(
+        !quiet_stdout.contains("system."),
+        "non-verbose deploy must not echo remote stdout, got:\n{quiet_stdout}"
+    );
+}
+
+#[tokio::test]
+async fn test_deploy_invalid_uci_fails_loudly() {
+    let target = get_opkg_target().await;
+    target.reset_uci_state();
+    // Baseline: the valid hostname from the base config is present.
+    assert_eq!(
+        target.uci_get("system.@system[0].hostname").as_deref(),
+        Some("rauter")
+    );
+
+    // A rawUci command that `uci` rejects (setting a non-existent section). Under
+    // `set -e` the deploy script must abort at this command and report failure
+    // via a non-zero exit, so `run()` returns Err — not a false success.
+    // A rawUci command that `uci` rejects unconditionally (malformed
+    // multi-level option path — fails even after the `touch /etc/config/<cfg>`
+    // the generator emits for rawUci). Under `set -e` the deploy script must
+    // abort at this command and report failure via a non-zero exit, so `run()`
+    // returns Err — not a false success. The `system` section mirrors the base
+    // config so no named-section orphan-delete corrupts the target first.
+    let json = serde_json::json!({
+        "packageManager": "opkg",
+        "settings": {
+            "system": { "system": [ { "_type": "system", "hostname": "rauter" } ] }
+        },
+        "rawUci": ["uci set system.@system[0].hostname.extra=x"]
+    });
+    let path = write_tmp_json(json.to_string());
+
+    let artifacts = get_session_artifacts();
+    let config = DeployConfig {
+        port: target.port,
+        identity_file: Some(artifacts.ssh_key.to_string_lossy().into()),
+        force: true,
+        no_sops: false,
+        watchdog_timeout: 10,
+        verbose: false,
+    };
+
+    let result = nuci::target::deploy::run(
+        &path,
+        &format!("root@{}", target.host),
+        &config,
+        None,
+        &RealSsh,
+    );
+    assert!(
+        result.is_err(),
+        "a failing UCI command must make deploy fail, not report success"
+    );
+
+    // Reconnect and confirm the failed op did NOT commit (acceptance: no
+    // subsequent commit, the rejected option is absent, target config intact).
+    target.wait_ssh(Duration::from_secs(10));
+    assert!(
+        !target.uci_exists("system.@system[0].hostname.extra"),
+        "the rejected option must not have been committed"
+    );
+    assert_eq!(
+        target.uci_get("system.@system[0].hostname").as_deref(),
+        Some("rauter"),
+        "failed deploy must not corrupt the existing config"
+    );
+}
+
+/// Real-UCI round-trip: a string snapshot only proves the text is unchanged, not
+/// that the commands are correct. Executing them on a real `uci` is the
+/// authoritative gate.
+fn sample_path(name: &str) -> PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("samples")
+        .join(name)
+}
+
+/// Real-UCI round-trip: a string snapshot only proves the text is unchanged, not
+/// that the commands are correct.
+#[tokio::test]
+async fn test_compile_roundtrip_heterogeneous_anonymous_sections() {
+    let target = get_opkg_target().await;
+    target.reset_uci_state();
+
+    // Compile the committed heterogeneous sample (opkg backend, no sops).
+    let compiled = with_sops_env(|| {
+        nuci::compile::pipeline::compile_config(
+            &sample_path("uci-heterogeneous.json"),
+            None,
+            true,
+            Some(nuci::config::models::PkgBackend::Opkg),
+        )
+        .expect("sample must compile")
+    });
+
+    // Apply the generated UCI commands verbatim on the target. `set -e` mirrors
+    // the real deploy script: a malformed command aborts instead of silently
+    // producing wrong state.
+    target.guarded(|| {
+        target.sh_inner(&format!("set -e\n{}", compiled.uci_batch));
+    });
+
+    // Per-type anonymous indexing (audit 1.1): rule/redirect/rule must yield
+    // @rule[0], @redirect[0], @rule[1] — and the generated commands actually
+    // commit all three sections with the right options/values.
+    assert_eq!(
+        target.uci_get("firewall.@rule[0].target").as_deref(),
+        Some("ACCEPT")
+    );
+    assert_eq!(
+        target.uci_get("firewall.@redirect[0].dest").as_deref(),
+        Some("lan")
+    );
+    assert_eq!(
+        target.uci_get("firewall.@rule[1].target").as_deref(),
+        Some("DROP")
+    );
+    assert!(!target.uci_exists("firewall.@rule[2]"));
+    assert!(!target.uci_exists("firewall.@redirect[1]"));
+}
+
+#[tokio::test]
+async fn test_compile_roundtrip_basic_scalar_config() {
+    let target = get_opkg_target().await;
+    target.reset_uci_state();
+
+    let compiled = with_sops_env(|| {
+        nuci::compile::pipeline::compile_config(
+            &sample_path("uci-basic.json"),
+            None,
+            true,
+            Some(nuci::config::models::PkgBackend::Opkg),
+        )
+        .expect("sample must compile")
+    });
+
+    target.guarded(|| {
+        target.sh_inner(&format!("set -e\n{}", compiled.uci_batch));
+    });
+
+    assert_eq!(
+        target.uci_get("system.system.hostname").as_deref(),
+        Some("test-router")
+    );
+    assert_eq!(
+        target.uci_get("network.lan.proto").as_deref(),
+        Some("static")
+    );
+    assert_eq!(
+        target.uci_get("network.lan.ipaddr").as_deref(),
+        Some("192.168.1.1")
+    );
+}
+
+/// A local `.apk` must install, clean up, and abort the deploy on failure.
+#[tokio::test]
+async fn test_apk_local_package_install_and_cleanup() {
+    let target = get_apk_target().await;
+    // Deploy the FULL config (packages + repos) for setup so the apk repositories
+    // are written; this test fetches a local .apk from a repo, which the
+    // UCI-only `reset_uci_state` no longer configures.
+    target.nuci_deploy(&apk_json_path());
+
+    // Fetch a small, already-available package inside the container so the test
+    // needs no extra network egress. Stage it on the device, copy it out with the
+    // engine, then remove the device copy (transfer_packages re-uploads it).
+    let pkg_name = "tar";
+    let staged = format!("/tmp/{pkg_name}.apk");
+    assert!(
+        target.sh_ok(&format!(
+            "apk fetch --stdout {pkg_name} > {staged} 2>/dev/null && test -s {staged}"
+        )),
+        "could not fetch a local .apk inside the container"
+    );
+    let sandbox_dir = get_session_artifacts().session_dir.clone();
+    let local_apk = sandbox_dir.join(format!("{pkg_name}.apk"));
+    let engine = std::env::var("CONTAINER_ENGINE").unwrap_or_else(|_| "podman".to_string());
+    let status = std::process::Command::new(&engine)
+        .args([
+            "cp",
+            &format!("{}:{}", target.name, staged),
+            local_apk.to_str().unwrap(),
+        ])
+        .status()
+        .expect("failed to copy package out of container");
+    assert!(status.success(), "container cp of local .apk failed");
+    target.sh(&format!("rm -f {staged}"));
+    assert!(
+        local_apk.exists() && local_apk.metadata().map(|m| m.len() > 0).unwrap_or(false),
+        "local .apk not staged for deploy"
+    );
+
+    // Minimal config: only a local package, no UCI, so the deploy path is the
+    // local-package flow exclusively.
+    let json = sandbox_dir.join("local_pkg_apk.json");
+    std::fs::write(
+        &json,
+        format!(
+            r#"{{
+  "packageManager": "apk",
+  "settings": {{}},
+  "packageSources": {{
+    "localPackages": [ "{pkg_name}.apk" ]
+  }}
+}}"#
+        ),
+    )
+    .unwrap();
+
+    // Ensure it is NOT installed before deploy (tar is on the image as a dep of
+    // something? verify and remove to make the test deterministic).
+    target.sh(&format!(
+        "apk del --purge {pkg_name} >/dev/null 2>&1 || true"
+    ));
+    assert!(
+        !target.sh_ok(&format!("apk info -e {pkg_name} >/dev/null 2>&1")),
+        "{pkg_name} must be absent before deploy"
+    );
+
+    let artifacts = get_session_artifacts();
+    let cfg = DeployConfig {
+        port: target.port,
+        identity_file: Some(artifacts.ssh_key.to_string_lossy().into()),
+        force: true,
+        no_sops: true,
+        watchdog_timeout: 10,
+        verbose: false,
+    };
+    let res = nuci::target::deploy::run(
+        &json,
+        &format!("root@{}", target.host),
+        &cfg,
+        None,
+        &RealSsh,
+    );
+    assert!(res.is_ok(), "local-package deploy failed: {res:?}");
+
+    assert!(
+        target.sh_ok(&format!("apk info -e {pkg_name} >/dev/null 2>&1")),
+        "{pkg_name} should be installed after deploy"
+    );
+    assert!(
+        !target.sh_ok(&format!("test -f /tmp/{pkg_name}.apk")),
+        "staged /tmp/{pkg_name}.apk must be cleaned up after install"
     );
 }

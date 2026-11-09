@@ -21,6 +21,7 @@ Nix (writeUci) ──► uci.json ──► nuci compile/diff/deploy ──► S
 ```bash
 nuci diff   ./uci.json --target root@router          # Read-only diff
 nuci deploy ./uci.json --target root@router --force  # Deploy with rollback net
+nuci deploy ./uci.json --target root@router -v      # Deploy with stage banners & tracing
 nix run .#example -- "root@router"                   # Flake one-shot deploy
 ```
 
@@ -29,7 +30,7 @@ nix run .#example -- "root@router"                   # Flake one-shot deploy
 - [Index](docs/index.md) — Overview & quick start
 - [Architecture](docs/arch.md) — Domain layout, UCI idempotency, safety net, async reload
 - [Nix Options](docs/nix-options.md) — Exact Nix module option specifications
-- [Examples](docs/examples.md) — Copy-paste configuration snippets
+- [Examples](docs/example.md) — Copy-paste configuration snippets
 
 ## License
 

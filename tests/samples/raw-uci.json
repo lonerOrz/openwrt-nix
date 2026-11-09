@@ -1,0 +1,12 @@
+{
+  "packageManager": "opkg",
+  "settings": {
+    "system": {
+      "system": { "_type": "system", "hostname": "rauter" }
+    }
+  },
+  "rawUci": [
+    "uci rename system.@system[0]=sys0",
+    "uci set network.lan.proto='static'"
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "packageManager": "opkg",
+  "settings": {
+    "firewall": {
+      "fw": {
+        "_type": "defaults",
+        "syn_flood": "1"
+      },
+      "rules": [
+        { "_type": "rule", "target": "ACCEPT" },
+        { "_type": "redirect", "dest": "lan" },
+        { "_type": "rule", "target": "DROP" }
+      ]
+    }
+  }
+}

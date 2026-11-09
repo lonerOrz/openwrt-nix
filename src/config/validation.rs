@@ -1,16 +1,67 @@
 use crate::config::models::{Root, Section};
+use crate::config::package::{PackageAction, RemotePath};
+use crate::utils::error::ConfigError;
 use serde_json::Value;
+use std::path::Path;
 
 fn is_valid_uci_identifier(s: &str) -> bool {
     !s.is_empty()
         && !s.as_bytes()[0].is_ascii_digit()
         && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
+pub(crate) fn is_valid_config_name(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    !bytes.is_empty()
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1..]
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
+}
 
 fn is_valid_uci_type(s: &str) -> bool {
     !s.is_empty()
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Reject option values that UCI cannot represent, or that our transport would
+/// silently corrupt.
+///
+/// Measured against `uci` 23.05.5 (OpenWrt 23.05) and `uci` 25.12.02 (25.12),
+/// which behave identically:
+///
+/// - NUL (0x00): the shell transport deletes it, landing a silent wrong value
+///   with exit 0 — `set -e` cannot catch it.
+/// - 0x01-0x08, 0x0B, 0x0C, 0x0E-0x1F: UCI rejects them ("uci: Parse error").
+/// - newline (0x0A): UCI accepts it, but the generator emits one option per
+///   line, so it splits one command into two and the deploy still reports success.
+///
+/// Everything else round-trips: space, tab, DEL, UTF-8, and the shell-significant
+/// characters backslash, quotes, dollar, semicolon, hash and equals.
+fn validate_uci_value_chars(value: &str, where_: &str) -> Result<(), ConfigError> {
+    let bad = value.chars().find(|c| {
+        let c = *c as u32;
+        // NUL (0x00) plus the C0 control range, minus tab (0x09) which UCI
+        // stores and round-trips correctly.
+        //
+        // Newline (0x0A) is included even though UCI itself accepts it: we
+        // emit each option as one line of a command buffer that is later split
+        // on newlines, so an embedded newline splits one command into two and
+        // the second half lands as a corrupted value (`a\nb` -> `a\nuci b`)
+        // while the deploy still reports success.
+        (c < 0x20 && c != 0x09) || c == 0x00
+    });
+    if let Some(bad) = bad {
+        return Err(super::super::utils::error::ConfigError::Validation(
+            format!(
+                "{where_} contains a character that cannot be stored reliably (U+{:04X}); \
+             NUL bytes are silently dropped by the shell, other control characters \
+             are rejected by uci, and a newline would split the command",
+                bad as u32
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_section_options(
@@ -31,12 +82,76 @@ fn validate_section_options(
                 format!("{config_name}.{section_path}.{opt_name} has null value"),
             ));
         }
-        if let Value::String(s) = opt_val
-            && s.is_empty()
-        {
-            eprintln!(
-                "Warning: {config_name}.{section_path}.{opt_name} is empty string — UCI treats '' as unset. Consider omitting it."
-            );
+        if matches!(opt_val, Value::Object(_)) {
+            return Err(super::super::utils::error::ConfigError::Validation(
+                format!(
+                    "{config_name}.{section_path}.{opt_name} is an object; UCI option values must be a scalar or a list of scalars"
+                ),
+            ));
+        }
+        if let Value::String(s) = opt_val {
+            if s.is_empty() {
+                eprintln!(
+                    "Warning: {config_name}.{section_path}.{opt_name} is empty string — UCI treats '' as unset. Consider omitting it."
+                );
+            }
+            validate_uci_value_chars(s, &format!("{config_name}.{section_path}.{opt_name}"))?;
+        }
+        if let Value::Array(items) = opt_val {
+            if items.iter().any(|v| matches!(v, Value::Object(_))) {
+                return Err(super::super::utils::error::ConfigError::Validation(
+                    format!(
+                        "{config_name}.{section_path}.{opt_name} contains a nested object; UCI list values must be scalars"
+                    ),
+                ));
+            }
+            if items.iter().any(|v| matches!(v, Value::Null)) {
+                return Err(super::super::utils::error::ConfigError::Validation(
+                    format!(
+                        "{config_name}.{section_path}.{opt_name} contains a null element; UCI list values must be scalars"
+                    ),
+                ));
+            }
+            for (i, item) in items.iter().enumerate() {
+                if let Value::String(s) = item {
+                    validate_uci_value_chars(
+                        s,
+                        &format!("{config_name}.{section_path}.{opt_name}[{i}]"),
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate the `rawUci` escape hatch on the final text of every line.
+///
+/// rawUci lines are emitted verbatim into the deploy script, so shell
+/// metacharacters can chain, substitute or redirect commands. Called twice on
+/// purpose: once on the raw config and again after secret interpolation, since
+/// an interpolated secret can introduce metacharacters.
+pub(crate) fn validate_raw_uci(raw: Option<&[String]>) -> Result<(), ConfigError> {
+    let Some(raw) = raw else {
+        return Ok(());
+    };
+    for (i, line) in raw.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return Err(ConfigError::Validation(format!("rawUci[{i}] is empty")));
+        }
+        if !trimmed.starts_with("uci ") {
+            return Err(ConfigError::Validation(format!(
+                "rawUci[{i}] must be a 'uci' command, got: {trimmed}"
+            )));
+        }
+        // Reject any Shell metacharacter so a single "command" cannot chain,
+        // substitute, or redirect (newline/`;`, `$()`, backtick, `&`, `|`,
+        // `<`, `>`). This closes the injection gap.
+        if has_shell_metacharacter(trimmed) {
+            return Err(ConfigError::Validation(format!(
+                "rawUci[{i}] contains a shell metacharacter: {trimmed}"
+            )));
         }
     }
     Ok(())
@@ -44,10 +159,10 @@ fn validate_section_options(
 
 pub(crate) fn validate_root(root: &Root) -> Result<(), super::super::utils::error::ConfigError> {
     for (config_name, sections) in &root.settings {
-        if !is_valid_uci_identifier(config_name) {
+        if !is_valid_config_name(config_name) {
             return Err(super::super::utils::error::ConfigError::Validation(
                 format!(
-                    "Invalid config name '{config_name}': only [a-zA-Z0-9_] allowed (no digits at start)"
+                    "Invalid config name '{config_name}': must start with a letter and contain only [a-zA-Z0-9_-]"
                 ),
             ));
         }
@@ -105,21 +220,7 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), super::super::utils::erro
         }
     }
 
-    if let Some(raw) = &root.raw_uci {
-        for (i, line) in raw.iter().enumerate() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                return Err(super::super::utils::error::ConfigError::Validation(
-                    format!("rawUci[{i}] is empty"),
-                ));
-            }
-            if !trimmed.starts_with("uci ") {
-                return Err(super::super::utils::error::ConfigError::Validation(
-                    format!("rawUci[{i}] must be a 'uci' command, got: {trimmed}"),
-                ));
-            }
-        }
-    }
+    validate_raw_uci(root.raw_uci.as_deref())?;
 
     if let Some(files) = &root.files {
         for (i, file) in files.iter().enumerate() {
@@ -129,16 +230,91 @@ pub(crate) fn validate_root(root: &Root) -> Result<(), super::super::utils::erro
                     format!("files[{i}].path must be absolute, got: {path}"),
                 ));
             }
-            if path.contains("..") {
+            if std::path::Path::new(path)
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+            {
                 return Err(super::super::utils::error::ConfigError::Validation(
                     format!("files[{i}].path must not contain '..': {path}"),
                 ));
             }
-            // Empty content allowed — writes a zero-byte file (touch-style flags).
+            // Empty content allowed: writes a zero-byte file.
         }
     }
 
+    if let Some(packages) = &root.packages {
+        for spec in packages {
+            // Validates the package name charset at the boundary; a lone `-`
+            // or a shell-payload name is a config error, never passed through.
+            PackageAction::parse(spec)?;
+        }
+    }
+
+    if let Some(sources) = &root.package_sources
+        && let Some(local) = &sources.local_packages
+    {
+        for (i, p) in local.iter().enumerate() {
+            let file_name = Path::new(p)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| {
+                    super::super::utils::error::ConfigError::Validation(format!(
+                        "package_sources.local_packages[{i}] must be a file path: {p}"
+                    ))
+                })?;
+            RemotePath::tmp(file_name)?;
+        }
+    }
+
+    for key in &root.ssh_keys {
+        if !is_valid_authorized_key(key) {
+            return Err(super::super::utils::error::ConfigError::Validation(
+                format!(
+                    "sshKeys entry is not a valid authorized_keys line (must be a single line, no shell metacharacters): {key}"
+                ),
+            ));
+        }
+    }
+
+    if let Some(files) = &root.files {
+        for (i, file) in files.iter().enumerate() {
+            if let Some(sum) = &file.checksum
+                && !is_valid_sha256(sum)
+            {
+                return Err(super::super::utils::error::ConfigError::Validation(
+                    format!(
+                        "files[{i}].checksum must be a 64-character hex SHA-256 digest, got: {sum}"
+                    ),
+                ));
+            }
+        }
+    }
     Ok(())
+}
+
+/// Reject strings that could break out of a single Shell argument/command line.
+///
+/// rawUci lines are written verbatim, so a newline, `;`, `&`, `|`, backtick,
+/// `$`, `(`, `)`, `<`, `>` would inject Shell syntax.
+fn has_shell_metacharacter(s: &str) -> bool {
+    s.contains(['\n', '\r', ';', '&', '|', '`', '$', '(', ')', '<', '>'])
+}
+
+/// A valid `authorized_keys` line: one line, two tokens, no shell metacharacters.
+/// Key types are not whitelisted — the set evolves across OpenSSH/Dropbear.
+fn is_valid_authorized_key(line: &str) -> bool {
+    if line.is_empty() || line.contains(['\n', '\r']) {
+        return false;
+    }
+    if has_shell_metacharacter(line) {
+        return false;
+    }
+    line.split_whitespace().count() >= 2
+}
+
+/// SHA-256 digest: exactly 64 hex digits (case-insensitive), per NIST FIPS 180-4.
+fn is_valid_sha256(sum: &str) -> bool {
+    sum.len() == 64 && sum.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 #[cfg(test)]
@@ -159,7 +335,6 @@ mod tests {
             files: None,
         }
     }
-
     fn named_cfg(
         config: &str,
         section: &str,
@@ -221,13 +396,6 @@ mod tests {
     fn rejects_invalid_named_identifiers() {
         for (config, section, ty, options, expected) in [
             (
-                "network-config",
-                "lan",
-                "interface",
-                IndexMap::new(),
-                "Invalid config name",
-            ),
-            (
                 "3network",
                 "lan",
                 "interface",
@@ -265,6 +433,17 @@ mod tests {
         ] {
             assert_rejects(&named_cfg(config, section, ty, options), expected);
         }
+    }
+    #[test]
+    fn accepts_hyphenated_config_names() {
+        // Real OpenWrt config names (e.g. prometheus-node-exporter-lua) may contain hyphens.
+        let root = named_cfg(
+            "prometheus-node-exporter-lua",
+            "main",
+            "prometheus-node-exporter-lua",
+            IndexMap::new(),
+        );
+        assert!(validate_root(&root).is_ok());
     }
 
     #[test]
@@ -324,6 +503,157 @@ mod tests {
         );
     }
 
+    fn with_packages(mut root: Root, packages: Vec<String>) -> Root {
+        root.packages = Some(packages);
+        root
+    }
+
+    fn with_local_packages(mut root: Root, paths: Vec<String>) -> Root {
+        root.package_sources = Some(crate::config::models::PackageSources {
+            opkg_feeds: None,
+            apk_repositories: None,
+            local_packages: Some(paths),
+        });
+        root
+    }
+
+    #[test]
+    fn accepts_valid_package_specs() {
+        for specs in [
+            vec!["luci".to_string(), "-tcpdump".to_string()],
+            vec!["kmod-nf-conntrack".to_string(), "gtk+".to_string()],
+            vec!["prometheus-node-exporter-lua".to_string()],
+        ] {
+            assert!(
+                validate_root(&with_packages(empty_root(), specs)).is_ok(),
+                "valid specs accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_package_specs() {
+        for bad in [
+            "",            // empty spec
+            "-",           // lone dash
+            "a b",         // space
+            "$(touch /x)", // command substitution
+            "pkg;rm",      // shell metacharacter
+            "../pkg",      // path traversal
+            "a'b",         // quote
+        ] {
+            let root = with_packages(empty_root(), vec![bad.to_string()]);
+            let err = validate_root(&root).unwrap_err();
+            assert!(
+                format!("{err}").contains("Invalid package name"),
+                "'{bad}' must be rejected: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_local_package_filenames() {
+        for bad in [
+            "a b.ipk",  // space
+            "$(x).ipk", // payload
+            "a'b",      // quote
+            "a;b.ipk",  // shell metacharacter
+            "",         // not a file path
+        ] {
+            let root = with_local_packages(empty_root(), vec![bad.to_string()]);
+            let err = validate_root(&root).unwrap_err();
+            assert!(
+                format!("{err}").contains("Invalid local package file name")
+                    || format!("{err}").contains("must be a file path"),
+                "'{bad}' must be rejected: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_valid_local_package_filenames() {
+        for ok in [
+            "./packages/luci-app-nlbwmon_0.3-1_all.ipk",
+            "build/test_1.0_all.apk",
+        ] {
+            assert!(
+                validate_root(&with_local_packages(empty_root(), vec![ok.to_string()])).is_ok(),
+                "'{ok}' should be accepted"
+            );
+        }
+    }
+
+    fn with_ssh_keys(mut root: Root, keys: Vec<String>) -> Root {
+        root.ssh_keys = keys;
+        root
+    }
+
+    fn with_checksum_file(mut root: Root, path: &str, checksum: Option<&str>) -> Root {
+        root.files = Some(vec![crate::config::models::File {
+            path: path.into(),
+            content: crate::config::models::FileContent::Text(String::new()),
+            executable: false,
+            checksum: checksum.map(|s| s.to_string()),
+        }]);
+        root
+    }
+
+    #[test]
+    fn accepts_valid_ssh_keys() {
+        for ok in [
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample user@host",
+            "ssh-rsa AAAAB3NzaC1yc2E... user@host",
+            "restrict,command=\"true\" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample",
+            "ecdsa-sha2-nistp256 AAAA...",
+        ] {
+            assert!(
+                validate_root(&with_ssh_keys(empty_root(), vec![ok.to_string()])).is_ok(),
+                "'{ok}' should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_ssh_keys() {
+        for bad in [
+            "",
+            "ssh-ed25519",
+            "ssh-ed25519 AAAA; rm -rf /",
+            "ssh-ed25519 AAAA$(id)",
+            "ssh-ed25519 AAAA`id`",
+            "ssh-ed25519 AAAA\nsecond",
+        ] {
+            let root = with_ssh_keys(empty_root(), vec![bad.to_string()]);
+            let err = validate_root(&root).unwrap_err();
+            assert!(
+                format!("{err}").contains("authorized_keys"),
+                "'{bad}' must be rejected: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_valid_checksum() {
+        let sum = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        assert!(validate_root(&with_checksum_file(empty_root(), "/etc/x", Some(sum))).is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_checksum() {
+        for bad in [
+            "abc",
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824Z",
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b98240",
+        ] {
+            let root = with_checksum_file(empty_root(), "/etc/x", Some(bad));
+            let err = validate_root(&root).unwrap_err();
+            assert!(
+                format!("{err}").contains("checksum"),
+                "'{bad}' must be rejected: {err}"
+            );
+        }
+    }
+
     #[test]
     fn allows_empty_file_content() {
         use crate::config::models::FileContent;
@@ -364,14 +694,46 @@ mod tests {
 
     #[test]
     fn validates_raw_uci() {
+        // Not a `uci` command at all.
         let root = Root {
             raw_uci: Some(vec!["rm -rf /".into()]),
             ..empty_root()
         };
         assert_rejects(&root, "must be a 'uci' command");
 
+        // Legitimate single uci command.
         let root = Root {
             raw_uci: Some(vec!["uci rename network.lan=lan2".into()]),
+            ..empty_root()
+        };
+        assert!(validate_root(&root).is_ok());
+    }
+
+    #[test]
+    fn rejects_raw_uci_shell_injection() {
+        // rawUci is written verbatim into the deploy script; any Shell
+        // metacharacter must be rejected so a single "command" cannot chain,
+        // substitute, or redirect.
+        for bad in [
+            "uci show system; rm -rf /",    // command chaining
+            "uci set x=y $(id)",            // command substitution
+            "uci set x=`id`",               // backtick substitution
+            "uci show system\nuci set x=y", // newline / multi-line
+            "uci set x=y &",                // background
+            "uci set x=y | cat",            // pipe
+            "uci set x=y > /etc/passwd",    // redirection
+        ] {
+            let root = Root {
+                raw_uci: Some(vec![bad.to_string()]),
+                ..empty_root()
+            };
+            assert_rejects(&root, "shell metacharacter");
+        }
+
+        // Values that legitimately contain a dot or equals are fine; only Shell
+        // metacharacters are rejected.
+        let root = Root {
+            raw_uci: Some(vec!["uci set network.lan.proto='static'".into()]),
             ..empty_root()
         };
         assert!(validate_root(&root).is_ok());

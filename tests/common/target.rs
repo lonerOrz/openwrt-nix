@@ -1,5 +1,5 @@
 use super::session::{
-    apk_json_path, get_session_artifacts, opkg_json_path, sops_key_file, ssh_key_path,
+    apk_reset_json_path, get_session_artifacts, opkg_reset_json_path, sops_key_file, ssh_key_path,
 };
 use nuci::target::deploy::{self, DeployConfig, RealSsh};
 use std::fs;
@@ -17,22 +17,33 @@ pub struct Target {
     pub port: u16,
     pub name: String,
     pub _container: Option<testcontainers::ContainerAsync<testcontainers::GenericImage>>,
+    /// Serializes mutating access so concurrent tests cannot clobber the shared
+    /// singleton paths (`/tmp/deploy.sh`, the rollback backup, `reload_config`).
+    pub lock: std::sync::Mutex<()>,
 }
 
 impl Target {
     pub async fn new(role: &str) -> Option<Self> {
         let engine = std::env::var("CONTAINER_ENGINE").unwrap_or_else(|_| "podman".to_string());
 
-        let docker_host = std::env::var("DOCKER_HOST").unwrap_or_else(|_| {
-            if engine == "podman" {
-                let uid = unsafe { libc::getuid() };
-                format!("unix:///run/user/{uid}/podman/podman.sock")
+        // Resolution priority: explicit DOCKER_HOST > rootless > rootful fallback.
+        let docker_host = if std::env::var("DOCKER_HOST").is_ok() {
+            std::env::var("DOCKER_HOST").unwrap()
+        } else if engine == "podman" {
+            let uid = unsafe { libc::getuid() };
+            let rootless = format!("unix:///run/user/{uid}/podman/podman.sock");
+            if Path::new(&rootless["unix://".len()..]).exists() {
+                rootless
             } else {
-                "unix:///var/run/docker.sock".to_string()
+                "unix:///run/podman/podman.sock".to_string()
             }
-        });
-        unsafe {
-            std::env::set_var("DOCKER_HOST", &docker_host);
+        } else {
+            "unix:///var/run/docker.sock".to_string()
+        };
+        if std::env::var("DOCKER_HOST").is_err() {
+            unsafe {
+                std::env::set_var("DOCKER_HOST", &docker_host);
+            }
         }
 
         let image_name = match role {
@@ -50,7 +61,6 @@ impl Target {
         let image = testcontainers::GenericImage::new(image_name, "latest")
             .with_exposed_port(testcontainers::core::ContainerPort::Tcp(22))
             .with_container_name(&name);
-
         let container = image.start().await.unwrap_or_else(|e| {
             panic!("FATAL: Failed to start testcontainer '{name}': {e}");
         });
@@ -79,10 +89,18 @@ impl Target {
             port,
             name,
             _container: Some(container),
+            lock: std::sync::Mutex::new(()),
         })
     }
 
-    pub fn sh(&self, cmd: &str) -> String {
+    /// Serialize a closure against this container's lock; concurrent deploys
+    /// would corrupt the singleton paths.
+    pub(crate) fn guarded<T>(&self, f: impl FnOnce() -> T) -> T {
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        f()
+    }
+
+    pub fn sh_inner(&self, cmd: &str) -> String {
         let engine = detect_engine();
         let output = Command::new(engine)
             .args(["exec", &self.name, "sh", "-c", cmd])
@@ -91,13 +109,21 @@ impl Target {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
-    pub fn sh_ok(&self, cmd: &str) -> bool {
+    pub fn sh_ok_inner(&self, cmd: &str) -> bool {
         let engine = detect_engine();
         Command::new(engine)
             .args(["exec", &self.name, "sh", "-c", cmd])
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
+    }
+
+    pub fn sh(&self, cmd: &str) -> String {
+        self.guarded(|| self.sh_inner(cmd))
+    }
+
+    pub fn sh_ok(&self, cmd: &str) -> bool {
+        self.guarded(|| self.sh_ok_inner(cmd))
     }
 
     pub fn uci_get(&self, path: &str) -> Option<String> {
@@ -172,6 +198,10 @@ impl Target {
     }
 
     pub fn nuci_deploy(&self, json_path: &Path) {
+        self.guarded(|| self.nuci_deploy_inner(json_path))
+    }
+
+    fn nuci_deploy_inner(&self, json_path: &Path) {
         let artifacts = get_session_artifacts();
         let config = DeployConfig {
             port: self.port,
@@ -179,6 +209,7 @@ impl Target {
             force: true,
             no_sops: false,
             watchdog_timeout: 10,
+            verbose: false,
         };
         let target = format!("root@{}", self.host);
 
@@ -190,14 +221,20 @@ impl Target {
             .expect("nuci deploy failed during integration test");
     }
 
-    pub fn reset_uci_state(&self) {
+    /// Lock-free deploy+restore primitive; wrap it in the mutex to keep a
+    /// neighbouring test's deferred reload from contaminating shared state.
+    pub(crate) fn reset_uci_state_inner(&self) {
         let json = if self.role == "opkg" {
-            opkg_json_path()
+            opkg_reset_json_path()
         } else {
-            apk_json_path()
+            apk_reset_json_path()
         };
-        self.nuci_deploy(&json);
+        self.nuci_deploy_inner(&json);
         restore_reload_config(self);
+    }
+
+    pub fn reset_uci_state(&self) {
+        self.guarded(|| self.reset_uci_state_inner());
     }
 }
 
@@ -232,7 +269,9 @@ const RELOAD_CONFIG_ORIGINAL: &str = "#!/bin/sh\n\
      exit 0\n";
 
 fn restore_reload_config(target: &Target) {
-    target.sh(&format!(
+    // Called from inside `Target::guarded` (reset_uci_state), so use the
+    // lock-free inner exec to avoid re-acquiring the non-reentrant mutex.
+    target.sh_inner(&format!(
         "cat > /sbin/reload_config <<'EOF'\n{}\nEOF\nchmod +x /sbin/reload_config",
         RELOAD_CONFIG_ORIGINAL
     ));
@@ -250,9 +289,9 @@ fn ensure_image(engine: &str, image_name: &str, role: &str) -> bool {
     }
 
     let containerfile = match role {
-        "opkg" => "tests/Containerfile.opkg",
-        "apk" => "tests/Containerfile.apk",
-        "agent" => "tests/Containerfile.agent-test",
+        "opkg" => "tests/integration/containerfiles/Containerfile.opkg",
+        "apk" => "tests/integration/containerfiles/Containerfile.apk",
+        "agent" => "tests/integration/containerfiles/Containerfile.agent-test",
         _ => return false,
     };
     Command::new(engine)

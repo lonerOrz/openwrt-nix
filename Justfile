@@ -1,85 +1,72 @@
-# ==============================================================================
-# Configuration Variables
-# ==============================================================================
-
-# Allow overriding via ROUTER_HOST env var
+# Target host and SSH port. Override via ROUTER_HOST / ROUTER_PORT.
+# A non-default port is needed when the target is a podman container whose 22
+# is published on a non-standard local port.
 host := env_var_or_default("ROUTER_HOST", "192.168.188.2")
+port := env_var_or_default("ROUTER_PORT", "22")
 
-# SSH connection reuse
 ssh_opts := "-o ControlMaster=auto -o ControlPath=/tmp/ssh-%C -o ControlPersist=5m"
 
-# ==============================================================================
-# Development & Testing Recipes
-# ==============================================================================
+# --- Nix layer -------------------------------------------------------------
 
-# Evaluate the nix module configuration and render UCI commands
-eval-config:
+# Compile the example config and print the UCI commands
+compile:
 	nix run .#example
 
-# Run all Rust tests (unit + integration)
-test-all:
-	cargo test
+# Nix-layer tests: module options -> generated command script.
+test-nix:
+	nix build --file tests/nix/test.nix --no-link --impure
 
-# Run Rust integration tests (requires Docker/Podman)
-test-integration:
-	cargo test --test integration_test -- --test-threads=1 --nocapture
+# --- Rust tests ------------------------------------------------------------
 
-# Run Rust unit tests only
+# Unit tests
 test-unit:
 	cargo test --lib
-	cargo run -- compile tests/test_uci.json > /dev/null
-	cargo run -- compile tests/test_edge_cases.json -s tests/test_secrets > /dev/null
-	@echo "All local mock configuration tests passed!"
 
-# Format both Rust and Nix files
+# Integration tests. Needs Docker/Podman and access to the package feeds.
+test-integration:
+	nix develop --command cargo test --test integration_test -- --test-threads=1
+
+# --- Quality ----------------------------------------------------------------
+
 fmt:
 	cargo fmt
-	nix fmt || true
+	nix fmt
 
-# Run Rust linter
 clippy:
 	cargo clippy --all-targets -- -D warnings
 
-# Clean rust compilation targets
 clean:
 	cargo clean
 
-# Rebuild test container images
-build-containers:
-	podman build -q -t openwrt-test-opkg-env -f tests/Containerfile.opkg .
-	podman build -q -t openwrt-test-apk-env -f tests/Containerfile.apk .
+# --- Deploy -----------------------------------------------------------------
 
-# Build the documentation site (mdBook) into ./book
-docs:
-	mdbook build
-
-# Serve the documentation site locally with live reload
-docs-serve:
-	mdbook serve
-
-# ==============================================================================
-# Router Deployment & Management
-# ==============================================================================
-
-# Execute a command on the router via SSH
-ssh +command:
-	ssh {{ssh_opts}} "root@{{host}}" "{{command}}"
-
-# Dry-run: Preview UCI changes on the router without applying them
+# Read-only diff between the local config and the live target.
 dry-run:
-	cargo run -- diff example.nix --target "root@{{host}}"
+	nix build .#example-json -o /tmp/nuci-example.json
+	cargo run -- diff /tmp/nuci-example.json --target "root@{{host}}" --port {{port}}
 
-# Apply configuration to router (SSH keys, password, packages, UCI, tinc — all hermetic)
+# Deploy the example config.
 apply:
-	nix run .#example -- "root@{{host}}"
+	nix run .#example -- "root@{{host}}" --port {{port}}
 
-# Upgrade router firmware
+# Upgrade the firmware, then re-apply the config.
 upgrade:
-	@version=$$(curl --silent https://api.github.com/repos/openwrt/openwrt/releases/latest | jq -r .tag_name | sed 's/^v//') && \
-	sysupgrade_url="https://downloads.openwrt.org/releases/$${version}/targets/mediatek/mt7622/openwrt-$${version}-mediatek-mt7622-linksys_e8450-ubi-squashfs-sysupgrade.itb" && \
-	echo "Downloading OpenWrt $${version}..." && \
-	wget "$${sysupgrade_url}" -O openwrt.sysupgrade.itb
-	ssh {{ssh_opts}} "root@{{host}}" "cat > /tmp/openwrt.sysupgrade.itb" < openwrt.sysupgrade.itb
-	just ssh "sysupgrade -v /tmp/openwrt.sysupgrade.itb" || true
-	while ! ping -c1 -W1 8.8.8.8; do sleep 2; done
+	./scripts/upgrade.sh "{{host}}" "{{port}}" "{{ssh_opts}}"
 	just apply
+
+# With no arguments this spins up a throwaway apk container; pass a target and
+# an identity to run against a real box:
+#   just smoke-verbose root@192.168.1.1 ~/.ssh/id_ed25519
+# Show per-stage banners and the remote command trace.
+smoke-verbose *args:
+	./examples/verbose-smoke.sh {{args}}
+
+# --- Misc -------------------------------------------------------------------
+
+# Run a command on the target over SSH.
+ssh +command:
+	ssh -p {{port}} {{ssh_opts}} "root@{{host}}" "{{command}}"
+
+# Build the docs
+docs *mode:
+	{{ if mode == "serve" { "mdbook serve" } else { "mdbook build" } }}

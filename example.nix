@@ -7,27 +7,19 @@ let
   tsig_key = if isBootstrap then "CHANGE_ME_ON_DEPLOY" else "@tsig_key@";
 in
 {
+  uci.packageManager = "apk";
   uci.settings = {
-    # The block below will translate to the following uci settings:
-    # root@OpenWrt:~# uci show dropbear
-    #dropbear.@dropbear[0]=dropbear
-    #dropbear.@dropbear[0].Interface='lan'
-    #dropbear.@dropbear[0].PasswordAuth='off'
-    #dropbear.@dropbear[0].Port='22'
     dropbear.dropbear = [
       {
         # each section needs a type, denoted by `_type`
         _type = "dropbear";
-        # those are normal config options
         PasswordAuth = "off";
         Port = "22";
         GatewayPorts = "1";
         Interface = "lan";
       }
       {
-        # each section needs a type, denoted by `_type`
         _type = "dropbear";
-        # those are normal config options
         PasswordAuth = "off";
         Port = "22";
         GatewayPorts = "1";
@@ -35,9 +27,7 @@ in
       }
     ];
 
-    # Use `uci show <config>` to translate your existing configuration to the uci equivalent.
-    # Note that once you define a section i.e. network.wan, than all existing
-    # values of this section are unset before applying the new values
+    # Defining a section (e.g. network.wan) unsets all its existing values before applying the new ones.
 
     system.system = [
       {
@@ -64,7 +54,6 @@ in
           _type = "device";
           name = "br-lan";
           type = "bridge";
-          # list options are also supported
           ports = [
             "lan1"
             "lan2"
@@ -177,8 +166,6 @@ in
   };
   uci.secrets = {
     sops.files = [
-      # Checkout https://github.com/mozilla/sops#encrypting-using-age
-      # to learn how to create encrypted sops files.
       ./secrets.yml
     ];
   };
@@ -190,15 +177,18 @@ in
     "htop"
   ];
   uci.packageSources = {
-    feeds = [
-      "src/gz kiddin9 https://dl.openwrt.ai/packages/aarch64_cortex-a53/kiddin9"
-    ];
-    localPackages = [
-      "./packages/luci-app-nlbwmon_0.3-1_all.ipk"
-      "./packages/luci-i18n-nlbwmon-zh-cn_0.3-1_all.ipk"
+    apkRepositories = [
+      "https://dl.openwrt.ai/packages/aarch64_cortex-a53/kiddin9"
     ];
   };
   uci.sshKeys = [
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKbBp2dH2X3dcU1zh+xW3ZsdYROKpJd3n13ssOP092qE joerg@turingmachine"
   ];
+  # ---- Runtime-only deploy options (transport concerns, NOT device state) ----
+  # These are injected into the generated `nuci deploy` invocation by
+  # nix/default.nix; they never enter uci.json. The CLI passthrough in
+  # `nix run .#example -- ...` passes later CLI flags that take precedence.
+  #   uci.verbose = true;                          # default --verbose on deploy
+  #   uci.port = 2222;                             # non-standard SSH port
+  #   uci.identity = "/home/you/.ssh/id_ed25519";  # str, NOT copied into the store
 }

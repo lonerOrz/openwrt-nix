@@ -1,6 +1,6 @@
 # Configuration Examples
 
-## Basic Network & Firewall
+## Network and Firewall
 
 ```nix
 {
@@ -16,7 +16,9 @@
 }
 ```
 
-## Wireless & SOPS Secrets
+## Wireless
+
+> Secrets use `@name@` placeholders (this project's syntax, not sops-nix's `{{name}}`), resolved from decrypted SOPS values in memory at compile time.
 
 ```nix
 {
@@ -31,14 +33,17 @@
 }
 ```
 
-## Package Management & Feeds
+## Packages
+
+> `opkgFeeds` and `apkRepositories` are mutually exclusive and must match `packageManager`.
 
 ```nix
 {
   uci.packageManager = "opkg"; # or "apk"
   uci.packages = [ "-tcpdump" "htop" ];
   uci.packageSources = {
-    feeds = [ "src/gz custom https://dl.openwrt.org/packages" ];
+    opkgFeeds = [ "src/gz custom https://dl.openwrt.org/packages" ];
+    # apkRepositories = [ "https://dl.openwrt.org/packages" ];
     localPackages = [ "./packages/luci-app-custom_1.0_all.ipk" ];
   };
 }
@@ -49,9 +54,7 @@
 ```nix
 {
   uci.files = [
-    # Text File (POSIX cat heredoc)
     { path = "/etc/config.txt"; content = "key=value\n"; }
-    # Binary File (Base64 + SHA256 checksum guard)
     {
       path = "/usr/bin/blob";
       base64 = "aGVsbG8=";
@@ -62,7 +65,7 @@
 }
 ```
 
-## Escape Hatch (rawUci)
+## Raw UCI Commands
 
 ```nix
 {
@@ -73,7 +76,7 @@
 }
 ```
 
-## Day-1 Firmware Build
+## Firmware Build
 
 ```nix
 exampleFirmware = uci.buildFirmware {

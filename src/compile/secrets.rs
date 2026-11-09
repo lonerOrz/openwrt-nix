@@ -1,4 +1,4 @@
-use crate::config::models::{Root, Section};
+use crate::config::models::{FileContent, Root, Section};
 use crate::utils::error::ConfigError;
 use serde_json::Value;
 use std::borrow::Cow;
@@ -8,6 +8,54 @@ use std::io::BufReader;
 use std::path::Path;
 use std::process::Command;
 
+/// Decrypted secret values by key; plaintext is reachable only via [`SecretMap::get`].
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct SecretMap {
+    inner: HashMap<String, String>,
+}
+
+impl SecretMap {
+    pub fn new(inner: HashMap<String, String>) -> Self {
+        Self { inner }
+    }
+
+    /// The deliberate boundary where plaintext secret material is handed out.
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.inner.get(key).map(|s| s.as_str())
+    }
+
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.inner.contains_key(key)
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Secret identifiers (not values) — safe to log.
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.inner.keys().map(|k| k.as_str())
+    }
+}
+
+impl std::fmt::Debug for SecretMap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretMap")
+            .field("count", &self.inner.len())
+            .field("keys", &self.inner.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+impl From<HashMap<String, String>> for SecretMap {
+    fn from(inner: HashMap<String, String>) -> Self {
+        Self::new(inner)
+    }
+}
 fn insert_secrets(
     secrets: &mut HashMap<String, String>,
     id_path: &mut Vec<String>,
@@ -47,12 +95,15 @@ fn insert_secrets(
         id_path.push(k);
         let secret_id = id_path.join(".");
 
-        let result = match secrets
-            .insert(secret_id, secret.clone())
-            .filter(|v| *v != secret)
+        let result = if secrets
+            .get(&secret_id)
+            .is_some_and(|existing| existing != secret.as_str())
         {
-            None => Ok(()),
-            Some(err) => Err(err),
+            // Return the conflicting key id, never the plaintext secret value.
+            Err(secret_id)
+        } else {
+            secrets.insert(secret_id, secret.clone());
+            Ok(())
         };
 
         id_path.pop();
@@ -131,6 +182,13 @@ fn resolve_value(val: &mut Value, secrets: &HashMap<String, String>) -> Result<(
     Ok(())
 }
 
+/// Resolve `@name@` placeholders in a field whitelist.
+///
+/// Interpolated: `settings[*].options[*]`, `packageSources.{opkgFeeds,apkRepositories}`,
+/// `rawUci[*]`, `files[*].content` (Text only), `sshKeys[*]`.
+/// Not interpolated: `packages`, `packageSources.localPackages`, `files[*].base64`.
+///
+/// `@name@` is project-local (not sops-nix's `{{name}}`); unknown identifiers error.
 pub(crate) fn resolve_secrets(
     mut root: Root,
     secrets: &HashMap<String, String>,
@@ -154,13 +212,40 @@ pub(crate) fn resolve_secrets(
         }
     }
 
-    if let Some(sources) = &mut root.package_sources
-        && let Some(feeds) = &mut sources.feeds
-    {
-        for feed in feeds {
-            let interpolated = interpolate_secrets(feed, secrets)?;
-            *feed = interpolated.into_owned();
+    if let Some(sources) = &mut root.package_sources {
+        for feeds in [
+            sources.opkg_feeds.as_mut(),
+            sources.apk_repositories.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            for feed in feeds {
+                let interpolated = interpolate_secrets(feed, secrets)?;
+                *feed = interpolated.into_owned();
+            }
         }
+    }
+
+    if let Some(raw) = &mut root.raw_uci {
+        for line in raw.iter_mut() {
+            let interpolated = interpolate_secrets(line, secrets)?;
+            *line = interpolated.into_owned();
+        }
+    }
+
+    if let Some(files) = &mut root.files {
+        for file in files.iter_mut() {
+            if let FileContent::Text(text) = &mut file.content {
+                let interpolated = interpolate_secrets(text, secrets)?;
+                file.content = FileContent::Text(interpolated.into_owned());
+            }
+        }
+    }
+
+    for key in root.ssh_keys.iter_mut() {
+        let interpolated = interpolate_secrets(key, secrets)?;
+        *key = interpolated.into_owned();
     }
 
     Ok(root)
@@ -182,26 +267,52 @@ pub(crate) fn load_secrets_dir(dir_path: &str) -> Result<HashMap<String, String>
             let sec_file = File::open(&path)?;
             let parsed: Value = serde_json::from_reader(BufReader::new(sec_file))?;
 
-            if let Value::Object(obj) = parsed {
-                let mut id_path = Vec::new();
+            let Value::Object(obj) = parsed else {
+                return Err(ConfigError::Validation(format!(
+                    "Secret file '{}' must contain a JSON object at the top level",
+                    path.display()
+                )));
+            };
 
-                for (k, v) in obj {
-                    if k == "sops" {
-                        continue;
-                    }
-
-                    if let Err(old_key) = insert_secrets(&mut secrets, &mut id_path, k, v) {
-                        return Err(ConfigError::Validation(format!(
-                            "Secret key '{}' conflicts with different values across files. File causing conflict: '{}'",
-                            old_key,
-                            path.display()
-                        )));
-                    }
+            for (k, v) in obj {
+                if k == "sops" {
+                    continue;
+                }
+                if let Err(conflict) = insert_secrets(&mut secrets, &mut Vec::new(), k, v) {
+                    return Err(ConfigError::Validation(format!(
+                        "Secret key '{}' conflicts with different values across files. File causing conflict: '{}'",
+                        conflict,
+                        path.display()
+                    )));
                 }
             }
         }
     }
     Ok(secrets)
+}
+
+/// Merge `incoming` into `existing`: identical values merge, conflicting values error.
+///
+/// A bare `HashMap::extend` would silently overwrite the SOPS value with the
+/// directory value. The error names the conflicting key, never the plaintext.
+pub(crate) fn merge_secrets(
+    existing: &mut HashMap<String, String>,
+    incoming: HashMap<String, String>,
+) -> Result<(), ConfigError> {
+    for (k, v) in incoming {
+        if let Some(prev) = existing.get(&k) {
+            if prev != &v {
+                return Err(ConfigError::Validation(format!(
+                    "Secret key '{k}' conflicts with a different value loaded from another \
+                     secret source; secret values must be consistent across SOPS and the \
+                     secrets directory"
+                )));
+            }
+        } else {
+            existing.insert(k, v);
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn decrypt_sops_mem(root: &Root) -> Result<HashMap<String, String>, ConfigError> {
@@ -224,23 +335,34 @@ pub(crate) fn decrypt_sops_mem(root: &Root) -> Result<HashMap<String, String>, C
             .map_err(|e| ConfigError::Sops(format!("Failed to run sops: {e}")))?;
 
         if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             return Err(ConfigError::Sops(format!(
-                "Failed to decrypt sops file: {file}"
+                "Failed to decrypt sops file: {file}{}",
+                if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {stderr}")
+                }
             )));
         }
 
         let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
             .map_err(|e| ConfigError::Sops(format!("Failed to parse decrypted JSON: {e}")))?;
 
-        if let Value::Object(obj) = parsed {
-            let mut id_path = Vec::new();
+        let Value::Object(obj) = parsed else {
+            return Err(ConfigError::Sops(format!(
+                "SOPS file '{file}' must contain a JSON object at the top level"
+            )));
+        };
 
-            for (k, v) in obj {
-                if k == "sops" {
-                    continue;
-                }
-
-                let _ = insert_secrets(&mut secrets, &mut id_path, k, v);
+        for (k, v) in obj {
+            if k == "sops" {
+                continue;
+            }
+            if let Err(conflict) = insert_secrets(&mut secrets, &mut Vec::new(), k, v) {
+                return Err(ConfigError::Sops(format!(
+                    "Secret key '{conflict}' conflicts with different values across SOPS files. File causing conflict: '{file}'"
+                )));
             }
         }
     }
@@ -250,10 +372,32 @@ pub(crate) fn decrypt_sops_mem(root: &Root) -> Result<HashMap<String, String>, C
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::models::{PackageSources, Section, SectionData};
+    use crate::config::models::{PackageSources, Section, SectionData, SopsConfig, SopsFiles};
     use indexmap::IndexMap;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn secret_map_debug_redacts_values() {
+        // Plaintext secret material must never reach a log.
+        let mut m = std::collections::HashMap::new();
+        m.insert("root_password".to_string(), "PLAINTEXT_PW".to_string());
+        m.insert("wifi_pass".to_string(), "PLAINTEXT_WIFI".to_string());
+        let sm = SecretMap::new(m);
+
+        let dbg = format!("{sm:?}");
+        assert!(!dbg.contains("PLAINTEXT_PW"), "secret leaked: {dbg}");
+        assert!(!dbg.contains("PLAINTEXT_WIFI"), "secret leaked: {dbg}");
+        // Identifiers are safe and useful for debugging.
+        assert!(dbg.contains("root_password"), "got: {dbg}");
+        assert!(dbg.contains("count: 2"), "got: {dbg}");
+        // The only way to read a value is an explicit get().
+        assert_eq!(sm.get("root_password"), Some("PLAINTEXT_PW"));
+        assert_eq!(sm.get("missing"), None);
+        assert!(sm.contains_key("wifi_pass"));
+        assert!(!sm.is_empty());
+        assert_eq!(sm.len(), 2);
+    }
 
     fn secrets(map: &[(&str, &str)]) -> HashMap<String, String> {
         map.iter()
@@ -426,10 +570,11 @@ mod tests {
     }
 
     #[test]
-    fn resolve_secrets_feeds() {
+    fn resolve_secrets_opkg_feeds() {
         let root = Root {
             package_sources: Some(PackageSources {
-                feeds: Some(vec!["src/gz @repo_name@ https://example.com".into()]),
+                opkg_feeds: Some(vec!["src/gz @repo_name@ https://example.com".into()]),
+                apk_repositories: None,
                 local_packages: None,
             }),
             ..root(IndexMap::new())
@@ -437,8 +582,92 @@ mod tests {
 
         let secs = secrets(&[("repo_name", "custom")]);
         let resolved = resolve_secrets(root, &secs).unwrap();
-        let feeds = resolved.package_sources.unwrap().feeds.unwrap();
+        let feeds = resolved.package_sources.unwrap().opkg_feeds.unwrap();
         assert_eq!(feeds[0], "src/gz custom https://example.com");
+    }
+
+    #[test]
+    fn resolve_secrets_apk_repositories() {
+        let root = Root {
+            package_sources: Some(PackageSources {
+                opkg_feeds: None,
+                apk_repositories: Some(vec!["https://@repo_host@/packages".into()]),
+                local_packages: None,
+            }),
+            ..root(IndexMap::new())
+        };
+
+        let secs = secrets(&[("repo_host", "downloads.openwrt.org")]);
+        let resolved = resolve_secrets(root, &secs).unwrap();
+        let repos = resolved.package_sources.unwrap().apk_repositories.unwrap();
+        assert_eq!(repos[0], "https://downloads.openwrt.org/packages");
+    }
+
+    #[test]
+    fn resolve_secrets_raw_uci() {
+        let root = Root {
+            raw_uci: Some(vec!["uci set network.wan.username='@wan_user@'".into()]),
+            ..root(IndexMap::new())
+        };
+        let secs = secrets(&[("wan_user", "alice")]);
+        let resolved = resolve_secrets(root, &secs).unwrap();
+        assert_eq!(
+            resolved.raw_uci.unwrap()[0],
+            "uci set network.wan.username='alice'"
+        );
+    }
+
+    #[test]
+    fn resolve_secrets_file_text_content() {
+        let root = Root {
+            files: Some(vec![crate::config::models::File {
+                path: "/etc/app/conf".into(),
+                content: FileContent::Text("token=@api_token@".into()),
+                executable: false,
+                checksum: None,
+            }]),
+            ..root(IndexMap::new())
+        };
+        let secs = secrets(&[("api_token", "s3cr3t")]);
+        let resolved = resolve_secrets(root, &secs).unwrap();
+        match &resolved.files.unwrap()[0].content {
+            FileContent::Text(s) => assert_eq!(s, "token=s3cr3t"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_secrets_file_base64_not_interpolated() {
+        // Base64 must not be interpolated — substitution would corrupt the encoded bytes.
+        let root = Root {
+            files: Some(vec![crate::config::models::File {
+                path: "/usr/bin/blob".into(),
+                content: FileContent::Base64("QG5vdF9hX3NlY3JldEA=".into()),
+                executable: true,
+                checksum: None,
+            }]),
+            ..root(IndexMap::new())
+        };
+        let secs = secrets(&[("not_a_secret", "leaked")]);
+        let resolved = resolve_secrets(root, &secs).unwrap();
+        match &resolved.files.unwrap()[0].content {
+            FileContent::Base64(b64) => assert_eq!(b64, "QG5vdF9hX3NlY3JldEA="),
+            other => panic!("expected Base64, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_secrets_ssh_keys() {
+        let root = Root {
+            ssh_keys: vec!["ssh-ed25519 @pubkey@ user@host".into()],
+            ..root(IndexMap::new())
+        };
+        let secs = secrets(&[("pubkey", "AAAAC3NzaC1lZDI1NTE5AAAAIExample")]);
+        let resolved = resolve_secrets(root, &secs).unwrap();
+        assert_eq!(
+            resolved.ssh_keys[0],
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample user@host"
+        );
     }
 
     #[test]
@@ -503,6 +732,246 @@ mod tests {
     }
 
     #[test]
+    fn load_secrets_same_key_same_value_ok() {
+        // Same key with identical value across files is an idempotent merge, not a
+        // conflict: must succeed and keep the value.
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("a.json"), r#"{"key": "same_val"}"#).unwrap();
+        fs::write(dir.path().join("b.json"), r#"{"key": "same_val"}"#).unwrap();
+        let result = load_secrets_dir(dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(result["key"], "same_val");
+    }
+
+    #[test]
+    fn load_secrets_nested_conflict_errors() {
+        // Nested objects: db.password differs across files -> fully-qualified id
+        // 'db.password' must conflict and surface in the error.
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("a.json"),
+            r#"{"db": {"password": "secret_a"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("b.json"),
+            r#"{"db": {"password": "secret_b"}}"#,
+        )
+        .unwrap();
+        let err = load_secrets_dir(dir.path().to_str().unwrap()).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("conflicts"), "expected conflict, got: {msg}");
+        assert!(
+            msg.contains("db.password"),
+            "expected qualified id, got: {msg}"
+        );
+        // Secret plaintext must never leak into the error.
+        assert!(!msg.contains("secret_a"), "plaintext leaked: {msg}");
+        assert!(!msg.contains("secret_b"), "plaintext leaked: {msg}");
+    }
+
+    // The conflict-detection logic lives in insert_secrets and is shared by both
+    // load_secrets_dir and decrypt_sops_mem. These tests pin its semantics without
+    // requiring the sops/age binaries (which may be absent in CI).
+
+    #[test]
+    fn insert_secrets_same_key_same_value_ok() {
+        // Same id with identical value across files -> no conflict (idempotent merge).
+        let mut secrets = HashMap::new();
+        let mut id_path = Vec::new();
+        insert_secrets(
+            &mut secrets,
+            &mut id_path,
+            "key".into(),
+            Value::String("v".into()),
+        )
+        .unwrap();
+        insert_secrets(
+            &mut secrets,
+            &mut id_path,
+            "key".into(),
+            Value::String("v".into()),
+        )
+        .unwrap();
+        assert_eq!(secrets["key"], "v");
+    }
+
+    #[test]
+    fn insert_secrets_same_key_different_value_errors() {
+        let mut secrets = HashMap::new();
+        let mut id_path = Vec::new();
+        insert_secrets(
+            &mut secrets,
+            &mut id_path,
+            "key".into(),
+            Value::String("a".into()),
+        )
+        .unwrap();
+        let err = insert_secrets(
+            &mut secrets,
+            &mut id_path,
+            "key".into(),
+            Value::String("b".into()),
+        )
+        .unwrap_err();
+        assert_eq!(err, "key");
+        // Secret plaintext must never appear in the returned id.
+        assert!(!err.contains('a'));
+        assert!(!err.contains('b'));
+    }
+
+    #[test]
+    fn insert_secrets_nested_conflict_errors() {
+        // Two files both define db.password with different values, nested under
+        // different top-level objects -> the fully-qualified id must conflict.
+        let mut secrets = HashMap::new();
+        let mut id_path = Vec::new();
+        insert_secrets(
+            &mut secrets,
+            &mut id_path,
+            "db".into(),
+            serde_json::json!({ "password": "secret_a" }),
+        )
+        .unwrap();
+        let err = insert_secrets(
+            &mut secrets,
+            &mut id_path,
+            "db".into(),
+            serde_json::json!({ "password": "secret_b" }),
+        )
+        .unwrap_err();
+        assert_eq!(err, "db.password");
+        assert!(!err.contains("secret_a"));
+        assert!(!err.contains("secret_b"));
+    }
+
+    #[test]
+    fn insert_secrets_nested_same_value_ok() {
+        let mut secrets = HashMap::new();
+        let mut id_path = Vec::new();
+        insert_secrets(
+            &mut secrets,
+            &mut id_path,
+            "db".into(),
+            serde_json::json!({ "password": "same" }),
+        )
+        .unwrap();
+        insert_secrets(
+            &mut secrets,
+            &mut id_path,
+            "db".into(),
+            serde_json::json!({ "password": "same" }),
+        )
+        .unwrap();
+        assert_eq!(secrets["db.password"], "same");
+    }
+    #[test]
+    fn decrypt_sops_mem_conflict_errors() {
+        use std::process::Command;
+
+        if Command::new("sops").arg("--version").output().is_err()
+            || Command::new("age-keygen").arg("--help").output().is_err()
+        {
+            eprintln!("skipping decrypt_sops_mem_conflict_errors: sops/age not available");
+            return;
+        }
+
+        let key_home = TempDir::new().unwrap();
+        let key_file = key_home.path().join("keys.txt");
+        let keygen = Command::new("age-keygen")
+            .args(["-o", key_file.to_str().unwrap()])
+            .output()
+            .expect("age-keygen");
+        let pub_key = String::from_utf8_lossy(&keygen.stderr)
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("Public key:"))
+            .expect("age public key")
+            .trim()
+            .to_string();
+
+        let dir = TempDir::new().unwrap();
+
+        // Encrypt two files that share a key but disagree on the value.
+        let plain_a = dir.path().join("a.json");
+        fs::write(&plain_a, r#"{"key": "val_a"}"#).unwrap();
+        let enc_a = dir.path().join("a.enc.json");
+        // `--config /dev/null` isolates the encryption from any repo-local
+        // .sops.yaml, whose creation_rules do not match these temp paths.
+        let out = Command::new("sops")
+            .env("SOPS_AGE_KEY_FILE", key_file.to_str().unwrap())
+            .args([
+                "--config",
+                "/dev/null",
+                "--encrypt",
+                "--age",
+                &pub_key,
+                "--output",
+                enc_a.to_str().unwrap(),
+                plain_a.to_str().unwrap(),
+            ])
+            .output()
+            .expect("sops encrypt a");
+        assert!(
+            out.status.success(),
+            "sops encrypt a failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let plain_b = dir.path().join("b.json");
+        fs::write(&plain_b, r#"{"key": "val_b"}"#).unwrap();
+        let enc_b = dir.path().join("b.enc.json");
+        let out = Command::new("sops")
+            .env("SOPS_AGE_KEY_FILE", key_file.to_str().unwrap())
+            .args([
+                "--config",
+                "/dev/null",
+                "--encrypt",
+                "--age",
+                &pub_key,
+                "--output",
+                enc_b.to_str().unwrap(),
+                plain_b.to_str().unwrap(),
+            ])
+            .output()
+            .expect("sops encrypt b");
+        assert!(
+            out.status.success(),
+            "sops encrypt b failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        // The decryption child process inherits this to locate the age key.
+        unsafe {
+            std::env::set_var("SOPS_AGE_KEY_FILE", key_file.to_str().unwrap());
+        }
+
+        let root = Root {
+            secrets: Some(SopsConfig {
+                sops: Some(SopsFiles {
+                    files: vec![
+                        enc_a.to_str().unwrap().to_string(),
+                        enc_b.to_str().unwrap().to_string(),
+                    ],
+                }),
+            }),
+            ..root(IndexMap::new())
+        };
+
+        let err = decrypt_sops_mem(&root).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("conflicts"),
+            "expected conflict error, got: {msg}"
+        );
+        assert!(
+            msg.contains("key"),
+            "expected key name in error, got: {msg}"
+        );
+        // Ensure secret plaintext never leaks into the error.
+        assert!(!msg.contains("val_a"), "plaintext leaked: {msg}");
+        assert!(!msg.contains("val_b"), "plaintext leaked: {msg}");
+    }
+
+    #[test]
     fn load_secrets_skips_non_json() {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("notes.txt"), "not json").unwrap();
@@ -554,6 +1023,45 @@ mod tests {
         assert_eq!(s.as_ref(), "my@unclosed");
 
         let err = interpolate_secrets("has@in@middle@here", &HashMap::new()).unwrap_err();
-        assert!(format!("{err}").contains("in"));
+        let msg = format!("{err}");
+        // The error must name the referenced secret and explain it is missing —
+        // not a vague substring match that could pass on any message containing "in".
+        assert!(
+            msg.contains("Tried to use secret in, but no secret with this name specified."),
+            "expected missing-secret error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn merge_secrets_same_value_is_idempotent() {
+        let mut existing = HashMap::from([("wifi_pass".to_string(), "s3cr3t".to_string())]);
+        let incoming = HashMap::from([("wifi_pass".to_string(), "s3cr3t".to_string())]);
+        merge_secrets(&mut existing, incoming).unwrap();
+        assert_eq!(existing["wifi_pass"], "s3cr3t");
+    }
+
+    #[test]
+    fn merge_secrets_new_key_added() {
+        let mut existing = HashMap::from([("a".to_string(), "1".to_string())]);
+        let incoming = HashMap::from([("b".to_string(), "2".to_string())]);
+        merge_secrets(&mut existing, incoming).unwrap();
+        assert_eq!(existing["a"], "1");
+        assert_eq!(existing["b"], "2");
+    }
+
+    #[test]
+    fn merge_secrets_conflicting_value_errors() {
+        let mut existing = HashMap::from([("wifi_pass".to_string(), "s3cr3t".to_string())]);
+        let incoming = HashMap::from([("wifi_pass".to_string(), "other".to_string())]);
+        let err = merge_secrets(&mut existing, incoming).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("conflicts"),
+            "expected conflict error, got: {msg}"
+        );
+        assert!(msg.contains("wifi_pass"), "expected key name, got: {msg}");
+        // Plaintext values must never leak into the error message.
+        assert!(!msg.contains("'s3cr3t'"), "plaintext leaked: {msg}");
+        assert!(!msg.contains("'other'"), "plaintext leaked: {msg}");
     }
 }

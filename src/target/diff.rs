@@ -2,10 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::compile::pipeline::compile_config;
-use crate::config::models::{PackageAction, PkgBackend, Section};
+use crate::config::models::{PkgBackend, Section};
+use crate::config::package::PackageAction;
 use crate::config::uci_key::{
     anonymous_option_key, anonymous_section_key, named_option_key, named_section_key,
 };
+use crate::target::capabilities::{discover_package_manager, resolve_backend};
 use crate::target::deploy::SshExec;
 use crate::utils::error::ConfigError;
 
@@ -13,8 +15,7 @@ pub(crate) const SERVICE_SEPARATOR: &str = "===NUCI_SERVICES===";
 pub(crate) const STATE_SEPARATOR: &str = "===NUCI_STATE===";
 
 // OpenWrt procd limitation: no central inverse mapping from config to owning service exists.
-// The config_load grep heuristic is the community standard fallback; per ADR-0010 we intentionally
-// do not replace it — no official API exists to do better.
+// The config_load grep heuristic is the community standard fallback; no official API exists to do better.
 pub(crate) fn build_discovery_command(managed: &[&str]) -> String {
     format!(
         "for c in {configs}; do uci -q show \"$c\" 2>/dev/null; done; \
@@ -37,11 +38,14 @@ pub(crate) fn build_discovery_command(managed: &[&str]) -> String {
     )
 }
 
-pub(crate) fn build_state_command(packages: &[String], backend: PkgBackend) -> String {
+pub(crate) fn build_state_command(
+    packages: &[String],
+    backend: PkgBackend,
+) -> Result<String, ConfigError> {
     let quoted_probed: Vec<String> = packages
         .iter()
-        .map(|p| PackageAction::parse(p).quoted_name())
-        .collect();
+        .map(|p| PackageAction::parse(p).map(|a| a.quoted_name()))
+        .collect::<Result<_, _>>()?;
 
     let mut cmd = String::new();
     if !quoted_probed.is_empty() {
@@ -63,7 +67,7 @@ pub(crate) fn build_state_command(packages: &[String], backend: PkgBackend) -> S
          echo '{sep}'; grep '^root:' /etc/shadow 2>/dev/null | cut -d: -f2",
         sep = STATE_SEPARATOR
     ));
-    cmd
+    Ok(cmd)
 }
 
 pub(crate) fn parse_package_state(output: &str) -> BTreeMap<String, bool> {
@@ -112,8 +116,17 @@ pub(crate) fn extract_desired_map(
                     }
                 }
                 Section::List(arr) => {
-                    for (idx, item) in arr.iter().enumerate() {
+                    // Anonymous sections are indexed per-type in UCI
+                    // (`@rule[0]`, `@rule[1]`), not by global array position.
+                    // The renderer (compile/uci.rs) uses the same per-type
+                    // counter, so this must match or remote/diff key alignment
+                    // breaks.
+                    let mut type_index: std::collections::HashMap<&str, usize> =
+                        std::collections::HashMap::new();
+                    for item in arr.iter() {
                         let ty = &item.section_type;
+                        let idx = *type_index.entry(ty.as_str()).or_insert(0);
+                        *type_index.get_mut(ty.as_str()).unwrap() = idx + 1;
                         map.insert(anonymous_section_key(config_name, ty, idx), ty.clone());
                         for (opt, val) in &item.options {
                             if let Some(s) = val_str(val) {
@@ -218,7 +231,7 @@ pub fn run(
     secrets_dir: Option<&Path>,
     ssh: &dyn SshExec,
 ) -> Result<(), ConfigError> {
-    let compiled = compile_config(json_path, secrets_dir, config.no_sops)?;
+    let compiled = compile_config(json_path, secrets_dir, config.no_sops, None)?;
     let desired = extract_desired_map(&compiled.resolved_root.settings);
 
     let managed: Vec<&str> = compiled
@@ -236,6 +249,10 @@ pub fn run(
     let uci_cmd = build_discovery_command(&managed);
     eprintln!("Fetching current configuration & services from {target} (read-only)...");
     let remote_output = ssh.exec(target, &uci_cmd, None, config)?;
+    if config.verbose {
+        eprintln!("-- remote uci output --");
+        eprintln!("{remote_output}");
+    }
 
     let mut parts = remote_output.splitn(2, SERVICE_SEPARATOR);
     let uci_output = parts.next().unwrap_or("");
@@ -244,10 +261,30 @@ pub fn run(
     let remote = parse_uci_show(uci_output);
     let service_map = parse_services(services_output);
 
-    let backend = PkgBackend::from_name(&compiled.resolved_root.package_manager);
+    // Runtime capability discovery: the package manager actually on the target wins.
+    // Only probe when packages are declared; otherwise the declared field is sufficient.
+    let declared_pm = &compiled.resolved_root.package_manager;
+    let has_packages = compiled.resolved_root.packages.is_some()
+        || compiled.resolved_root.package_sources.is_some();
+    let backend = if has_packages {
+        let discovered = discover_package_manager(ssh, target, config)?;
+        match resolve_backend(declared_pm, discovered) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("Warning: {e}");
+                discovered
+            }
+        }
+    } else {
+        PkgBackend::try_from(declared_pm.as_str())?
+    };
     let packages = compiled.resolved_root.packages.clone().unwrap_or_default();
-    let state_cmd = build_state_command(&packages, backend);
+    let state_cmd = build_state_command(&packages, backend)?;
     let state_output = ssh.exec(target, &state_cmd, None, config)?;
+    if config.verbose {
+        eprintln!("-- remote state output --");
+        eprintln!("{state_output}");
+    }
     let state_blocks: Vec<&str> = state_output.split(STATE_SEPARATOR).collect();
     let pkg_state = parse_package_state(state_blocks.first().copied().unwrap_or(""));
     let remote_keys = state_blocks
@@ -318,7 +355,7 @@ pub fn run(
     {
         println!("\n\x1b[1;35m[Packages]\x1b[0m");
         for spec in packages {
-            let action = PackageAction::parse(spec);
+            let action = PackageAction::parse(spec)?;
             let name = action.name();
             let is_installed = pkg_state.get(name).copied().unwrap_or(false);
 
@@ -376,6 +413,55 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+
+    fn extract_desired_map_indexes_anonymous_sections_per_type() {
+        use crate::config::models::{Section, SectionData};
+        use indexmap::IndexMap;
+        use serde_json::Value;
+        // Heterogeneous list: rule, redirect, rule. Per-type indexing yields
+        // @rule[0], @redirect[0], @rule[1] — NOT @rule[2]. A regression to a
+        // global enumerate() misaligns with the per-type UCI show output and
+        // breaks diff/deploy key matching.
+        let mut sections = IndexMap::new();
+        sections.insert(
+            "firewall".into(),
+            Section::List(vec![
+                SectionData {
+                    section_type: "rule".into(),
+                    options: IndexMap::from([("target".into(), Value::String("ACCEPT".into()))]),
+                },
+                SectionData {
+                    section_type: "redirect".into(),
+                    options: IndexMap::from([("dest".into(), Value::String("lan".into()))]),
+                },
+                SectionData {
+                    section_type: "rule".into(),
+                    options: IndexMap::from([("target".into(), Value::String("DROP".into()))]),
+                },
+            ]),
+        );
+        let mut configs = IndexMap::new();
+        configs.insert("firewall".into(), sections);
+
+        let map = extract_desired_map(&configs);
+        assert!(map.contains_key("firewall.@rule[0]"));
+        assert!(map.contains_key("firewall.@redirect[0]"));
+        assert!(map.contains_key("firewall.@rule[1]"));
+        assert!(!map.contains_key("firewall.@rule[2]"));
+        assert_eq!(
+            map.get("firewall.@rule[0].target"),
+            Some(&"ACCEPT".to_string())
+        );
+        assert_eq!(
+            map.get("firewall.@rule[1].target"),
+            Some(&"DROP".to_string())
+        );
+        assert_eq!(
+            map.get("firewall.@redirect[0].dest"),
+            Some(&"lan".to_string())
+        );
+    }
 
     #[test]
     fn parse_uci_show_strips_quotes() {
@@ -495,7 +581,8 @@ mod tests {
 
     #[test]
     fn build_state_command_opkg_probes_packages() {
-        let cmd = build_state_command(&["luci".into(), "tcpdump".into()], PkgBackend::Opkg);
+        let cmd =
+            build_state_command(&["luci".into(), "tcpdump".into()], PkgBackend::Opkg).unwrap();
         assert!(cmd.contains("opkg status"));
         assert!(cmd.contains("luci"));
         assert!(cmd.contains(STATE_SEPARATOR));
@@ -505,13 +592,13 @@ mod tests {
 
     #[test]
     fn build_state_command_apk_probes_packages() {
-        let cmd = build_state_command(&["luci".into()], PkgBackend::Apk);
+        let cmd = build_state_command(&["luci".into()], PkgBackend::Apk).unwrap();
         assert!(cmd.contains("apk info -e"));
     }
 
     #[test]
     fn build_state_command_probes_removal_without_dash() {
-        let cmd = build_state_command(&["-wpad-basic-mbedtls".into()], PkgBackend::Opkg);
+        let cmd = build_state_command(&["-wpad-basic-mbedtls".into()], PkgBackend::Opkg).unwrap();
         assert!(cmd.contains("wpad-basic-mbedtls"));
         assert!(!cmd.contains("opkg status \"-wpad"));
         assert!(cmd.contains("for p in 'wpad-basic-mbedtls'"));

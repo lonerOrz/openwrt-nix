@@ -8,8 +8,8 @@ RUN touch /etc/config/system /etc/config/wireless /etc/config/network
 RUN mkdir -p /etc/apk/repositories.d && touch /etc/opkg/customfeeds.conf
 
 RUN if ! command -v apk >/dev/null 2>&1; then \
-      opkg update >/dev/null 2>&1 || true; \
-      opkg install apk-tools >/dev/null 2>&1 || true; \
+      opkg update >/dev/null 2>&1; \
+      opkg install apk-tools >/dev/null 2>&1; \
     fi
 
 RUN printf '#!/bin/sh\nread line; user=$(echo "$line" | cut -d: -f1); pass=$(echo "$line" | cut -d: -f2-); sha=$(openssl passwd -6 "$pass" 2>/dev/null || echo "$pass"); sed -i "s|^${user}:.*|${user}:${sha}:0:0:99999:7:::|" /etc/shadow\n' \
